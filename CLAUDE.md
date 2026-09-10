@@ -176,21 +176,25 @@ transcript อยู่ที่ราก repo (`acp-probe-*.jsonl`, gitignored)
 **คำตอบสามข้อ:**
 - **Q1 session/load** — รองรับ (`loadSession:true`) แต่ **replay ประวัติกลับมา ~12–14 เฟรม** ไม่ใช่ no-replay
   ไม่กระทบ "ledger = SoT" — เราทิ้ง replay ของ codex ทิ้ง ใช้ ledger เราต่อ แค่ต้องรู้ว่ามันจะส่งมา
-- **Q2 permission** — ⚠️ **ยังคุมไม่ได้ที่ ACP layer กับ bridge ตัวนี้** (ทดสอบ 4 แบบแล้ว)
-  ลองหมดแล้ว: `session/set_mode read-only` (ตอบ `ok {}` แต่ reload ยังเห็น `currentModeId: agent`),
-  `INITIAL_AGENT_MODE=read-only` env, `CODEX_CONFIG` sandbox_mode/approval_policy —
-  **ทุกแบบ codex ยังเขียนไฟล์เองไม่ถาม รวมถึงเขียนนอก cwd (`/tmp/outside-probe.txt`)**
-  bridge **มี** plumbing (`handleFileChange`→`session/request_permission`) แต่มัน gate อยู่หลัง:
-  (ก) ACP permission-extension capability ที่ต้อง negotiate ใน `initialize._meta` (probe ยังไม่ส่ง)
-  (ข) bridge `AgentMode` layer ที่ default `agent` = auto-approve และ override codex config ดิบ
-  `approval_policy = "untrusted"` ถูกถอดออกจาก codex 0.153 แล้ว เหลือ `on-request`/`never`
-  → **นี่คืองาน adapter Phase 2 ไม่ใช่ probe flag**: ต้อง negotiate permission-extension +
-  หาวิธี pin read-only ให้ติดจริง หรือ fallback = รัน bridge ใต้ Seatbelt ของเราเอง (sandbox ซ้อน — สิ่งที่ 7.5 อยากเลี่ยง)
+- **Q2 permission** — ✅ **คุมได้ที่ ACP layer** ถ้า pin โหมดถูก (ครั้งแรกสรุปผิดว่า ❌ เพราะทดสอบผิด —
+  ยิงแต่ write ที่ sandbox อนุญาตอยู่แล้ว)
+  โหมดของ bridge (จาก `AgentMode` ใน bundle):
+  | mode | approvalsReviewer | sandbox |
+  |---|---|---|
+  | `agent` (default) | `auto_review` — โมเดล codex อนุมัติเอง เราไม่เห็น request | workspace-write |
+  | `read-only` | **`user` — request วิ่งมาที่ `session/request_permission` ของเรา** | workspace-write |
+  | `agent-full-access` | — | danger-full-access |
+  `session/set_mode "read-only"` ทำงานจริง (`--mode read-only` ใน probe)
+  ใต้ sandbox `workspace-write`: write ใน workspace + `/tmp` ไม่ต้องขอ; **write นอกนั้น / network / คำสั่ง →
+  `on-request` → `user` → probe เราได้ `session/request_permission`** (ทดสอบ: เขียน `~/acp-outside-test.txt`
+  ในโหมด read-only → probe ปฏิเสธ → `stopReason: cancelled` ไฟล์ไม่ถูกสร้าง)
+  bridge map ตัวเลือกของ codex (`accept_execpolicy_amendment` ฯลฯ) เป็น ACP `kind` (allow_once/allow_always/reject_once) ให้แล้ว — engine เราคีย์ที่ `kind` ได้
+  **adapter Phase 2**: `session/new` แล้ว `session/set_mode read-only` ทันที; ถ้าอยากให้ทุก write ใน workspace ผ่าน engine ด้วย
+  ต้อง `sandboxMode: read-only` (ไม่ใช่ workspace-write) — bridge ไม่มี preset ต้องลองผ่าน `CODEX_CONFIG`
 - **Q3 โครงสร้าง** — ✅ ดีกว่าที่กลัว ได้ `tool_call` / `tool_call_update` แยกชัด + `agent_thought_chunk`
   แยกจาก `agent_message_chunk` + `usage_update` (token count มาด้วย) → **ไม่ต้องเขียน text parser เปราะ ๆ**
 
-**สรุปสไปก์ 1**: Q1 ✅ Q3 ✅ Q2 ❌ (ต้องแก้ที่ adapter Phase 2) · probe ได้ flag `--mode` เพิ่มแล้ว
-(ส่ง `session/set_mode` หลัง `session/new`) แต่ bridge ไม่ยอมทำตาม — เก็บ flag ไว้ใช้กับ agent เจ้าอื่น
+**สรุปสไปก์ 1**: Q1 ✅ Q2 ✅ Q3 ✅ — ผ่านครบ · probe ได้ flag `--mode` (ส่ง `session/set_mode` หลัง `session/new`) ทำงานจริง
 
 ### สไปก์ที่ 2 — handoff eval (ยังไม่เริ่ม)
 **นี่คือคำถามที่ตัดสินว่าแอปนี้มีค่าหรือเปล่า** ทำมือได้เลย ไม่ต้องมีแอป
