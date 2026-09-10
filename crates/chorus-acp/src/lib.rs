@@ -1,0 +1,427 @@
+//! A deliberately dumb ACP client: enough JSON-RPC to hold a conversation with
+//! an agent process, and no interpretation of what it says.
+//!
+//! This exists to answer three questions before we design the adapter layer on
+//! top of assumptions:
+//!
+//!   1. Does `session/load` actually give us a session back, and what comes with it?
+//!   2. How much of the permission flow do we control from the client side?
+//!   3. Do diffs and terminals arrive as structured updates, or as prose?
+//!
+//! Transport is newline-delimited JSON over the agent's stdin/stdout — one JSON
+//! object per line, no Content-Length headers.
+
+use anyhow::{anyhow, Context, Result};
+use serde_json::{json, Value};
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Every frame in both directions is appended here, verbatim. The transcript is
+/// the actual deliverable of this spike — the summary is just a reading of it.
+pub type Log = Arc<Mutex<Box<dyn Write + Send>>>;
+
+pub fn now_ms() -> u128 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()
+}
+
+fn log_frame(log: &Log, dir: &str, frame: &Value) {
+    let line = json!({ "t": now_ms(), "dir": dir, "frame": frame });
+    if let Ok(mut w) = log.lock() {
+        let _ = writeln!(w, "{line}");
+        let _ = w.flush();
+    }
+}
+
+fn log_raw(log: &Log, dir: &str, text: &str) {
+    let line = json!({ "t": now_ms(), "dir": dir, "raw": text });
+    if let Ok(mut w) = log.lock() {
+        let _ = writeln!(w, "{line}");
+        let _ = w.flush();
+    }
+}
+
+/// A spawned agent process we speak ACP to.
+pub struct Agent {
+    child: Child,
+    stdin: Arc<Mutex<ChildStdin>>,
+    rx: Receiver<Value>,
+    next_id: AtomicI64,
+    log: Log,
+    /// The last few stderr lines. When an agent dies before saying anything,
+    /// this is the only thing that explains why — so it belongs in the error,
+    /// not just in the transcript.
+    stderr_tail: Arc<Mutex<Vec<String>>>,
+}
+
+/// Anything the agent sent us that wasn't the response we were waiting for.
+pub enum Inbound {
+    /// A notification, e.g. `session/update`.
+    Notification { method: String, params: Value },
+    /// A request we are expected to answer, e.g. `session/request_permission`.
+    Request { id: Value, method: String, params: Value },
+}
+
+impl Agent {
+    pub fn spawn(cmd: &[String], log: Log) -> Result<Self> {
+        let (program, args) = cmd.split_first().ok_or_else(|| anyhow!("empty command"))?;
+        let mut child = Command::new(program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawn {cmd:?}"))?;
+
+        let stdout = child.stdout.take().expect("piped");
+        let stderr = child.stderr.take().expect("piped");
+        let stdin = child.stdin.take().expect("piped");
+        let (tx, rx) = channel();
+
+        let rlog = log.clone();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<Value>(&line) {
+                    Ok(v) => {
+                        log_frame(&rlog, "in", &v);
+                        if tx.send(v).is_err() {
+                            break;
+                        }
+                    }
+                    // An agent that prints a banner to stdout is a real thing
+                    // that happens; record it rather than dying on it.
+                    Err(_) => log_raw(&rlog, "in-unparsed", &line),
+                }
+            }
+        });
+
+        let elog = log.clone();
+        let tail: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let etail = tail.clone();
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                if let Ok(l) = line {
+                    log_raw(&elog, "stderr", &l);
+                    if let Ok(mut t) = etail.lock() {
+                        t.push(l);
+                        if t.len() > 20 {
+                            t.remove(0);
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            child,
+            stdin: Arc::new(Mutex::new(stdin)),
+            rx,
+            next_id: AtomicI64::new(1),
+            log,
+            stderr_tail: tail,
+        })
+    }
+
+    fn send(&self, v: Value) -> Result<()> {
+        log_frame(&self.log, "out", &v);
+        let line = serde_json::to_string(&v)?;
+        let mut w = self.stdin.lock().map_err(|_| anyhow!("stdin poisoned"))?;
+        // A child that already died gives us EPIPE here. Say that plainly
+        // instead of letting a raw io error surface as the whole story.
+        let mut write = || -> std::io::Result<()> {
+            w.write_all(line.as_bytes())?;
+            w.write_all(b"\n")?;
+            w.flush()
+        };
+        match write() {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                Err(anyhow!("agent ปิด stdin ไปแล้ว (process น่าจะตายก่อนหน้านี้)"))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn request(&self, method: &str, params: Value) -> Result<i64> {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))?;
+        Ok(id)
+    }
+
+    pub fn notify(&self, method: &str, params: Value) -> Result<()> {
+        self.send(json!({"jsonrpc":"2.0","method":method,"params":params}))
+    }
+
+    pub fn respond(&self, id: &Value, result: Value) -> Result<()> {
+        self.send(json!({"jsonrpc":"2.0","id":id,"result":result}))
+    }
+
+    pub fn respond_err(&self, id: &Value, code: i64, message: &str) -> Result<()> {
+        self.send(json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}}))
+    }
+
+    /// Pump frames until the response to `id` arrives, handing everything else
+    /// to `on_inbound`. Anything the agent asks us must be answered inside that
+    /// callback, or the agent will sit there waiting and we'll time out.
+    pub fn wait_for(
+        &self,
+        id: i64,
+        timeout: Duration,
+        on_inbound: &mut dyn FnMut(&Agent, Inbound),
+    ) -> Result<Value> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(anyhow!("timed out waiting for response to request {id}"));
+            }
+            let v = match self.rx.recv_timeout(left) {
+                Ok(v) => v,
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(anyhow!("timed out waiting for response to request {id}"))
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(anyhow!("agent closed its output before answering request {id}"))
+                }
+            };
+
+            let has_method = v.get("method").and_then(Value::as_str).is_some();
+            match (v.get("id"), has_method) {
+                // Response to us.
+                (Some(rid), false) if rid.as_i64() == Some(id) => {
+                    if let Some(err) = v.get("error") {
+                        return Err(anyhow!("agent returned error: {err}"));
+                    }
+                    return Ok(v.get("result").cloned().unwrap_or(Value::Null));
+                }
+                // Response to some other request of ours — shouldn't happen in
+                // this scripted probe, but don't lose it silently.
+                (Some(_), false) => log_raw(&self.log, "note", "response with unexpected id"),
+                // Request from the agent.
+                (Some(rid), true) => on_inbound(
+                    self,
+                    Inbound::Request {
+                        id: rid.clone(),
+                        method: v["method"].as_str().unwrap_or_default().to_string(),
+                        params: v.get("params").cloned().unwrap_or(Value::Null),
+                    },
+                ),
+                // Notification.
+                (None, true) => on_inbound(
+                    self,
+                    Inbound::Notification {
+                        method: v["method"].as_str().unwrap_or_default().to_string(),
+                        params: v.get("params").cloned().unwrap_or(Value::Null),
+                    },
+                ),
+                (None, false) => log_raw(&self.log, "note", "frame with neither id nor method"),
+            }
+        }
+    }
+
+    /// Drain whatever is still queued, for the window after a call returns.
+    pub fn drain(&self, quiet_for: Duration, on_inbound: &mut dyn FnMut(&Agent, Inbound)) {
+        while let Ok(v) = self.rx.recv_timeout(quiet_for) {
+            let has_method = v.get("method").and_then(Value::as_str).is_some();
+            if !has_method {
+                continue;
+            }
+            let method = v["method"].as_str().unwrap_or_default().to_string();
+            let params = v.get("params").cloned().unwrap_or(Value::Null);
+            match v.get("id") {
+                Some(id) => on_inbound(self, Inbound::Request { id: id.clone(), method, params }),
+                None => on_inbound(self, Inbound::Notification { method, params }),
+            }
+        }
+    }
+
+    /// What the agent printed to stderr, most recent last.
+    pub fn stderr_tail(&self) -> Vec<String> {
+        self.stderr_tail.lock().map(|t| t.clone()).unwrap_or_default()
+    }
+
+    /// `Some(status)` if the process has already exited.
+    pub fn exited(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().ok().flatten()
+    }
+
+    /// Why the conversation failed, in the terms a person can act on: the
+    /// process died, or it is alive but not talking.
+    pub fn diagnose(&mut self, err: &anyhow::Error) -> String {
+        let mut s = format!("{err}");
+        // Give a just-exited process a moment to be reaped.
+        for _ in 0..10 {
+            if self.exited().is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(30));
+        }
+        match self.exited() {
+            Some(st) => s.push_str(&format!("\n  process จบไปแล้ว ({st})")),
+            None => s.push_str("\n  process ยังอยู่แต่ไม่ตอบ"),
+        }
+        let tail = self.stderr_tail();
+        if tail.is_empty() {
+            s.push_str("\n  ไม่มีอะไรใน stderr เลย");
+        } else {
+            s.push_str("\n  stderr:");
+            for l in tail {
+                s.push_str(&format!("\n    {l}"));
+            }
+        }
+        s
+    }
+}
+
+impl Drop for Agent {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A fake ACP agent, so the probe can be exercised without a real CLI, an API
+/// key, or a network. It answers the methods the probe scripts and, in the
+/// middle of a prompt, asks the client for permission — which is the part of the
+/// client most likely to deadlock if we got it wrong.
+pub mod mock {
+    use anyhow::Result;
+    use serde_json::{json, Value};
+    use std::io::{BufRead, Write};
+
+
+fn send(v: Value) -> Result<()> {
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "{}", serde_json::to_string(&v)?)?;
+    out.flush()?;
+    Ok(())
+}
+
+fn update(session: &str, update: Value) -> Result<()> {
+    send(json!({
+        "jsonrpc":"2.0",
+        "method":"session/update",
+        "params": { "sessionId": session, "update": update }
+    }))
+}
+
+pub fn serve() -> Result<()> {
+    let stdin = std::io::stdin();
+    let mut lines = stdin.lock().lines();
+    let session = "mock-session-1";
+    let mut next_out_id = 1000;
+
+    while let Some(Ok(line)) = lines.next() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let msg: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let id = msg.get("id").cloned();
+        let method = msg.get("method").and_then(Value::as_str).unwrap_or("").to_string();
+
+        match method.as_str() {
+            "initialize" => send(json!({"jsonrpc":"2.0","id":id,"result":{
+                "protocolVersion": 1,
+                "agentCapabilities": {
+                    "loadSession": true,
+                    "promptCapabilities": {"image": false, "audio": false, "embeddedContext": true}
+                },
+                "agentInfo": {"name":"mock-agent","version":"0.1.0"},
+                "authMethods": []
+            }}))?,
+
+            "session/new" => send(json!({"jsonrpc":"2.0","id":id,"result":{
+                "sessionId": session,
+                "modes": {"currentModeId":"default","availableModes":[{"id":"default","name":"Default"}]}
+            }}))?,
+
+            "session/prompt" => {
+                update(session, json!({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type":"text","text":"กำลังดูไฟล์ให้ครับ"}
+                }))?;
+                update(session, json!({
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "t1",
+                    "title": "Read README.md",
+                    "kind": "read",
+                    "status": "pending"
+                }))?;
+
+                // Ask the client for permission and block until it answers.
+                let req_id = next_out_id;
+                next_out_id += 1;
+                send(json!({
+                    "jsonrpc":"2.0","id":req_id,"method":"session/request_permission",
+                    "params": {
+                        "sessionId": session,
+                        "toolCall": {"toolCallId":"t1","title":"Read README.md","kind":"read"},
+                        "options": [
+                            {"optionId":"allow-once","name":"Allow once","kind":"allow_once"},
+                            {"optionId":"allow-always","name":"Always allow","kind":"allow_always"},
+                            {"optionId":"reject-once","name":"Reject","kind":"reject_once"}
+                        ]
+                    }
+                }))?;
+
+                let mut chosen = String::from("<none>");
+                for l in lines.by_ref() {
+                    let Ok(l) = l else { break };
+                    let Ok(v) = serde_json::from_str::<Value>(&l) else { continue };
+                    if v.get("id").and_then(Value::as_i64) == Some(req_id) {
+                        chosen = v["result"]["outcome"]["optionId"]
+                            .as_str()
+                            .unwrap_or("<cancelled>")
+                            .to_string();
+                        break;
+                    }
+                }
+
+                update(session, json!({
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "t1",
+                    "status": if chosen.starts_with("allow") { "completed" } else { "failed" },
+                    "content": [{"type":"diff","path":"/tmp/mock/README.md","oldText":"# old","newText":"# new"}]
+                }))?;
+                update(session, json!({
+                    "sessionUpdate": "plan",
+                    "entries": [{"content":"อ่านไฟล์","priority":"high","status":"completed"}]
+                }))?;
+
+                send(json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}))?;
+            }
+
+            "session/load" => {
+                // Replay history, then answer. This is exactly the behaviour the
+                // probe is trying to detect in a real agent.
+                update(session, json!({
+                    "sessionUpdate": "user_message_chunk",
+                    "content": {"type":"text","text":"(replay) คำถามเดิม"}
+                }))?;
+                update(session, json!({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type":"text","text":"(replay) คำตอบเดิม"}
+                }))?;
+                send(json!({"jsonrpc":"2.0","id":id,"result":{}}))?;
+            }
+
+            _ if id.is_some() => send(json!({"jsonrpc":"2.0","id":id,
+                "error":{"code":-32601,"message":"mock agent: no such method"}}))?,
+
+            _ => {}
+        }
+    }
+    Ok(())
+}
+}

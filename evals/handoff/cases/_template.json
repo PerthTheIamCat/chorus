@@ -1,0 +1,22 @@
+{
+  "id": "00-template",
+  "task": "อธิบายงานสั้น ๆ",
+  "from": "claude-opus",
+  "to": "codex",
+  "brief": {
+    "goal": "",
+    "done": [],
+    "pending": [],
+    "constraints": [],
+    "files": [],
+    "diff": ""
+  },
+  "result": {
+    "understood_goal": 0,
+    "no_repeat_work": 0,
+    "respected_constraints": 0,
+    "proceeded_unaided": 0,
+    "output_usable": 0
+  },
+  "failure_note": ""
+}

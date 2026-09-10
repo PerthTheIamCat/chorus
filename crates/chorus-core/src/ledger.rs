@@ -1,0 +1,167 @@
+//! The event ledger: an append-only DAG of events per session.
+//!
+//! Sessions form a fork tree via `session.forked_from`/`fork_at_seq`:
+//! forking never copies history. A forked session's own `event` table is
+//! empty; reading its history means walking `session.forked_from` back to
+//! find the parent's events up to `fork_at_seq`, then this session's own
+//! events on top. (`tail`/`search` here operate on a single session's own
+//! events — a full history walk across the fork chain is a caller-side
+//! concern layered on top of these primitives.)
+
+use crate::types::INLINE_MAX_BYTES;
+use crate::{ChorusError, BlobId, Event, EventKind, NewEvent, Result};
+use rusqlite::{Connection, OptionalExtension, Row};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn row_to_event(row: &Row) -> rusqlite::Result<Event> {
+    let kind_raw: i64 = row.get("kind")?;
+    let blob_raw: Option<String> = row.get("blob")?;
+    Ok(Event {
+        seq: row.get("seq")?,
+        t: row.get("t")?,
+        sess: row.get("sess")?,
+        parent: row.get("parent")?,
+        kind: EventKind::from_i64(kind_raw).unwrap_or(EventKind::Msg),
+        actor: row.get("actor")?,
+        body: row.get("body")?,
+        blob: blob_raw.map(BlobId),
+        tok_in: row.get("tok_in")?,
+        tok_out: row.get("tok_out")?,
+        cost_usd: row.get("cost_usd")?,
+    })
+}
+
+/// Create a new session, recording `started_ms` as now.
+pub fn new_session(c: &Connection, title: &str, cwd: &str) -> Result<i64> {
+    c.execute(
+        "INSERT INTO session(title, cwd, started_ms, forked_from, fork_at_seq)
+         VALUES (?1, ?2, ?3, NULL, NULL)",
+        (title, cwd, now_ms()),
+    )?;
+    Ok(c.last_insert_rowid())
+}
+
+/// Append an event. `body` is routed inline when small, or to the blob
+/// store (content-addressed, deduplicated) when it's `>= INLINE_MAX_BYTES`.
+/// Returns the new `seq`.
+pub fn append(c: &Connection, e: &NewEvent) -> Result<i64> {
+    let started_ms: i64 = c
+        .query_row("SELECT started_ms FROM session WHERE id = ?1", [e.sess], |r| r.get(0))
+        .optional()?
+        .ok_or_else(|| ChorusError::Invalid(format!("no session {}", e.sess)))?;
+    let t = now_ms() - started_ms;
+
+    let (body_col, blob_col): (Option<&str>, Option<String>) = if e.body.len() < INLINE_MAX_BYTES {
+        (Some(e.body.as_str()), None)
+    } else {
+        let id = crate::blob::put(c, e.body.as_bytes())?;
+        (None, Some(id.0))
+    };
+
+    c.execute(
+        "INSERT INTO event(t, sess, parent, kind, actor, body, blob, tok_in, tok_out, cost_usd)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        rusqlite::params![
+            t,
+            e.sess,
+            e.parent,
+            e.kind.as_i64(),
+            e.actor,
+            body_col,
+            blob_col,
+            e.tok_in,
+            e.tok_out,
+            e.cost_usd,
+        ],
+    )?;
+
+    Ok(c.last_insert_rowid())
+}
+
+/// Fetch a single event by its `seq`.
+pub fn get(c: &Connection, seq: i64) -> Result<Event> {
+    c.query_row(
+        "SELECT seq, t, sess, parent, kind, actor, body, blob, tok_in, tok_out, cost_usd
+         FROM event WHERE seq = ?1",
+        [seq],
+        row_to_event,
+    )
+    .optional()?
+    .ok_or(ChorusError::EventMissing(seq))
+}
+
+/// The event's body text, whether stored inline or in the blob store.
+pub fn body(c: &Connection, e: &Event) -> Result<String> {
+    if let Some(b) = &e.body {
+        return Ok(b.clone());
+    }
+    if let Some(id) = &e.blob {
+        return crate::blob::get_text(c, id);
+    }
+    Ok(String::new())
+}
+
+/// The last `n` events of a session, in chronological (ascending `seq`) order.
+pub fn tail(c: &Connection, sess: i64, n: usize) -> Result<Vec<Event>> {
+    let mut stmt = c.prepare(
+        "SELECT seq, t, sess, parent, kind, actor, body, blob, tok_in, tok_out, cost_usd
+         FROM event WHERE sess = ?1 ORDER BY seq DESC LIMIT ?2",
+    )?;
+    let mut rows: Vec<Event> = stmt
+        .query_map(rusqlite::params![sess, n as i64], row_to_event)?
+        .collect::<rusqlite::Result<_>>()?;
+    rows.reverse();
+    Ok(rows)
+}
+
+/// Fork a session at `at_seq`: creates a new session row pointing at the
+/// parent via `forked_from`/`fork_at_seq`. Copies **no** events — readers
+/// walk the parent chain (see module docs) to reconstruct history before
+/// the fork point.
+pub fn fork(c: &Connection, sess: i64, at_seq: i64, title: &str) -> Result<i64> {
+    let cwd: String = c.query_row("SELECT cwd FROM session WHERE id = ?1", [sess], |r| r.get(0))?;
+    c.execute(
+        "INSERT INTO session(title, cwd, started_ms, forked_from, fork_at_seq)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        (title, cwd, now_ms(), sess, at_seq),
+    )?;
+    Ok(c.last_insert_rowid())
+}
+
+/// Full-text search over event bodies. Uses the `ev_fts` FTS5 index when
+/// available, and falls back to a `LIKE` scan otherwise (e.g. this sqlite
+/// build lacks FTS5).
+pub fn search(c: &Connection, q: &str, limit: usize) -> Result<Vec<Event>> {
+    let fts_sql = "SELECT e.seq, e.t, e.sess, e.parent, e.kind, e.actor, e.body, e.blob, e.tok_in, e.tok_out, e.cost_usd
+         FROM ev_fts JOIN event e ON e.seq = ev_fts.rowid
+         WHERE ev_fts MATCH ?1 ORDER BY e.seq DESC LIMIT ?2";
+
+    let fts_attempt = c.prepare(fts_sql).and_then(|mut stmt| {
+        stmt.query_map(rusqlite::params![q, limit as i64], row_to_event)?
+            .collect::<rusqlite::Result<Vec<Event>>>()
+    });
+
+    match fts_attempt {
+        Ok(rows) => Ok(rows),
+        Err(_) => {
+            // FTS5 table missing (or the query wasn't valid FTS5 syntax) —
+            // fall back to a plain substring scan.
+            let like = format!("%{q}%");
+            let mut stmt = c.prepare(
+                "SELECT seq, t, sess, parent, kind, actor, body, blob, tok_in, tok_out, cost_usd
+                 FROM event WHERE body LIKE ?1 ORDER BY seq DESC LIMIT ?2",
+            )?;
+            let rows = stmt
+                .query_map(rusqlite::params![like, limit as i64], row_to_event)?
+                .collect::<rusqlite::Result<Vec<Event>>>()?;
+            Ok(rows)
+        }
+    }
+}

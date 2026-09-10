@@ -1,0 +1,14 @@
+[package]
+name = "chorus-acp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "acp-probe"
+path = "src/bin/acp_probe.rs"
+
+[dependencies]
+serde_json.workspace = true
+anyhow.workspace = true

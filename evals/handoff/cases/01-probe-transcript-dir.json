@@ -1,0 +1,42 @@
+{
+  "id": "01-probe-transcript-dir",
+  "task": "acp-probe เขียน transcript ลง repo root ให้ย้ายไป <cwd>/.chorus-probe/ แทน (คง --out ที่ระบุเองไว้)",
+  "from": "claude-sonnet-5 (chat)",
+  "to": "codex gpt-5.6-luna (via @agentclientprotocol/codex-acp, ไม่เห็น context อื่นเลย)",
+  "run": {
+    "date": "2026-09-11",
+    "method": "throwaway repo copy /tmp/chorus-handoff-01, brief เป็น prompt เดียว, --allow",
+    "transcript": "/tmp/chorus-handoff-01 acp-probe-1789060572079.jsonl",
+    "diff": "crates/chorus-acp/src/bin/acp_probe.rs +13 -3, 1 ไฟล์"
+  },
+  "brief": {
+    "goal": "default transcript ไป <cwd>/.chorus-probe/acp-probe-<ms>.jsonl, --out ที่ระบุเองต้องไม่ถูกยัด subdir, cargo test ผ่าน",
+    "done": ["ยังไม่เริ่ม tree สะอาด"],
+    "pending": [
+      "แก้ default out path ใน parse_args() ให้ resolve หลังรู้ cwd",
+      "track ว่า --out ถูกระบุเองไหม",
+      "create_dir_all ก่อน File::create",
+      "อัปเดต doc comment"
+    ],
+    "constraints": [
+      "แตะแค่ acp_probe.rs",
+      "ห้ามเพิ่ม dependency",
+      "คงสไตล์โค้ดเดิม (บรรทัดกว้าง) ห้าม cargo fmt ทั้ง crate",
+      "cargo test 22 ผ่าน",
+      "ห้ามแก้ .gitignore"
+    ],
+    "files": [
+      "crates/chorus-acp/src/bin/acp_probe.rs:73 — ที่สร้าง default out",
+      "crates/chorus-acp/src/bin/acp_probe.rs:~125 — File::create(&opts.out)"
+    ],
+    "diff": ""
+  },
+  "result": {
+    "understood_goal": 2,
+    "no_repeat_work": 2,
+    "respected_constraints": 2,
+    "proceeded_unaided": 2,
+    "output_usable": 2
+  },
+  "failure_note": "ไม่ตก แต่ brief นี้ละเอียดมาก (ชี้บรรทัด, บอก root cause 'out ถูก timestamp ก่อนรู้ cwd', ให้คำสั่ง acceptance). Codex echo-back 3 บรรทัดตรงเป๊ะแล้วลุยจบรอบเดียว รัน test + acceptance เอง. เคสนี้พิสูจน์แค่ว่า brief ที่สเปกครบ = ส่งต่อได้ 100% ยังไม่ทดสอบว่า brief บางลงได้แค่ไหนก่อนพัง — นั่นคือสิ่งที่ 9 เคสที่เหลือต้องจับ (งานจริง, brief ที่เขียนตอนเหนื่อย, มี diff กลางคัน)"
+}

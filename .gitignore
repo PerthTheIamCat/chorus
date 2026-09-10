@@ -1,0 +1,86 @@
+# ── Rust ──────────────────────────────────────────────
+/target
+**/*.rs.bk
+*.pdb
+# Cargo.lock IS tracked — this is a workspace with binaries
+
+# ── macOS ─────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# ── Xcode / SwiftUI shell (Phase 1) ───────────────────
+xcuserdata/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+DerivedData/
+*.swiftpm/xcode/
+.swiftpm/
+build/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# ── SwiftPM ───────────────────────────────────────────
+.build/
+Package.resolved
+
+# ── Python (evals/handoff) ────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# ── Chorus runtime artifacts ──────────────────────────
+# shadow checkpoint repo — never commit (CLAUDE.md §7.3)
+.chorus/
+# acp-probe transcripts (default output dir)
+.chorus-probe/
+# SQLite ledger / blob store + WAL sidecars
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+# ACP probe frame dumps (written to cwd)
+/acp-probe-*.jsonl
+acp-*.jsonl
+# local ACP scratch workdir
+/acp-scratch/
+
+# ── Secrets ───────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# ── Editors / tooling ─────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.serena/
+.claude/settings.local.json
+
+# ── Misc ──────────────────────────────────────────────
+*.log
+_to_delete/
+
+# saved-page cruft from artifact .html — keep .md only
+docs/ref/*_files/
