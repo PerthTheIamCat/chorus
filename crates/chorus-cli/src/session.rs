@@ -98,9 +98,10 @@ pub struct Session {
     sess: i64,
     cwd: PathBuf,
     user: i64,
-    /// The ACP agent command. Defaults to the published Codex bridge;
-    /// tests point it at the in-repo mock.
-    bridge: Vec<String>,
+    /// A forced ACP command for every agent, set by `with_bridge` (tests
+    /// point it at the in-repo mock). `None` means resolve per agent name
+    /// via `chorus_acp::codex::bridge_for`.
+    forced_bridge: Option<Vec<String>>,
     /// Shadow git repo for the workspace. `None` when `git` is unavailable
     /// or the workspace can't host one — the session still runs, handoffs
     /// just carry no auto-diff.
@@ -141,7 +142,7 @@ impl Session {
             sess,
             cwd,
             user,
-            bridge: CodexConfig::default().command,
+            forced_bridge: None,
             checkpoint,
             base_ckpt,
         })
@@ -167,16 +168,28 @@ impl Session {
             sess: session_id,
             cwd,
             user,
-            bridge: CodexConfig::default().command,
+            forced_bridge: None,
             checkpoint,
             base_ckpt,
         })
     }
 
-    /// Override the agent command (for tests, or a pinned bridge install).
+    /// Force one ACP command for every agent (tests, or a pinned install).
     pub fn with_bridge(mut self, cmd: Vec<String>) -> Self {
-        self.bridge = cmd;
+        self.forced_bridge = Some(cmd);
         self
+    }
+
+    /// The ACP command to spawn for `agent_name`: an explicit `spec` bridge
+    /// wins, then a session-wide `forced_bridge`, else the per-name default.
+    fn resolve_bridge(&self, agent_name: &str, spec: &[String]) -> Vec<String> {
+        if !spec.is_empty() {
+            spec.to_vec()
+        } else if let Some(f) = &self.forced_bridge {
+            f.clone()
+        } else {
+            chorus_acp::codex::bridge_for(agent_name)
+        }
     }
 
     pub fn session_id(&self) -> i64 {
@@ -215,7 +228,8 @@ impl Session {
             self.store.conn(),
             &NewEvent::new(self.sess, EventKind::Msg, self.user, user_text),
         )?;
-        let outcome = self.one_turn(agent_name, &prompt, policy)?;
+        let bridge = self.resolve_bridge(agent_name, &[]);
+        let outcome = self.one_turn(agent_name, &bridge, &prompt, policy)?;
         let agent_seqs = self.persist_outcome(&outcome, agent_actor, user_seq)?;
 
         Ok(TurnReport {
@@ -285,7 +299,8 @@ impl Session {
         )?;
 
         // Verify + Resume: the incoming agent's first turn is the brief.
-        let outcome = self.one_turn(to, &brief.render_markdown(), policy)?;
+        let bridge = self.resolve_bridge(to, &[]);
+        let outcome = self.one_turn(to, &bridge, &brief.render_markdown(), policy)?;
         let agent_seqs = self.persist_outcome(&outcome, to_actor, handoff_seq)?;
 
         Ok(HandoffResult {
@@ -310,61 +325,72 @@ impl Session {
         policy: Policy,
     ) -> Result<RelayReport> {
         let first = chain.first().context("relay chain is empty")?;
-        self.bridge = bridge_or_default(&first.bridge, &self.bridge);
+        let saved_bridge = self.forced_bridge.clone();
+        self.forced_bridge = Some(self.resolve_bridge(&first.name, &first.bridge));
 
         let mut handoffs = Vec::new();
 
-        match self.run_turn(&first.name, &first.provider, user_text, policy) {
-            Ok(turn) if !is_transient_stop(&turn.stop_reason) => Ok(RelayReport {
-                answered_by: first.name.clone(),
-                turn,
-                handoffs,
-            }),
-            Ok(turn) => {
-                // The agent answered but stopped short — relay from here.
-                let reason = HandoffReason::ContextExhausted;
-                if let Some(r) = self.relay_rest(
-                    &chain[1..],
-                    user_text,
-                    policy,
-                    &first.name,
-                    reason,
-                    &mut handoffs,
-                )? {
-                    return Ok(r);
-                }
-                Ok(RelayReport {
+        let result: Result<RelayReport> =
+            match self.run_turn(&first.name, &first.provider, user_text, policy) {
+                Ok(turn) if !is_transient_stop(&turn.stop_reason) => Ok(RelayReport {
                     answered_by: first.name.clone(),
                     turn,
                     handoffs,
-                })
-            }
-            Err(e) => {
-                // `{e:#}` flattens anyhow's context chain so the classifier
-                // sees the underlying "…rate limit…" message, not just the
-                // outermost "agent turn".
-                let reason = HandoffReason::from_failure(&format!("{e:#}"))
-                    .with_context(|| format!("{}: {e:#}", first.name))?;
-                match self.relay_rest(
-                    &chain[1..],
-                    user_text,
-                    policy,
-                    &first.name,
-                    reason,
-                    &mut handoffs,
-                )? {
-                    Some(r) => Ok(r),
-                    None => Err(e).context("relay chain exhausted"),
+                }),
+                Ok(turn) => {
+                    // Answered but stopped short — relay from here.
+                    let reason = HandoffReason::ContextExhausted;
+                    match self.relay_rest(
+                        &chain[1..],
+                        &saved_bridge,
+                        user_text,
+                        policy,
+                        &first.name,
+                        reason,
+                        &mut handoffs,
+                    ) {
+                        Ok(Some(r)) => Ok(r),
+                        Ok(None) => Ok(RelayReport {
+                            answered_by: first.name.clone(),
+                            turn,
+                            handoffs,
+                        }),
+                        Err(e) => Err(e),
+                    }
                 }
-            }
-        }
+                Err(e) => {
+                    // `{e:#}` flattens anyhow's context chain so the classifier
+                    // sees the underlying "…rate limit…" message.
+                    match HandoffReason::from_failure(&format!("{e:#}")) {
+                        None => Err(e).with_context(|| first.name.clone()),
+                        Some(reason) => match self.relay_rest(
+                            &chain[1..],
+                            &saved_bridge,
+                            user_text,
+                            policy,
+                            &first.name,
+                            reason,
+                            &mut handoffs,
+                        ) {
+                            Ok(Some(r)) => Ok(r),
+                            Ok(None) => Err(e).context("relay chain exhausted"),
+                            Err(e2) => Err(e2),
+                        },
+                    }
+                }
+            };
+
+        self.forced_bridge = saved_bridge;
+        result
     }
 
     /// Try each remaining link via a handoff. `Ok(Some)` on the first that
     /// answers cleanly, `Ok(None)` if the whole tail is exhausted.
+    #[allow(clippy::too_many_arguments)]
     fn relay_rest(
         &mut self,
         rest: &[AgentSpec],
+        test_bridge: &Option<Vec<String>>,
         user_text: &str,
         policy: Policy,
         from: &str,
@@ -374,7 +400,15 @@ impl Session {
         let mut from = from.to_string();
         let mut reason = reason;
         for spec in rest {
-            self.bridge = bridge_or_default(&spec.bridge, &self.bridge);
+            // Resolve independently of the previous link: an explicit spec
+            // bridge, then the session's test bridge, then the per-name one.
+            self.forced_bridge = Some(if !spec.bridge.is_empty() {
+                spec.bridge.clone()
+            } else if let Some(t) = test_bridge {
+                t.clone()
+            } else {
+                chorus_acp::codex::bridge_for(&spec.name)
+            });
             handoffs.push((from.clone(), spec.name.clone(), reason));
 
             let h = self.handoff(
@@ -486,10 +520,16 @@ impl Session {
 
     // ---- internals --------------------------------------------------
 
-    fn one_turn(&self, agent_name: &str, text: &str, policy: Policy) -> Result<TurnOutcome> {
+    fn one_turn(
+        &self,
+        agent_name: &str,
+        bridge: &[String],
+        text: &str,
+        policy: Policy,
+    ) -> Result<TurnOutcome> {
         self.project_memory(agent_name);
         let cfg = CodexConfig {
-            command: self.bridge.clone(),
+            command: bridge.to_vec(),
             ..Default::default()
         };
         let mut agent =
@@ -600,14 +640,6 @@ impl Session {
                 Ok((e, body))
             })
             .collect()
-    }
-}
-
-fn bridge_or_default(spec: &[String], default: &[String]) -> Vec<String> {
-    if spec.is_empty() {
-        default.to_vec()
-    } else {
-        spec.to_vec()
     }
 }
 

@@ -26,6 +26,21 @@ use std::time::Duration;
 /// a local checkout via `CodexConfig::command`.
 pub const DEFAULT_BRIDGE: &[&str] = &["npx", "-y", "@agentclientprotocol/codex-acp"];
 
+/// The ACP command for a given agent name. Every one of these speaks the
+/// same protocol (`Agent` + this module handle it); they differ only in
+/// which process to spawn. An unknown name falls back to the Codex bridge.
+pub fn bridge_for(agent_name: &str) -> Vec<String> {
+    let n = agent_name.to_lowercase();
+    let cmd: &[&str] = if n.contains("claude") {
+        &["npx", "-y", "@zed-industries/claude-code-acp"]
+    } else if n.contains("gemini") {
+        &["gemini", "--experimental-acp"]
+    } else {
+        DEFAULT_BRIDGE
+    };
+    cmd.iter().map(|s| s.to_string()).collect()
+}
+
 /// One decision from the caller's permission engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Permission {
@@ -54,7 +69,11 @@ pub enum AgentEvent {
     /// The resolution of a tool call.
     ToolResult { title: String, status: String },
     /// A file edit the agent proposed, as a unified-diff-ready triple.
-    Diff { path: String, old: String, new: String },
+    Diff {
+        path: String,
+        old: String,
+        new: String,
+    },
 }
 
 /// The result of one `prompt` turn.
@@ -199,10 +218,13 @@ impl CodexAgent {
             .log
             .clone()
             .unwrap_or_else(|| Arc::new(Mutex::new(Box::new(sink()))));
-        let agent = Agent::spawn(&cfg.command, log).with_context(|| {
-            format!("spawn codex bridge: {}", cfg.command.join(" "))
-        })?;
-        let this = Self { agent, session_id: String::new(), cwd };
+        let agent = Agent::spawn(&cfg.command, log)
+            .with_context(|| format!("spawn codex bridge: {}", cfg.command.join(" ")))?;
+        let this = Self {
+            agent,
+            session_id: String::new(),
+            cwd,
+        };
 
         let init = this.agent.request(
             "initialize",
@@ -215,7 +237,9 @@ impl CodexAgent {
                 "clientInfo": { "name": "chorus", "version": env!("CARGO_PKG_VERSION") }
             }),
         )?;
-        let res = this.pump(init, Duration::from_secs(30)).context("initialize")?;
+        let res = this
+            .pump(init, Duration::from_secs(30))
+            .context("initialize")?;
         let pv = res.get("protocolVersion").and_then(Value::as_i64);
         if pv != Some(1) {
             return Err(anyhow!("bridge spoke protocolVersion {pv:?}, expected 1"));
@@ -264,7 +288,11 @@ fn handle_request(
             let ask = PermissionAsk {
                 tool: "write file".into(),
                 kind: "edit".into(),
-                detail: params.get("path").and_then(Value::as_str).unwrap_or("").into(),
+                detail: params
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .into(),
             };
             if decide(&ask) == Permission::Deny {
                 return RequestReply::Error(-32001, "denied by permission engine".into());
@@ -324,29 +352,47 @@ fn permission_ask(params: &Value) -> PermissionAsk {
 
 /// Serve a read only from inside `cwd` — the client holds the files.
 fn read_text_file(cwd: &Path, params: &Value) -> Result<Value> {
-    let path = params.get("path").and_then(Value::as_str).ok_or_else(|| anyhow!("no path"))?;
+    let path = params
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("no path"))?;
     let canon = resolve_inside(cwd, path)?;
     Ok(json!({ "content": std::fs::read_to_string(&canon)? }))
 }
 
 fn write_text_file(cwd: &Path, params: &Value) -> Result<()> {
-    let path = params.get("path").and_then(Value::as_str).ok_or_else(|| anyhow!("no path"))?;
+    let path = params
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("no path"))?;
     let content = params.get("content").and_then(Value::as_str).unwrap_or("");
     // A write may create a new file, so resolve the parent, not the target.
     let target = PathBuf::from(path);
     let parent = target.parent().unwrap_or(cwd);
-    let parent = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+    let parent = parent
+        .canonicalize()
+        .unwrap_or_else(|_| parent.to_path_buf());
     if !parent.starts_with(cwd) {
-        return Err(anyhow!("refused: {} is outside {}", target.display(), cwd.display()));
+        return Err(anyhow!(
+            "refused: {} is outside {}",
+            target.display(),
+            cwd.display()
+        ));
     }
     std::fs::write(&target, content)?;
     Ok(())
 }
 
 fn resolve_inside(cwd: &Path, path: &str) -> Result<PathBuf> {
-    let canon = PathBuf::from(path).canonicalize().map_err(|e| anyhow!("{path}: {e}"))?;
+    let canon = PathBuf::from(path)
+        .canonicalize()
+        .map_err(|e| anyhow!("{path}: {e}"))?;
     if !canon.starts_with(cwd) {
-        return Err(anyhow!("refused: {} is outside {}", canon.display(), cwd.display()));
+        return Err(anyhow!(
+            "refused: {} is outside {}",
+            canon.display(),
+            cwd.display()
+        ));
     }
     Ok(canon)
 }
@@ -372,7 +418,10 @@ impl Accumulator {
             Some(u) => u,
             None => return,
         };
-        let kind = update.get("sessionUpdate").and_then(Value::as_str).unwrap_or("");
+        let kind = update
+            .get("sessionUpdate")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         match kind {
             "agent_message_chunk" => {
                 if let Some(t) = chunk_text(update) {
@@ -387,16 +436,27 @@ impl Accumulator {
             }
             "tool_call" => {
                 self.flush_message();
-                let title =
-                    update.get("title").and_then(Value::as_str).unwrap_or("tool").to_string();
-                let kind = update.get("kind").and_then(Value::as_str).unwrap_or("").to_string();
+                let title = update
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool")
+                    .to_string();
+                let kind = update
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 if let Some(id) = update.get("toolCallId").and_then(Value::as_str) {
                     self.titles.insert(id.to_string(), title.clone());
                 }
                 self.events.push(AgentEvent::ToolCall { title, kind });
             }
             "tool_call_update" => {
-                let status = update.get("status").and_then(Value::as_str).unwrap_or("").to_string();
+                let status = update
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 let title = update
                     .get("title")
                     .and_then(Value::as_str)
@@ -412,9 +472,21 @@ impl Accumulator {
                     for c in content {
                         if c.get("type").and_then(Value::as_str) == Some("diff") {
                             self.events.push(AgentEvent::Diff {
-                                path: c.get("path").and_then(Value::as_str).unwrap_or("").to_string(),
-                                old: c.get("oldText").and_then(Value::as_str).unwrap_or("").to_string(),
-                                new: c.get("newText").and_then(Value::as_str).unwrap_or("").to_string(),
+                                path: c
+                                    .get("path")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string(),
+                                old: c
+                                    .get("oldText")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string(),
+                                new: c
+                                    .get("newText")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string(),
                             });
                         }
                     }
@@ -439,7 +511,8 @@ impl Accumulator {
 
     fn flush_message(&mut self) {
         if self.open_message && !self.message.trim().is_empty() {
-            self.events.push(AgentEvent::Message(self.message.trim().to_string()));
+            self.events
+                .push(AgentEvent::Message(self.message.trim().to_string()));
             self.message.clear();
             self.open_message = false;
         }
