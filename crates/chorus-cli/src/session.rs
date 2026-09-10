@@ -9,6 +9,7 @@
 
 use anyhow::{Context, Result};
 use chorus_acp::codex::{AgentEvent, CodexAgent, CodexConfig, Permission, PermissionAsk, TurnOutcome};
+use chorus_core::checkpoint::Checkpoint;
 use chorus_core::context::{AssembleInput, Assembler, Budget, TurnItem};
 use chorus_core::handoff::{Brief, BriefInput, HandoffMeta, HandoffReason};
 use chorus_core::render::ContextItem;
@@ -69,6 +70,31 @@ pub struct Session {
     /// The ACP agent command. Defaults to the published Codex bridge;
     /// tests point it at the in-repo mock.
     bridge: Vec<String>,
+    /// Shadow git repo for the workspace. `None` when `git` is unavailable
+    /// or the workspace can't host one — the session still runs, handoffs
+    /// just carry no auto-diff.
+    checkpoint: Option<Checkpoint>,
+    /// Sha the handoff brief's diff is measured from — the shadow repo's
+    /// HEAD when the session opened. Immutable for the life of the `Session`.
+    base_ckpt: String,
+}
+
+/// Open the shadow repo and pick the base sha a handoff diff is measured
+/// from. On a brand-new repo we snapshot the current tree; on an existing
+/// one we take `HEAD` and leave the tree alone, so the diff covers whatever
+/// agents have changed since — not since this process started.
+fn open_checkpoint(cwd: &Path) -> (Option<Checkpoint>, String) {
+    match Checkpoint::open_reporting(cwd) {
+        Ok((ck, fresh)) => {
+            let base = if fresh {
+                ck.snapshot("session base").unwrap_or_default()
+            } else {
+                ck.head().unwrap_or_default()
+            };
+            (Some(ck), base)
+        }
+        Err(_) => (None, String::new()),
+    }
 }
 
 impl Session {
@@ -78,12 +104,15 @@ impl Session {
         let store = Store::open(db).context("open store")?;
         let user = actor::intern(store.conn(), "user", "human")?;
         let sess = ledger::new_session(store.conn(), title, &cwd.to_string_lossy())?;
+        let (checkpoint, base_ckpt) = open_checkpoint(&cwd);
         Ok(Self {
             store,
             sess,
             cwd,
             user,
             bridge: CodexConfig::default().command,
+            checkpoint,
+            base_ckpt,
         })
     }
 
@@ -100,12 +129,16 @@ impl Session {
             .unwrap_or_default();
         anyhow::ensure!(exists, "no session {session_id} in {}", db.display());
         let user = actor::intern(store.conn(), "user", "human")?;
+        let cwd = PathBuf::from(cwd);
+        let (checkpoint, base_ckpt) = open_checkpoint(&cwd);
         Ok(Self {
             store,
             sess: session_id,
-            cwd: PathBuf::from(cwd),
+            cwd,
             user,
             bridge: CodexConfig::default().command,
+            checkpoint,
+            base_ckpt,
         })
     }
 
@@ -187,6 +220,16 @@ impl Session {
         let from = self.last_agent().unwrap_or_else(|| "unknown".into());
         let events = self.transcript()?;
         let at = events.last().map(|(e, _)| e.t).unwrap_or(0);
+
+        // Fill the diff from the shadow repo when the caller didn't supply one.
+        let diff = if diff.trim().is_empty() {
+            self.checkpoint
+                .as_ref()
+                .and_then(|ck| ck.diff_since(&self.base_ckpt).ok())
+                .unwrap_or_default()
+        } else {
+            diff
+        };
 
         let brief = Brief::build(BriefInput {
             goal: goal.to_string(),
