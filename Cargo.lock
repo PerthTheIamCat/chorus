@@ -95,6 +95,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "chorus-ffi"
+version = "0.1.0"
+dependencies = [
+ "chorus-cli",
+ "chorus-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "constant_time_eq"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

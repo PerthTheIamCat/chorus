@@ -374,6 +374,18 @@ impl Session {
             .find_map(|e| actor::name(c, e.actor).ok())
     }
 
+    /// The whole session, oldest first, as `(seq, kind name, actor name,
+    /// body)` — the shape the FFI/UI wants without exposing core types.
+    pub fn transcript_labeled(&self) -> Result<Vec<(i64, &'static str, String, String)>> {
+        let c = self.store.conn();
+        let mut out = Vec::new();
+        for (e, body) in self.transcript()? {
+            let actor = actor::name(c, e.actor).unwrap_or_else(|_| "?".into());
+            out.push((e.seq, kind_name(e.kind), actor, body));
+        }
+        Ok(out)
+    }
+
     /// The whole session so far, oldest first, with bodies resolved.
     pub fn transcript(&self) -> Result<Vec<(chorus_core::Event, String)>> {
         let c = self.store.conn();
@@ -390,6 +402,18 @@ impl Session {
 
 fn first_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
+}
+
+fn kind_name(k: EventKind) -> &'static str {
+    match k {
+        EventKind::Msg => "msg",
+        EventKind::ToolCall => "tool_call",
+        EventKind::ToolResult => "tool_result",
+        EventKind::Diff => "diff",
+        EventKind::Decision => "decision",
+        EventKind::Handoff => "handoff",
+        EventKind::Summary => "summary",
+    }
 }
 
 /// A minimal unified diff for the ledger. Not a patch tool — just enough
