@@ -44,16 +44,22 @@ Swift ทำแค่วาดกับรับ input เพื่อให้�
 
 ## 3. สถานะตอนนี้ (11 ก.ย. 2026)
 
-**Phase 0 เสร็จ · เริ่ม Phase 2 core** — เทสต์ผ่าน 37/37
+**Phase 0–2 core + macOS shell skeleton วิ่งได้** — เทสต์ผ่าน 47/47
 
 | crate | สถานะ | ทำอะไร |
 |---|---|---|
-| `chorus-core` | ใช้ได้ | ledger, blob store, memory, token counter, render, context assembler, **handoff brief, memory projector** |
-| `chorus-cli` | ใช้ได้ | `chorus bench` — measurement harness |
-| `chorus-acp` | ใช้ได้ | ACP client + `acp-probe` + mock agent + **`codex::CodexAgent` adapter จริง** (สไปก์ 1 จบแล้ว) |
+| `chorus-core` | ใช้ได้ | ledger, blob store, memory + **approve queue (schema v2)**, token counter, render, context assembler, **handoff brief, memory projector, checkpoint (shadow git)** |
+| `chorus-acp` | ใช้ได้ | ACP client + `acp-probe` + mock + **`codex::CodexAgent` adapter จริง** |
+| `chorus-cli` | ใช้ได้ | lib+bin · `chorus bench` · **`chorus run` (multi-turn, history จาก ledger)** · **`chorus handoff` (5-step pipeline)** · `Session` engine |
+| `chorus-ffi` | ใช้ได้ | staticlib C ABI (`chorus.h`) — engine_open/run_turn/transcript/handoff, ผล JSON ล้วน |
+| `apps/macos` | skeleton วิ่งได้ | SwiftUI shell ลิงก์ `libchorus_ffi.a` — sidebar/thread/context/composer/handoff sheet · `apps/macos/build.sh` |
 
-**ยังไม่มี (ตั้งใจ)**: embedding/sqlite-vec, UI, approve queue, checkpoint ด้วย libgit2,
-compaction ladder ตัวจริง, relay chain, Gemini/Ollama adapter
+**Flow ที่ทำงานจริงแล้วกับ Codex**: หลาย agent ใน session เดียว · ledger เป็น SoT · จำข้ามเทิร์นจาก ledger
+(ไม่ใช่ session ฝั่ง provider) · handoff กลางคัน + Verify echo-back · brief พก diff อัตโนมัติจาก checkpoint
+
+**ยังไม่มี**: embedding/sqlite-vec, compaction ladder ตัวจริง (Ollama), relay chain/auto-failover,
+Gemini/Ollama adapter, MCP host, Seatbelt sandbox, projector ยังไม่ wire เข้า Session,
+event stream ทางเดียว (ตอนนี้ shell poll `transcript_json`), notarize/bundle
 
 ### ตัวเลขจาก `chorus bench` (78 events) — baseline ที่ห้ามถอยหลัง
 
@@ -75,14 +81,23 @@ store.db 92 KB / 78 events   (เดิม 84 KB — schema v2 เพิ่ม�
 ## 4. คำสั่ง
 
 ```bash
-cargo test                              # 22 tests
+cargo test                              # 47 tests
 cargo run -p chorus-cli -- bench        # วัด invariant ทั้ง 3
-cargo run --bin acp-probe -- --cwd /tmp/acp-scratch --mock        # ลอง ACP กับ agent ปลอม
-cargo run --bin acp-probe -- --cwd /tmp/acp-scratch -- codex acp   # ของจริง
+cargo run --bin acp-probe -- --cwd /tmp/acp-scratch --mock         # ลอง ACP กับ agent ปลอม
+cargo run -p chorus-acp --example codex_smoke -- /tmp/codex-smoke   # CodexAgent กับ bridge จริง (ต้อง codex login)
+
+# session engine จริง (ต้อง codex login + npx)
+cargo run -p chorus-cli -- run <cwd> "<prompt>" --db /tmp/s.db [--yes]
+cargo run -p chorus-cli -- run "<prompt>" --session 1 --db /tmp/s.db      # เทิร์นต่อ
+cargo run -p chorus-cli -- handoff --db /tmp/s.db --session 1 --to codex --reason rate_limit --goal "..."
+
+# macOS shell
+apps/macos/build.sh                     # cargo build -p chorus-ffi + swift build + run
 ```
 
 **รัน `cargo test` และ `bench` ทุกครั้งที่แก้ core** — bench คือตัวที่จับ regression ที่ test จับไม่ได้
-ไม่มี lint/fmt config พิเศษ ใช้ `cargo fmt` / `cargo clippy` ตามปกติได้
+ไม่มี rustfmt.toml — โค้ดสไตล์กว้างกว่า default **ห้าม `cargo fmt` ทั้ง crate** (จะรื้อไฟล์อื่น)
+format เฉพาะไฟล์ที่แก้: `rustfmt --edition 2021 <file>`  ·  clippy ตามปกติ (เหลือ 2 warning เก่าใน render.rs)
 
 ---
 
@@ -102,10 +117,14 @@ crates/chorus-core/src/
   context.rs    budget allocator + rung ladder L0→L1→L2
   handoff.rs    Brief::build + render_markdown (model-facing) + to_json (audit) — pure
   projector.rs  render memory → CLAUDE.md/AGENTS.md/GEMINI.md + drift detect (marker + hash)
-crates/chorus-cli/src/main.rs           bench harness
+  checkpoint.rs shadow git repo <cwd>/.chorus/ckpt — snapshot/diff_since/restore (shell ออก git)
+crates/chorus-cli/src/main.rs           bench + run + handoff subcommands
+crates/chorus-cli/src/session.rs        Session engine — run_turn/handoff/assemble_context/transcript_labeled
 crates/chorus-acp/src/lib.rs            ACP client (Agent) + mock agent module
 crates/chorus-acp/src/codex.rs         CodexAgent — adapter จริงบน bridge: start/load/prompt → TurnOutcome + Vec<AgentEvent>
 crates/chorus-acp/src/bin/acp_probe.rs  สไปก์ที่ 1 (probe)
+crates/chorus-ffi/src/lib.rs           C ABI: chorus_engine_open/run_turn/transcript_json/handoff (+ include/chorus.h)
+apps/macos/Sources/Chorus/             SwiftUI shell — ChorusApp / ContentView / Engine (glue เท่านั้น)
 crates/chorus-acp/examples/codex_smoke.rs  ยิง CodexAgent กับ bridge จริง (ต้อง codex login)
 evals/handoff/                          สไปก์ที่ 2 (README + เกณฑ์ + score.py + cases)
 ```
