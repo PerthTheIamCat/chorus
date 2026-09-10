@@ -12,6 +12,7 @@ use chorus_acp::codex::{
     AgentEvent, CodexAgent, CodexConfig, Permission, PermissionAsk, TurnOutcome,
 };
 use chorus_core::checkpoint::Checkpoint;
+use chorus_core::compaction::{self, Extractive};
 use chorus_core::context::{AssembleInput, Assembler, Budget, TurnItem};
 use chorus_core::handoff::{Brief, BriefInput, HandoffMeta, HandoffReason};
 use chorus_core::projector::{self, AgentFile, Drift, Projection};
@@ -432,14 +433,16 @@ impl Session {
             .collect::<Result<_>>()?;
 
         let n = bodies.len();
+        let summarizer = Extractive;
         let turns: Vec<TurnItem> = bodies
             .iter()
             .enumerate()
             .map(|(i, (e, body))| {
                 let who = actor::name(c, e.actor).unwrap_or_else(|_| "?".into());
+                let r = compaction::rungs_for(&summarizer, body);
                 TurnItem {
-                    text_l1: Some(format!("{who}: {}", first_chars(body, 100))),
-                    text_l2: Some(format!("{who}: {}", first_chars(body, 40))),
+                    text_l1: Some(format!("{who}: {}", r.l1)),
+                    text_l2: Some(format!("{who}: {}", r.l2)),
                     text_l0: format!("{who}: {body}"),
                     age: n - 1 - i,
                     key: e.blob.as_ref().map(|b| b.0.clone()),
@@ -598,10 +601,6 @@ impl Session {
             })
             .collect()
     }
-}
-
-fn first_chars(s: &str, n: usize) -> String {
-    s.chars().take(n).collect()
 }
 
 fn bridge_or_default(spec: &[String], default: &[String]) -> Vec<String> {

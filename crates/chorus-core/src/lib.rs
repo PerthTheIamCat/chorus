@@ -8,6 +8,7 @@
 pub mod actor;
 pub mod blob;
 pub mod checkpoint;
+pub mod compaction;
 pub mod context;
 pub mod error;
 pub mod handoff;
