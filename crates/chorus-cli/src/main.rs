@@ -48,8 +48,11 @@ fn main() -> Result<()> {
         "run" => run(&args[1..]),
         "handoff" => handoff(&args[1..]),
         "memory" => memory_cmd(&args[1..]),
+        "compare" => compare_cmd(&args[1..]),
         other => {
-            eprintln!("unknown command {other:?}; try: chorus bench | run | handoff | memory");
+            eprintln!(
+                "unknown command {other:?}; try: chorus bench | run | handoff | memory | compare"
+            );
             std::process::exit(2);
         }
     }
@@ -110,6 +113,61 @@ fn memory_cmd(args: &[String]) -> Result<()> {
             println!("added → fact {id} (scope {scope})");
         }
         other => anyhow::bail!("memory: unknown subcommand {other:?}"),
+    }
+    Ok(())
+}
+
+/// `chorus compare <prompt> --db PATH --session N --agents codex,claude-opus [--yes]`
+///
+/// Forks the session per agent, runs the same prompt on each, prints what
+/// each produced and the branch session id to resume.
+fn compare_cmd(args: &[String]) -> Result<()> {
+    let mut db: Option<PathBuf> = None;
+    let mut session_id: i64 = 1;
+    let mut agents: Vec<String> = Vec::new();
+    let mut policy = Policy::DenyAll;
+    let mut positional: Vec<&String> = Vec::new();
+
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--db" => db = it.next().map(PathBuf::from),
+            "--session" => session_id = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
+            "--agents" => {
+                if let Some(v) = it.next() {
+                    agents = v
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                }
+            }
+            "--yes" => policy = Policy::AllowAll,
+            _ => positional.push(a),
+        }
+    }
+    let db = db.context("--db is required")?;
+    let [prompt] = positional.as_slice() else {
+        anyhow::bail!("usage: chorus compare <prompt> --db PATH --session N --agents a,b");
+    };
+    anyhow::ensure!(agents.len() >= 2, "--agents needs at least two");
+
+    let specs: Vec<AgentSpec> = agents
+        .iter()
+        .map(|n| AgentSpec::new(n, provider_of(n)))
+        .collect();
+    let mut s = Session::open(&db, session_id).context("open session")?;
+    let branches = s.compare(&specs, prompt, policy)?;
+
+    for b in branches {
+        println!(
+            "\n── {} · resume with --session {} ──────────────",
+            b.agent, b.session_id
+        );
+        match b.result {
+            Ok((msg, stop)) => println!("{}\n[{stop}]", msg.trim()),
+            Err(e) => println!("failed: {e:#}"),
+        }
     }
     Ok(())
 }

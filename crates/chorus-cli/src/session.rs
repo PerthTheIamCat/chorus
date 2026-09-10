@@ -73,6 +73,14 @@ impl AgentSpec {
     }
 }
 
+/// One branch of a compare run: the forked session id and what the agent
+/// produced there (`Ok((message, stop_reason))` or the error string).
+pub struct CompareBranch {
+    pub agent: String,
+    pub session_id: i64,
+    pub result: std::result::Result<(String, String), anyhow::Error>,
+}
+
 /// The result of a relay run: who ended up answering, their turn, and every
 /// automatic handoff it took to get there.
 pub struct RelayReport {
@@ -210,7 +218,7 @@ impl Session {
         policy: Policy,
     ) -> Result<TurnReport> {
         let agent_actor = actor::intern(self.store.conn(), agent_name, provider)?;
-        let has_history = ledger::tail(self.store.conn(), self.sess, 1)?.len() == 1;
+        let has_history = !ledger::history(self.store.conn(), self.sess, 1)?.is_empty();
 
         // Assemble history from the ledger *before* adding this turn, so the
         // new instruction isn't also fed back as the last thing said.
@@ -312,6 +320,48 @@ impl Session {
             agent_seqs,
             stop_reason: outcome.stop_reason,
         })
+    }
+
+    /// Compare mode (design §7): fork the session once per agent, run the
+    /// same prompt on each fork, and hand back what each produced so the UI
+    /// can diff them. The forks are real ledger branches (one row each, no
+    /// history copy) — the user can later resume whichever they prefer.
+    pub fn compare(
+        &mut self,
+        agents: &[AgentSpec],
+        prompt: &str,
+        policy: Policy,
+    ) -> Result<Vec<CompareBranch>> {
+        let db_path: String = self
+            .store
+            .conn()
+            .query_row("PRAGMA database_list", [], |r| r.get::<_, String>(2))
+            .unwrap_or_default();
+        anyhow::ensure!(!db_path.is_empty(), "compare needs a file-backed store");
+
+        let head = ledger::history(self.store.conn(), self.sess, 1_000_000)
+            .ok()
+            .and_then(|h| h.last().map(|e| e.seq))
+            .unwrap_or(0);
+
+        let mut out = Vec::new();
+        for spec in agents {
+            let fork_id = ledger::fork(
+                self.store.conn(),
+                self.sess,
+                head,
+                &format!("compare: {}", spec.name),
+            )?;
+            let mut branch = Session::open(Path::new(&db_path), fork_id)?;
+            branch.forced_bridge = Some(self.resolve_bridge(&spec.name, &spec.bridge));
+            let turn = branch.run_turn(&spec.name, &spec.provider, prompt, policy);
+            out.push(CompareBranch {
+                agent: spec.name.clone(),
+                session_id: fork_id,
+                result: turn.map(|t| (t.message, t.stop_reason)),
+            });
+        }
+        Ok(out)
     }
 
     /// Run a turn against a relay chain: try the first agent; on a transient,
@@ -457,7 +507,7 @@ impl Session {
     /// the next turn comes from here, never from a provider's session state.
     pub fn assemble_context(&self, budget: i64) -> Result<String> {
         let c = self.store.conn();
-        let events = ledger::tail(c, self.sess, 400)?;
+        let events = ledger::history(c, self.sess, 400)?;
         let bodies: Vec<(Event, String)> = events
             .into_iter()
             .map(|e| {
@@ -609,7 +659,7 @@ impl Session {
     /// The actor name of the most recent non-user event, if any.
     fn last_agent(&self) -> Option<String> {
         let c = self.store.conn();
-        let events = ledger::tail(c, self.sess, 200).ok()?;
+        let events = ledger::history(c, self.sess, 200).ok()?;
         events
             .iter()
             .rev()
@@ -641,7 +691,7 @@ impl Session {
     /// The whole session so far, oldest first, with bodies resolved.
     pub fn transcript(&self) -> Result<Vec<(chorus_core::Event, String)>> {
         let c = self.store.conn();
-        let events = ledger::tail(c, self.sess, 10_000)?;
+        let events = ledger::history(c, self.sess, 10_000)?;
         events
             .into_iter()
             .map(|e| {

@@ -285,3 +285,37 @@ fn schema_v1_database_upgrades_to_v2() {
     assert_eq!(v, schema::SCHEMA_VERSION);
     assert!(memory::propose(store.conn(), 0, "works after upgrade", None).is_ok());
 }
+
+#[test]
+fn history_walks_the_fork_chain() {
+    let store = setup();
+    let c = store.conn();
+    let a = actor::intern(c, "claude", "anthropic").unwrap();
+
+    let root = ledger::new_session(c, "root", "/tmp").unwrap();
+    let s1 = ledger::append(c, &NewEvent::new(root, EventKind::Msg, a, "root turn 1")).unwrap();
+    let s2 = ledger::append(c, &NewEvent::new(root, EventKind::Msg, a, "root turn 2")).unwrap();
+    let _s3 = ledger::append(c, &NewEvent::new(root, EventKind::Msg, a, "root turn 3 (after fork)")).unwrap();
+
+    // Fork at s2: the branch should see turns 1-2 but not 3.
+    let branch = ledger::fork(c, root, s2, "branch").unwrap();
+    ledger::append(c, &NewEvent::new(branch, EventKind::Msg, a, "branch turn A")).unwrap();
+
+    let h: Vec<String> = ledger::history(c, branch, 100)
+        .unwrap()
+        .iter()
+        .map(|e| ledger::body(c, e).unwrap())
+        .collect();
+
+    assert_eq!(h, vec!["root turn 1", "root turn 2", "branch turn A"]);
+    assert!(!h.iter().any(|b| b.contains("after fork")), "branch saw a post-fork parent event");
+    let _ = (s1, s2);
+
+    // The root's own history is unaffected.
+    let rh: Vec<String> = ledger::history(c, root, 100)
+        .unwrap()
+        .iter()
+        .map(|e| ledger::body(c, e).unwrap())
+        .collect();
+    assert_eq!(rh.len(), 3);
+}

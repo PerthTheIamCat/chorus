@@ -9,7 +9,7 @@
 //! concern layered on top of these primitives.)
 
 use crate::types::INLINE_MAX_BYTES;
-use crate::{ChorusError, BlobId, Event, EventKind, NewEvent, Result};
+use crate::{BlobId, ChorusError, Event, EventKind, NewEvent, Result};
 use rusqlite::{Connection, OptionalExtension, Row};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -53,7 +53,11 @@ pub fn new_session(c: &Connection, title: &str, cwd: &str) -> Result<i64> {
 /// Returns the new `seq`.
 pub fn append(c: &Connection, e: &NewEvent) -> Result<i64> {
     let started_ms: i64 = c
-        .query_row("SELECT started_ms FROM session WHERE id = ?1", [e.sess], |r| r.get(0))
+        .query_row(
+            "SELECT started_ms FROM session WHERE id = ?1",
+            [e.sess],
+            |r| r.get(0),
+        )
         .optional()?
         .ok_or_else(|| ChorusError::Invalid(format!("no session {}", e.sess)))?;
     let t = now_ms() - started_ms;
@@ -121,12 +125,69 @@ pub fn tail(c: &Connection, sess: i64, n: usize) -> Result<Vec<Event>> {
     Ok(rows)
 }
 
+/// The full history of `sess`, oldest first: this session's own events,
+/// preceded by its parent's events up to the fork point, recursively back
+/// to the root. This is the fork-chain walk the `tail`/`search` primitives
+/// deliberately leave to callers (see module docs).
+///
+/// `limit` caps the total returned, keeping the newest.
+pub fn history(c: &Connection, sess: i64, limit: usize) -> Result<Vec<Event>> {
+    let mut chain: Vec<Event> = Vec::new();
+    collect_history(c, sess, None, &mut chain)?;
+    chain.sort_by_key(|e| e.seq);
+    if chain.len() > limit {
+        chain.drain(0..chain.len() - limit);
+    }
+    Ok(chain)
+}
+
+fn collect_history(
+    c: &Connection,
+    sess: i64,
+    up_to_seq: Option<i64>,
+    out: &mut Vec<Event>,
+) -> Result<()> {
+    let parent: Option<(i64, i64)> = c
+        .query_row(
+            "SELECT forked_from, fork_at_seq FROM session WHERE id = ?1",
+            [sess],
+            |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)),
+        )
+        .optional()?
+        .and_then(|(f, a)| Some((f?, a?)));
+
+    if let Some((forked_from, fork_at_seq)) = parent {
+        collect_history(c, forked_from, Some(fork_at_seq), out)?;
+    }
+
+    let (sql, cap) = match up_to_seq {
+        Some(seq) => (
+            "SELECT seq, t, sess, parent, kind, actor, body, blob, tok_in, tok_out, cost_usd
+             FROM event WHERE sess = ?1 AND seq <= ?2 ORDER BY seq",
+            seq,
+        ),
+        None => (
+            "SELECT seq, t, sess, parent, kind, actor, body, blob, tok_in, tok_out, cost_usd
+             FROM event WHERE sess = ?1 AND ?2 >= 0 ORDER BY seq",
+            i64::MAX,
+        ),
+    };
+    let mut stmt = c.prepare(sql)?;
+    let rows = stmt
+        .query_map(rusqlite::params![sess, cap], row_to_event)?
+        .collect::<rusqlite::Result<Vec<Event>>>()?;
+    out.extend(rows);
+    Ok(())
+}
+
 /// Fork a session at `at_seq`: creates a new session row pointing at the
 /// parent via `forked_from`/`fork_at_seq`. Copies **no** events — readers
 /// walk the parent chain (see module docs) to reconstruct history before
 /// the fork point.
 pub fn fork(c: &Connection, sess: i64, at_seq: i64, title: &str) -> Result<i64> {
-    let cwd: String = c.query_row("SELECT cwd FROM session WHERE id = ?1", [sess], |r| r.get(0))?;
+    let cwd: String = c.query_row("SELECT cwd FROM session WHERE id = ?1", [sess], |r| {
+        r.get(0)
+    })?;
     c.execute(
         "INSERT INTO session(title, cwd, started_ms, forked_from, fork_at_seq)
          VALUES (?1, ?2, ?3, ?4, ?5)",

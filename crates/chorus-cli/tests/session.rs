@@ -351,3 +351,40 @@ fn memory_is_projected_into_the_agent_file_but_a_hand_edit_is_left_alone() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn compare_mode_forks_the_session_per_agent() {
+    let tmp = std::env::temp_dir().join(format!("chorus-cmp-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let db = tmp.join("store.db");
+    let _ = std::fs::remove_file(&db);
+
+    let mut s = Session::create(&db, &tmp, "compare").unwrap().with_bridge(mock_bridge());
+    s.run_turn("user", "human", "here is the task", Policy::AllowAll).unwrap();
+    let base_events = s.transcript().unwrap().len();
+
+    let agents = vec![AgentSpec::new("codex", "openai"), AgentSpec::new("claude-opus", "anthropic")];
+    let branches = s.compare(&agents, "propose a fix", Policy::AllowAll).expect("compare runs");
+
+    assert_eq!(branches.len(), 2);
+    assert_ne!(branches[0].session_id, branches[1].session_id, "each agent gets its own fork");
+    assert_ne!(branches[0].session_id, s.session_id(), "forks are not the parent");
+    for b in &branches {
+        assert!(b.result.is_ok(), "{} failed: {:?}", b.agent, b.result.as_ref().err());
+    }
+
+    // The parent session is untouched by the comparison.
+    assert_eq!(s.transcript().unwrap().len(), base_events, "compare mutated the parent");
+
+    // A branch's history includes the pre-fork parent turn.
+    let store = chorus_core::store::Store::open(&db).unwrap();
+    let branch_hist = chorus_core::ledger::history(store.conn(), branches[0].session_id, 100).unwrap();
+    assert!(
+        branch_hist
+            .iter()
+            .any(|e| chorus_core::ledger::body(store.conn(), e).unwrap().contains("here is the task")),
+        "branch lost the pre-fork history"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
