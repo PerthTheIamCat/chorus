@@ -181,9 +181,38 @@ final class Engine: ObservableObject {
         if let obj = Self.decode(DiffResult.self, d) {
             workingDiff = obj.diff ?? ""
         }
+        refreshMemory()
     }
 
     @Published var workingDiff = ""
+    @Published var facts: [String] = []
+    @Published var pending: [Proposal] = []
+
+    struct Proposal: Codable, Identifiable {
+        let id: Int64
+        let scope: Int64
+        let text: String
+    }
+    private struct MemoryState: Codable {
+        let ok: Bool?
+        let facts: [String]?
+        let pending: [Proposal]?
+    }
+
+    func refreshMemory() {
+        guard let h = handle else { return }
+        let json = Self.string(from: chorus_memory_state(h))
+        if let s = Self.decode(MemoryState.self, json) {
+            facts = s.facts ?? []
+            pending = s.pending ?? []
+        }
+    }
+
+    func review(_ id: Int64, approve: Bool) {
+        guard let h = handle else { return }
+        _ = Self.string(from: chorus_memory_review(h, id, approve ? 1 : 0))
+        refreshMemory()
+    }
 
     func snapshot() {
         guard let h = handle else { return }

@@ -74,6 +74,9 @@ impl AgentSpec {
     }
 }
 
+/// `(approved project-scope facts, pending proposals as (id, scope, text))`.
+pub type MemoryState = (Vec<String>, Vec<(i64, i64, String)>);
+
 /// One branch of a compare run: the forked session id and what the agent
 /// produced there (`Ok((message, stop_reason))` or the error string).
 pub struct CompareBranch {
@@ -228,6 +231,32 @@ impl Session {
             .as_ref()
             .context("no shadow repo for this workspace")?;
         Ok(ck.snapshot(message)?)
+    }
+
+    /// The memory inspector's view: rendered project-scope facts, and the
+    /// pending proposal queue as `(id, scope, text)`.
+    pub fn memory_state(&self) -> Result<MemoryState> {
+        let c = self.store.conn();
+        let facts = memory::top(c, 1, 100)?
+            .iter()
+            .map(|f| f.text.clone())
+            .collect();
+        let pending = memory::pending(c)?
+            .into_iter()
+            .map(|p| (p.id, p.scope, p.text))
+            .collect();
+        Ok((facts, pending))
+    }
+
+    /// Approve or reject a queued proposal.
+    pub fn review_proposal(&self, id: i64, approve: bool) -> Result<()> {
+        let c = self.store.conn();
+        if approve {
+            memory::approve(c, id)?;
+        } else {
+            memory::reject(c, id)?;
+        }
+        Ok(())
     }
 
     /// Roll the workspace back to `sha` (or the session base when empty).

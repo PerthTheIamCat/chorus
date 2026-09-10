@@ -52,6 +52,14 @@ char *chorus_transcript_json(const ChorusEngine *e);
  * A UI polls this with the highest seq it has rendered. */
 char *chorus_events_since(const ChorusEngine *e, int64_t after);
 
+/* Memory inspector data: approved facts + the pending proposal queue.
+ * JSON: {"ok":true,"facts":["...",...],
+ *        "pending":[{"id":N,"scope":N,"text":"..."},...]} */
+char *chorus_memory_state(const ChorusEngine *e);
+
+/* Approve (approve != 0) or reject a proposal by id. JSON: {"ok":true} */
+char *chorus_memory_review(const ChorusEngine *e, int64_t proposal_id, int approve);
+
 /* The workspace diff since the session's base checkpoint (agent edits).
  * JSON: {"ok":true,"diff":"..."} */
 char *chorus_working_diff(const ChorusEngine *e);

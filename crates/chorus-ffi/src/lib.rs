@@ -290,6 +290,57 @@ pub unsafe extern "C" fn chorus_restore(e: *const ChorusEngine, sha: *const c_ch
     }
 }
 
+// ---- memory ----------------------------------------------------
+
+/// The memory inspector's data: approved facts + the pending proposal
+/// queue. JSON: {"ok":true,"facts":["...", ...],
+///               "pending":[{"id":N,"scope":N,"text":"..."}, ...]}
+///
+/// # Safety
+/// `e` must be a live engine handle.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_memory_state(e: *const ChorusEngine) -> *mut c_char {
+    let Some(engine) = e.as_ref() else {
+        return err("null engine");
+    };
+    let r = catch_unwind(AssertUnwindSafe(|| engine.session.memory_state()));
+    match r {
+        Ok(Ok((facts, pending))) => out(serde_json::json!({
+            "ok": true,
+            "facts": facts,
+            "pending": pending.iter().map(|(id, scope, text)| {
+                serde_json::json!({ "id": id, "scope": scope, "text": text })
+            }).collect::<Vec<_>>(),
+        })
+        .to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in memory_state"),
+    }
+}
+
+/// Approve (`decision` != 0) or reject a proposal by id. JSON: {"ok":true}
+///
+/// # Safety
+/// `e` must be a live engine handle.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_memory_review(
+    e: *const ChorusEngine,
+    proposal_id: i64,
+    approve: c_int,
+) -> *mut c_char {
+    let Some(engine) = e.as_ref() else {
+        return err("null engine");
+    };
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        engine.session.review_proposal(proposal_id, approve != 0)
+    }));
+    match r {
+        Ok(Ok(())) => out(serde_json::json!({ "ok": true }).to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in memory_review"),
+    }
+}
+
 // ---- handoff ----------------------------------------------------
 
 #[derive(Serialize)]

@@ -19,7 +19,7 @@ struct ContentView: View {
     @State private var rightTab = RightTab.context
     @State private var confirmRevert = false
 
-    enum RightTab: String, CaseIterable { case context = "Context", changes = "Changes" }
+    enum RightTab: String, CaseIterable { case context = "Context", changes = "Changes", memory = "Memory" }
 
     var body: some View {
         NavigationSplitView {
@@ -36,7 +36,11 @@ struct ContentView: View {
                     .labelsHidden()
                     .padding(8)
                     Divider()
-                    if rightTab == .context { contextPane } else { changesPane }
+                    switch rightTab {
+                    case .context: contextPane
+                    case .changes: changesPane
+                    case .memory: memoryPane
+                    }
                 }
                 .frame(width: 300)
             }
@@ -191,6 +195,39 @@ struct ContentView: View {
                     Button("Revert everything", role: .destructive) { engine.revertToStart() }
                     Button("Cancel", role: .cancel) {}
                 }
+            }
+            Spacer()
+        }
+        .padding(12)
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    private var memoryPane: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if !engine.pending.isEmpty {
+                Text("Proposed (\(engine.pending.count))").font(.headline)
+                ForEach(engine.pending) { p in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(p.text).font(.callout)
+                        HStack {
+                            Button("Approve") { engine.review(p.id, approve: true) }
+                                .controlSize(.small)
+                            Button("Reject", role: .destructive) { engine.review(p.id, approve: false) }
+                                .controlSize(.small)
+                        }
+                    }
+                    .padding(8)
+                    .background(.yellow.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+                }
+                Divider()
+            }
+            Text("Facts (\(engine.facts.count))").font(.headline)
+            if engine.facts.isEmpty {
+                Text("none yet").font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(Array(engine.facts.enumerated()), id: \.offset) { _, f in
+                Text("• \(f)").font(.callout).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             Spacer()
         }
