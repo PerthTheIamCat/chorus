@@ -58,14 +58,17 @@ Swift ทำแค่วาดกับรับ input เพื่อให้�
 (ไม่ใช่ provider session) · handoff กลางคัน + Verify echo-back · brief พก diff อัตโนมัติจาก checkpoint ·
 relay chain auto-failover เมื่อ 429/quota · compare mode (fork ต่อ agent) · projector เขียน AGENTS.md/CLAUDE.md ก่อนทุกเทิร์น (ไม่ทับของ user) · memory approve queue ใน UI
 
-**ยังไม่เสร็จ — ส่วนใหญ่ต้องเพื่อนตัดสิน/ลงเครื่องมือ**:
-- **compaction ด้วย Ollama** — มี `Summarizer` trait รอ · เครื่องนี้ไม่มี `ollama`  *(← MCP `memory_propose` ทำงานกับ Codex แล้ว 11 ก.ย.)*
-- **compaction ด้วย Ollama** — มี `Summarizer` trait รอ · เครื่องนี้ไม่มี `ollama`
-- **Gemini adapter** — ไม่มี `gemini` CLI · `bridge_for` เตรียมไว้แล้ว
-- **claude-code-acp** — error "Query closed before response received" · ต้อง debug (auth / nested claude?)
+**ทำงานแล้ว (แก้เอง 11 ก.ย.)**:
+- **MCP `memory_propose`** — ทำงานกับ Codex เต็ม (Streamable-HTTP + held-open SSE)
+- **compaction ด้วย Ollama** — `compaction::Ollama` + `best()` · เปิดด้วย `CHORUS_SUMMARY_MODEL=<model>` (ต้อง `brew install ollama` + `ollama pull`)
+- **claude-code-acp** — ต่อได้แล้ว (strip `CLAUDECODE`) · ค้างที่ **OAuth token หมดอายุบนเครื่อง** → `claude` login ใหม่
+- **permission 3 ระดับ** — `Policy` deny/read-only/allow · `--read-only` flag · FFI level int
+
+**ยังต้องเพื่อน**:
+- **Gemini adapter** — ไม่มี `gemini` CLI (`bridge_for` เตรียมไว้แล้ว)
 - **embedding + sqlite-vec** — ต้องตัดสิน dep (MLX / `NLEmbedding` / sqlite-vec)
 - **Seatbelt sandbox · notarize · .app bundle** — ต้อง Apple Developer account
-- **diff review per-hunk** ใน shell (ตอนนี้ดู diff รวม + revert ทั้งหมดได้) · permission 3 ระดับต่อ agent (ตอนนี้ toggle เดียว) · event push จริง (ยัง poll)
+- **diff review per-hunk** · permission callback แบบ interactive จริง · event push (ยัง poll `events_since`)
 
 ### ตัวเลขจาก `chorus bench` (78 events) — baseline ที่ห้ามถอยหลัง
 
