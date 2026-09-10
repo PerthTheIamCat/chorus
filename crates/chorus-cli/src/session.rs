@@ -620,9 +620,18 @@ impl Session {
     /// The whole session, oldest first, as `(seq, kind name, actor name,
     /// body)` — the shape the FFI/UI wants without exposing core types.
     pub fn transcript_labeled(&self) -> Result<Vec<(i64, &'static str, String, String)>> {
+        self.events_since(0)
+    }
+
+    /// Labeled events with `seq > after` — the delta a UI polls for so it
+    /// only ever pulls what it hasn't seen.
+    pub fn events_since(&self, after: i64) -> Result<Vec<(i64, &'static str, String, String)>> {
         let c = self.store.conn();
         let mut out = Vec::new();
         for (e, body) in self.transcript()? {
+            if e.seq <= after {
+                continue;
+            }
             let actor = actor::name(c, e.actor).unwrap_or_else(|_| "?".into());
             out.push((e.seq, kind_name(e.kind), actor, body));
         }

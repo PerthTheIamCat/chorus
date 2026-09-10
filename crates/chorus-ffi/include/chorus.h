@@ -48,6 +48,10 @@ char *chorus_run_turn(ChorusEngine *e,
  * [{"seq":N,"kind":"msg","actor":"...","body":"..."}, ...] */
 char *chorus_transcript_json(const ChorusEngine *e);
 
+/* Only events with seq > `after` (0 = whole session). Same JSON shape.
+ * A UI polls this with the highest seq it has rendered. */
+char *chorus_events_since(const ChorusEngine *e, int64_t after);
+
 /* Hand the session to `to`. `goal` required; `done_json`/`pending_json`
  * are JSON string arrays or NULL.
  * JSON: {"ok":true,"handoff_seq":N,"from":"...","to":"...",

@@ -204,10 +204,20 @@ struct EventJson {
 /// `e` must be a live engine handle.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_transcript_json(e: *const ChorusEngine) -> *mut c_char {
+    chorus_events_since(e, 0)
+}
+
+/// Only the events with `seq` greater than `after` — the delta a UI polls
+/// so it pulls just what it hasn't rendered. Pass 0 for the whole session.
+///
+/// # Safety
+/// `e` must be a live engine handle.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_events_since(e: *const ChorusEngine, after: i64) -> *mut c_char {
     let Some(engine) = e.as_ref() else {
         return err("null engine");
     };
-    let r = catch_unwind(AssertUnwindSafe(|| engine.session.transcript_labeled()));
+    let r = catch_unwind(AssertUnwindSafe(|| engine.session.events_since(after)));
     match r {
         Ok(Ok(rows)) => {
             let events: Vec<EventJson> = rows

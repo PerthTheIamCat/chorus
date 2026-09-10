@@ -47,11 +47,71 @@ fn main() -> Result<()> {
         "bench" => bench(),
         "run" => run(&args[1..]),
         "handoff" => handoff(&args[1..]),
+        "memory" => memory_cmd(&args[1..]),
         other => {
-            eprintln!("unknown command {other:?}; try: chorus bench | chorus run | chorus handoff");
+            eprintln!("unknown command {other:?}; try: chorus bench | run | handoff | memory");
             std::process::exit(2);
         }
     }
+}
+
+/// `chorus memory <pending|approve ID|reject ID|add TEXT> --db PATH [--scope N]`
+///
+/// The human side of the approve queue (design §4). Agents propose via the
+/// `memory.propose` tool; a person clears the queue here.
+fn memory_cmd(args: &[String]) -> Result<()> {
+    use chorus_core::memory;
+
+    let mut db: Option<PathBuf> = None;
+    let mut scope: i64 = 1;
+    let mut rest: Vec<&String> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--db" => db = it.next().map(PathBuf::from),
+            "--scope" => scope = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
+            _ => rest.push(a),
+        }
+    }
+    let db = db.context("--db is required")?;
+    let store = Store::open(&db).context("open store")?;
+    let c = store.conn();
+    let sub = rest.first().map(|s| s.as_str()).unwrap_or("pending");
+
+    match sub {
+        "pending" => {
+            let q = memory::pending(c)?;
+            if q.is_empty() {
+                println!("queue empty");
+            }
+            for p in q {
+                println!("  [{}] scope {} · {}", p.id, p.scope, p.text);
+            }
+        }
+        "approve" => {
+            let id: i64 = rest
+                .get(1)
+                .and_then(|v| v.parse().ok())
+                .context("approve <id>")?;
+            let fact = memory::approve(c, id)?;
+            println!("approved → fact {fact}");
+        }
+        "reject" => {
+            let id: i64 = rest
+                .get(1)
+                .and_then(|v| v.parse().ok())
+                .context("reject <id>")?;
+            memory::reject(c, id)?;
+            println!("rejected {id}");
+        }
+        "add" => {
+            let text = rest.get(1).context("add <text>")?;
+            let id = memory::add(c, scope, text)?;
+            println!("added → fact {id} (scope {scope})");
+        }
+        other => anyhow::bail!("memory: unknown subcommand {other:?}"),
+    }
+    Ok(())
 }
 
 /// `chorus handoff --db PATH --session N --to NAME --reason R --goal TEXT
