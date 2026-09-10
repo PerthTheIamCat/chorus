@@ -44,23 +44,28 @@ Swift ทำแค่วาดกับรับ input เพื่อให้�
 
 ## 3. สถานะตอนนี้ (11 ก.ย. 2026)
 
-**Phase 0–2 core + macOS shell skeleton วิ่งได้** — เทสต์ผ่าน 56/56
+**Phase 0–2 core ครบ + macOS shell ใช้ได้จริง** — เทสต์ผ่าน 57/57 · clippy clean
 
 | crate | ทำอะไร |
 |---|---|
-| `chorus-core` | ledger (+ **fork-chain `history()`**), blob store, memory + **approve queue (v2)**, token counter, render, context assembler, **handoff brief**, **projector**, **checkpoint (shadow git)**, **compaction ladder (Extractive L1/L2)** |
-| `chorus-acp` | ACP client + `acp-probe` + mock (`--fail`) + **`CodexAgent` adapter จริง** + **`bridge_for(name)`** (codex/claude/gemini) |
+| `chorus-core` | ledger (+ fork-chain `history()`), blob store, memory + approve queue (v2), token counter, render, context assembler, handoff brief, projector, checkpoint (shadow git), compaction ladder (Extractive L1/L2), **mcp (HTTP MCP server: `memory.propose`)** |
+| `chorus-acp` | ACP client + `acp-probe` + mock (`--fail`) + `CodexAgent` adapter จริง + `bridge_for(name)` (codex/claude/gemini) |
 | `chorus-cli` | lib+bin · `bench` · `run` (multi-turn + `--chain` relay) · `handoff` · `memory` · `compare` · `Session` engine |
-| `chorus-ffi` | staticlib C ABI (`chorus.h`) — engine_open/reopen/run_turn/events_since/handoff · ผล JSON ล้วน · panic-guarded |
-| `apps/macos` | SwiftUI shell ลิงก์ `libchorus_ffi.a` — sidebar/thread/context/composer/handoff sheet · `apps/macos/build.sh` |
+| `chorus-ffi` | staticlib C ABI (`chorus.h`) — engine/run_turn/run_relay/compare/handoff/events_since/working_diff/snapshot/restore/memory_state/memory_review · JSON ล้วน · panic-guarded |
+| `apps/macos` | SwiftUI shell — sidebar (single/relay/compare) · thread + agent blame · Context/Changes/Memory panes · handoff sheet · compare results sheet · snapshot+revert · `apps/macos/build.sh` |
 
 **Flow ที่ทำงานจริงกับ Codex**: หลาย agent ใน session เดียว · ledger เป็น SoT · จำข้ามเทิร์นจาก ledger
 (ไม่ใช่ provider session) · handoff กลางคัน + Verify echo-back · brief พก diff อัตโนมัติจาก checkpoint ·
-relay chain auto-failover เมื่อ 429/quota · compare mode (fork ต่อ agent) · projector เขียน AGENTS.md/CLAUDE.md ก่อนทุกเทิร์น (ไม่ทับของ user)
+relay chain auto-failover เมื่อ 429/quota · compare mode (fork ต่อ agent) · projector เขียน AGENTS.md/CLAUDE.md ก่อนทุกเทิร์น (ไม่ทับของ user) · memory approve queue ใน UI
 
-**ยังไม่มี**: embedding/sqlite-vec, compaction ด้วย Ollama จริง (มี trait รอ · เครื่องนี้ยังไม่มี `ollama`),
-MCP host + Seatbelt sandbox, Gemini CLI (ยังไม่ลง) · claude-code-acp ลองแล้ว error "Query closed" (Phase 2 debug),
-event push จริง (shell ยัง poll `events_since`), diff review per-hunk ใน shell, notarize/bundle
+**ยังไม่เสร็จ — ส่วนใหญ่ต้องเพื่อนตัดสิน/ลงเครื่องมือ**:
+- **MCP `memory.propose` ยังไม่ถึง Codex** — server เราตอบ plain-POST · Codex ต้องการ MCP Streamable-HTTP เต็ม (SSE + `Mcp-Session-Id`) · ต้อง capture request จริงของ Codex แล้ว match
+- **compaction ด้วย Ollama** — มี `Summarizer` trait รอ · เครื่องนี้ไม่มี `ollama`
+- **Gemini adapter** — ไม่มี `gemini` CLI · `bridge_for` เตรียมไว้แล้ว
+- **claude-code-acp** — error "Query closed before response received" · ต้อง debug (auth / nested claude?)
+- **embedding + sqlite-vec** — ต้องตัดสิน dep (MLX / `NLEmbedding` / sqlite-vec)
+- **Seatbelt sandbox · notarize · .app bundle** — ต้อง Apple Developer account
+- **diff review per-hunk** ใน shell (ตอนนี้ดู diff รวม + revert ทั้งหมดได้) · permission 3 ระดับต่อ agent (ตอนนี้ toggle เดียว) · event push จริง (ยัง poll)
 
 ### ตัวเลขจาก `chorus bench` (78 events) — baseline ที่ห้ามถอยหลัง
 
@@ -82,7 +87,7 @@ store.db 92 KB / 78 events   (เดิม 84 KB — schema v2 เพิ่ม�
 ## 4. คำสั่ง
 
 ```bash
-cargo test                              # 56 tests
+cargo test                              # 57 tests
 cargo run -p chorus-cli -- bench        # วัด invariant ทั้ง 3
 cargo run --bin acp-probe -- --cwd /tmp/acp-scratch --mock         # ลอง ACP กับ agent ปลอม
 cargo run -p chorus-acp --example codex_smoke -- /tmp/codex-smoke   # CodexAgent กับ bridge จริง (ต้อง codex login)
@@ -123,6 +128,7 @@ crates/chorus-core/src/
   projector.rs  render memory → CLAUDE.md/AGENTS.md/GEMINI.md + drift detect (marker + hash)
   checkpoint.rs shadow git repo <cwd>/.chorus/ckpt — snapshot/diff_since/restore (shell ออก git)
   compaction.rs Summarizer trait + Extractive (model-free L1/L2) — Ollama impl ทีหลัง
+  mcp.rs        HTTP MCP server (std::net, ไม่มี dep) — tool memory.propose · ต่อ Codex ยังไม่ได้ (ดู §3)
 crates/chorus-cli/src/main.rs           bench + run + handoff + memory + compare subcommands
 crates/chorus-cli/src/session.rs        Session engine — run_turn/run_relay/handoff/compare/assemble_context/events_since
 crates/chorus-acp/src/lib.rs            ACP client (Agent) + mock agent module (--fail สำหรับเทสต์ relay)
