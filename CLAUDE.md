@@ -42,18 +42,18 @@ Swift ทำแค่วาดกับรับ input เพื่อให้�
 
 ---
 
-## 3. สถานะตอนนี้ (10 ก.ย. 2026)
+## 3. สถานะตอนนี้ (11 ก.ย. 2026)
 
-**Phase 0 เสร็จแล้ว** — เทสต์ผ่าน 22/22 build ~11 วิ บน MacBook Air
+**Phase 0 เสร็จ · เริ่ม Phase 2 core** — เทสต์ผ่าน 37/37
 
 | crate | สถานะ | ทำอะไร |
 |---|---|---|
-| `chorus-core` | ใช้ได้ | ledger, blob store, memory, token counter, render, context assembler |
+| `chorus-core` | ใช้ได้ | ledger, blob store, memory, token counter, render, context assembler, **handoff brief, memory projector** |
 | `chorus-cli` | ใช้ได้ | `chorus bench` — measurement harness |
-| `chorus-acp` | สไปก์ | ACP client เปล่า ๆ + `acp-probe` + agent ปลอมในตัว |
+| `chorus-acp` | ใช้ได้ | ACP client + `acp-probe` + mock agent + **`codex::CodexAgent` adapter จริง** (สไปก์ 1 จบแล้ว) |
 
-**ยังไม่มี (ตั้งใจ)**: adapter จริงสักตัว, embedding/sqlite-vec, UI, approve queue,
-checkpoint ด้วย libgit2, compaction ladder ตัวจริง
+**ยังไม่มี (ตั้งใจ)**: embedding/sqlite-vec, UI, approve queue, checkpoint ด้วย libgit2,
+compaction ladder ตัวจริง, relay chain, Gemini/Ollama adapter
 
 ### ตัวเลขจาก `chorus bench` (78 events) — baseline ที่ห้ามถอยหลัง
 
@@ -100,11 +100,14 @@ crates/chorus-core/src/
   tokens.rs     ตัวประมาณ token ที่รู้จักภาษาไทย + cache
   render.rs     table/manifest/truncate/dedup_window — รูปแบบที่ส่งเข้าโมเดล
   context.rs    budget allocator + rung ladder L0→L1→L2
+  handoff.rs    Brief::build + render_markdown (model-facing) + to_json (audit) — pure
+  projector.rs  render memory → CLAUDE.md/AGENTS.md/GEMINI.md + drift detect (marker + hash)
 crates/chorus-cli/src/main.rs           bench harness
-crates/chorus-acp/src/lib.rs            ACP client + mock agent module
-crates/chorus-acp/src/bin/acp_probe.rs  สไปก์ที่ 1
-evals/handoff/                          สไปก์ที่ 2 (README + เกณฑ์ + score.py)
-_to_delete/                             ไฟล์ตายรอลบ ลบทิ้งได้เลย
+crates/chorus-acp/src/lib.rs            ACP client (Agent) + mock agent module
+crates/chorus-acp/src/codex.rs         CodexAgent — adapter จริงบน bridge: start/load/prompt → TurnOutcome + Vec<AgentEvent>
+crates/chorus-acp/src/bin/acp_probe.rs  สไปก์ที่ 1 (probe)
+crates/chorus-acp/examples/codex_smoke.rs  ยิง CodexAgent กับ bridge จริง (ต้อง codex login)
+evals/handoff/                          สไปก์ที่ 2 (README + เกณฑ์ + score.py + cases)
 ```
 
 ---

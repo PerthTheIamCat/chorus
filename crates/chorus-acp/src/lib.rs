@@ -11,6 +11,8 @@
 //! Transport is newline-delimited JSON over the agent's stdin/stdout — one JSON
 //! object per line, no Content-Length headers.
 
+pub mod codex;
+
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
