@@ -3,6 +3,7 @@
 //! agent did, lands in one app-owned ledger with an actor.
 
 use chorus_cli::session::{Policy, Session};
+use chorus_core::handoff::HandoffReason;
 
 fn mock_bridge() -> Vec<String> {
     // target/debug/deps/<test> → target/debug/acp-probe --serve-mock
@@ -56,6 +57,62 @@ fn one_turn_persists_user_and_every_agent_event_to_the_ledger() {
         diff_body.clone(),
     )]);
     assert!(files.iter().any(|f| f.ends_with("README.md")), "diff path lost: {diff_body}");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn handoff_records_the_switch_and_runs_the_incoming_agent() {
+    let tmp = std::env::temp_dir().join(format!("chorus-ho-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let db = tmp.join("store.db");
+    let _ = std::fs::remove_file(&db);
+
+    let mut s = Session::create(&db, &tmp, "n+1 query")
+        .unwrap()
+        .with_bridge(mock_bridge());
+
+    // A first turn by "claude", so the handoff has a `from`.
+    s.run_turn("claude-opus", "anthropic", "the order page is slow", Policy::AllowAll)
+        .unwrap();
+
+    let r = s
+        .handoff(
+            "codex",
+            "openai",
+            HandoffReason::RateLimit,
+            "get the order list under 200ms",
+            vec!["found the N+1 in findAll".into()],
+            vec!["add eager-load".into(), "run the order tests".into()],
+            vec!["do not touch the schema".into()],
+            "--- a/repo.ts\n+++ b/repo.ts\n@@\n-x\n+y\n".into(),
+            Policy::AllowAll,
+        )
+        .expect("handoff runs");
+
+    assert_eq!(r.from, "claude-opus");
+    assert_eq!(r.to, "codex");
+    assert_eq!(r.brief.goal, "get the order list under 200ms");
+    assert_eq!(r.brief.pending, vec!["add eager-load", "run the order tests"]);
+    assert!(!r.echo_back.is_empty(), "incoming agent didn't respond");
+
+    // The ledger holds: claude's turn, a Handoff event, then codex's events.
+    let t = s.transcript().unwrap();
+    let handoff_at = t
+        .iter()
+        .position(|(e, _)| e.kind == chorus_core::EventKind::Handoff)
+        .expect("handoff event in ledger");
+    // The handoff body is the full brief JSON.
+    assert!(t[handoff_at].1.contains("\"goal\": \"get the order list under 200ms\""));
+    // The handoff event and everything after share one actor (codex), and
+    // it differs from claude's actor id on the first turn.
+    let claude_actor = t[0].0.actor;
+    let codex_actor = t[handoff_at].0.actor;
+    assert_ne!(claude_actor, codex_actor, "handoff should switch actor");
+    assert!(
+        t[handoff_at + 1..].iter().all(|(e, _)| e.actor == codex_actor),
+        "post-handoff events must belong to the incoming agent"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

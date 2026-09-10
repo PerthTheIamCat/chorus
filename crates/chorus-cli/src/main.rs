@@ -10,6 +10,7 @@
 
 use anyhow::{Context, Result};
 use chorus_cli::session::{Policy, Session};
+use chorus_core::handoff::HandoffReason;
 use chorus_core::context::{AssembleInput, Assembler, Budget, Tier, TurnItem};
 use chorus_core::render::{self, ContextItem, FileChange};
 use chorus_core::tokens::{CachedCounter, HeuristicCounter, TokenCounter};
@@ -45,10 +46,75 @@ fn main() -> Result<()> {
     match cmd {
         "bench" => bench(),
         "run" => run(&args[1..]),
+        "handoff" => handoff(&args[1..]),
         other => {
-            eprintln!("unknown command {other:?}; try: chorus bench | chorus run");
+            eprintln!("unknown command {other:?}; try: chorus bench | chorus run | chorus handoff");
             std::process::exit(2);
         }
+    }
+}
+
+/// `chorus handoff --db PATH --session N --to NAME --reason R --goal TEXT
+///  [--done TEXT]... [--pending TEXT]... [--diff-file PATH] [--yes]`
+///
+/// Hands the session to another agent: builds the brief from the ledger,
+/// records a Handoff event, and runs the incoming agent's Verify turn.
+fn handoff(args: &[String]) -> Result<()> {
+    let mut db: Option<PathBuf> = None;
+    let mut session_id: i64 = 1;
+    let mut to = "codex".to_string();
+    let mut reason = HandoffReason::Manual;
+    let mut goal = String::new();
+    let mut done: Vec<String> = Vec::new();
+    let mut pending: Vec<String> = Vec::new();
+    let mut diff_file: Option<PathBuf> = None;
+    let mut policy = Policy::DenyAll;
+
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut next = || it.next().cloned().unwrap_or_default();
+        match a.as_str() {
+            "--db" => db = Some(PathBuf::from(next())),
+            "--session" => session_id = next().parse().unwrap_or(1),
+            "--to" => to = next(),
+            "--reason" => reason = parse_reason(&next()),
+            "--goal" => goal = next(),
+            "--done" => done.push(next()),
+            "--pending" => pending.push(next()),
+            "--diff-file" => diff_file = Some(PathBuf::from(next())),
+            "--yes" => policy = Policy::AllowAll,
+            other => anyhow::bail!("unknown flag {other:?}"),
+        }
+    }
+    let db = db.context("--db is required")?;
+    anyhow::ensure!(!goal.is_empty(), "--goal is required");
+    let diff = match diff_file {
+        Some(p) => std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?,
+        None => String::new(),
+    };
+
+    let mut s = Session::open(&db, session_id).context("open session")?;
+    // Constraints come from project-scope memory facts.
+    let constraints: Vec<String> = Vec::new();
+
+    let r = s.handoff(&to, "openai", reason, &goal, done, pending, constraints, diff, policy)?;
+
+    println!("── brief handed to {} (seq {}) ──", r.to, r.handoff_seq);
+    println!("{}", r.brief.render_markdown());
+    println!("\n── {} echo-back ──────────────────────────────", r.to);
+    println!("{}", r.echo_back.trim());
+    println!("\nstop: {} · {} events recorded", r.stop_reason, r.agent_seqs.len());
+    Ok(())
+}
+
+fn parse_reason(s: &str) -> HandoffReason {
+    match s.replace(['-', ' '], "_").to_lowercase().as_str() {
+        "rate_limit" => HandoffReason::RateLimit,
+        "quota_exhausted" | "quota" => HandoffReason::QuotaExhausted,
+        "context_exhausted" | "context" => HandoffReason::ContextExhausted,
+        "user_requested" | "user" => HandoffReason::UserRequested,
+        "failover" => HandoffReason::Failover,
+        _ => HandoffReason::Manual,
     }
 }
 
