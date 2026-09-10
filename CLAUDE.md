@@ -189,6 +189,9 @@ transcript อยู่ที่ราก repo (`acp-probe-*.jsonl`, gitignored)
   `on-request` → `user` → probe เราได้ `session/request_permission`** (ทดสอบ: เขียน `~/acp-outside-test.txt`
   ในโหมด read-only → probe ปฏิเสธ → `stopReason: cancelled` ไฟล์ไม่ถูกสร้าง)
   bridge map ตัวเลือกของ codex (`accept_execpolicy_amendment` ฯลฯ) เป็น ACP `kind` (allow_once/allow_always/reject_once) ให้แล้ว — engine เราคีย์ที่ `kind` ได้
+  ⚠️ **`approvalPolicy` ทั้งสองโหมดคือ `on-request` = โมเดล codex เลือกเองว่าจะถามเมื่อไหร่** ไม่ใช่ทุก action ที่ถูกบล็อกจะกลายเป็น prompt
+  (เทสต์: `curl` ในโหมด read-only → codex ไม่ถาม รันใน sandbox ที่ `networkAccess:false` แล้ว report fail กลับโมเดลเอง)
+  → **กำแพงจริงคือ sandbox** (`networkAccess:false`, write เฉพาะ workspace) `session/request_permission` เป็นแค่ทาง escalation ตอน codex เลือกถาม
   **adapter Phase 2**: `session/new` แล้ว `session/set_mode read-only` ทันที; ถ้าอยากให้ทุก write ใน workspace ผ่าน engine ด้วย
   ต้อง `sandboxMode: read-only` (ไม่ใช่ workspace-write) — bridge ไม่มี preset ต้องลองผ่าน `CODEX_CONFIG`
 - **Q3 โครงสร้าง** — ✅ ดีกว่าที่กลัว ได้ `tool_call` / `tool_call_update` แยกชัด + `agent_thought_chunk`

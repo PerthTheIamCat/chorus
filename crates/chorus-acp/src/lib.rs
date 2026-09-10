@@ -107,14 +107,12 @@ impl Agent {
         let tail: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let etail = tail.clone();
         thread::spawn(move || {
-            for line in BufReader::new(stderr).lines() {
-                if let Ok(l) = line {
-                    log_raw(&elog, "stderr", &l);
-                    if let Ok(mut t) = etail.lock() {
-                        t.push(l);
-                        if t.len() > 20 {
-                            t.remove(0);
-                        }
+            for l in BufReader::new(stderr).lines().map_while(std::result::Result::ok) {
+                log_raw(&elog, "stderr", &l);
+                if let Ok(mut t) = etail.lock() {
+                    t.push(l);
+                    if t.len() > 20 {
+                        t.remove(0);
                     }
                 }
             }

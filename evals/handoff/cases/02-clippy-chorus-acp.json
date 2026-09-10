@@ -1,0 +1,29 @@
+{
+  "id": "02-clippy-chorus-acp",
+  "task": "เคลียร์ clippy warning ที่มาจาก crate chorus-acp",
+  "brief_thickness": "medium — บอก goal + constraints + crate แต่ไม่บอกบรรทัด ไม่บอกวิธีแก้",
+  "from": "claude-sonnet-5 (chat)",
+  "to": "codex gpt-5.6-luna (via @agentclientprotocol/codex-acp)",
+  "run": {
+    "date": "2026-09-11",
+    "method": "throwaway /tmp/chorus-h02, brief prompt เดียว, --allow",
+    "diff": "crates/chorus-acp/src/lib.rs +6 -8, 1 ไฟล์",
+    "verify": "clippy -p chorus-acp = 0 warning, cargo test 22/22 ผ่าน"
+  },
+  "brief": {
+    "goal": "clippy ไม่มี warning จาก chorus-acp, crate อื่นไม่แตะ, cargo test ผ่าน",
+    "done": ["ยังไม่เริ่ม"],
+    "pending": ["รัน clippy อ่าน warning แก้ให้ idiomatic"],
+    "constraints": ["แตะแค่ crates/chorus-acp/", "ห้าม #[allow(...)]", "คงสไตล์เดิม", "test 22 ผ่าน"],
+    "files": ["ที่ไหนสักที่ใน crates/chorus-acp/src/"],
+    "diff": ""
+  },
+  "result": {
+    "understood_goal": 2,
+    "no_repeat_work": 2,
+    "respected_constraints": 2,
+    "proceeded_unaided": 2,
+    "output_usable": 2
+  },
+  "failure_note": "ไม่ตก. brief ระดับกลาง (ไม่บอกบรรทัด/วิธีแก้) codex รัน clippy เองเจอ nested `if let Ok` ใน loop over .lines() แก้เป็น .map_while(Result::ok) — idiomatic ตรงเป๊ะ. เคารพ 'ห้าม #[allow]' และ 'แตะแค่ chorus-acp'. งานประเภท 'รันเครื่องมือแล้วอ่าน output' brief บางได้เพราะเครื่องมือบอกเองว่าต้องแก้อะไร"
+}

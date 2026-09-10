@@ -1,0 +1,33 @@
+{
+  "id": "03-bench-json-flag",
+  "task": "เพิ่ม --json ให้ `chorus bench` พิมพ์ตัวเลขเดิมเป็น JSON",
+  "brief_thickness": "thin — goal + hard constraints เท่านั้น ไม่มี files ไม่มี pending ไม่ชี้ทาง",
+  "from": "claude-sonnet-5 (chat)",
+  "to": "codex gpt-5.6-luna (via @agentclientprotocol/codex-acp)",
+  "run": {
+    "date": "2026-09-11",
+    "method": "throwaway /tmp/chorus-h03, brief prompt เดียว, --allow (รอบแรกโดน pkill กลางคัน รันใหม่)",
+    "diff": "crates/chorus-cli/src/main.rs +90 -32, 1 ไฟล์",
+    "verify": "human output เดิมไม่เปลี่ยน, --json ออก {dedup,context_windows,on_disk}, cargo test 22/22"
+  },
+  "brief": {
+    "goal": "--json ทำให้ bench พิมพ์ตัวเลขเดียวกันเป็น JSON, invariant 3 ข้อกู้จาก JSON ได้",
+    "done": [],
+    "pending": [],
+    "constraints": [
+      "output human เดิมไม่เปลี่ยนเมื่อไม่มี --json",
+      "ห้ามเพิ่ม dependency parse CLI",
+      "cargo test ผ่าน"
+    ],
+    "files": [],
+    "diff": ""
+  },
+  "result": {
+    "understood_goal": 2,
+    "no_repeat_work": 2,
+    "respected_constraints": 2,
+    "proceeded_unaided": 2,
+    "output_usable": 1
+  },
+  "failure_note": "9/10 ผ่าน. brief บาง (goal + 3 constraint ไม่มี files/pending) แต่ยังส่งต่อได้เพราะงานคือ 'มิเรอร์ output ที่มีอยู่ในฟอร์แมตใหม่' — codex อ่าน bench เดิมแล้วทำตาม. หัก 1: context_window object ไม่มี field บอกขนาด window (200k/24k/6k) — กู้ได้จาก per_tier[system].cap_tokens หรือ array order เท่านั้น. brief ที่หนากว่า ('แต่ละ window object ต้องมี token size') จะกันจุดนี้ได้ — หรือ codex ควร label เอง. signal: thin brief เวิร์คกับงาน 'reformat' แต่เสียความแม่นเรื่องรูปร่าง output"
+}
