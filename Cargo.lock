@@ -76,6 +76,7 @@ name = "chorus-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chorus-acp",
  "chorus-core",
  "serde_json",
 ]

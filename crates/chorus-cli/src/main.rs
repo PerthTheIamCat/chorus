@@ -9,6 +9,7 @@
 //!      truncating the tail, so the task state always survives.
 
 use anyhow::{Context, Result};
+use chorus_cli::session::{Policy, Session};
 use chorus_core::context::{AssembleInput, Assembler, Budget, Tier, TurnItem};
 use chorus_core::render::{self, ContextItem, FileChange};
 use chorus_core::tokens::{CachedCounter, HeuristicCounter, TokenCounter};
@@ -39,14 +40,66 @@ fn tier_name(t: Tier) -> &'static str {
 }
 
 fn main() -> Result<()> {
-    let arg = std::env::args().nth(1).unwrap_or_else(|| "bench".into());
-    match arg.as_str() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let cmd = args.first().map(String::as_str).unwrap_or("bench");
+    match cmd {
         "bench" => bench(),
+        "run" => run(&args[1..]),
         other => {
-            eprintln!("unknown command {other:?}; try: chorus bench");
+            eprintln!("unknown command {other:?}; try: chorus bench | chorus run");
             std::process::exit(2);
         }
     }
+}
+
+/// `chorus run <cwd> <prompt> [--db PATH] [--agent NAME] [--yes]`
+///
+/// One real Codex turn, driven into an app-owned ledger. Denies every
+/// permission request unless `--yes` is passed.
+fn run(args: &[String]) -> Result<()> {
+    let mut positional: Vec<&String> = Vec::new();
+    let mut db: Option<PathBuf> = None;
+    let mut agent = "codex".to_string();
+    let mut policy = Policy::DenyAll;
+
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--db" => db = it.next().map(PathBuf::from),
+            "--agent" => {
+                if let Some(v) = it.next() {
+                    agent = v.clone();
+                }
+            }
+            "--yes" => policy = Policy::AllowAll,
+            _ => positional.push(a),
+        }
+    }
+    let [cwd, prompt] = positional.as_slice() else {
+        anyhow::bail!("usage: chorus run <cwd> <prompt> [--db PATH] [--agent NAME] [--yes]");
+    };
+
+    let db = db.unwrap_or_else(|| {
+        std::env::temp_dir().join(format!("chorus-run-{}.db", std::process::id()))
+    });
+    let cwd = PathBuf::from(cwd);
+    let mut s = Session::create(&db, &cwd, prompt).context("create session")?;
+    eprintln!("session {} · store {}", s.session_id(), db.display());
+
+    let report = s.run_turn(&agent, "openai", prompt, policy)?;
+
+    println!("\n── {agent} ──────────────────────────────────────────");
+    println!("{}", report.message.trim());
+    println!("\nstop: {}", report.stop_reason);
+    if let (Some(u), Some(w)) = (report.context_used, report.context_window) {
+        println!("context: {u} / {w} ({:.0}%)", u as f64 / w as f64 * 100.0);
+    }
+    println!(
+        "ledger: user seq {} + {} agent events",
+        report.user_seq,
+        report.agent_seqs.len()
+    );
+    Ok(())
 }
 
 fn bench() -> Result<()> {

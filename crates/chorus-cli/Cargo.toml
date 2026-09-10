@@ -5,11 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+name = "chorus_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "chorus"
 path = "src/main.rs"
 
 [dependencies]
 chorus-core = { path = "../chorus-core" }
+chorus-acp = { path = "../chorus-acp" }
 anyhow.workspace = true
 serde_json.workspace = true
