@@ -44,31 +44,27 @@ Swift ทำแค่วาดกับรับ input เพื่อให้�
 
 ## 3. สถานะตอนนี้ (11 ก.ย. 2026)
 
-**Phase 0–2 core ครบ + macOS shell ใช้ได้จริง** — เทสต์ผ่าน 57/57 · clippy clean
+**Phase 0–2 ครบ + macOS shell ครบ design §7** — เทสต์ผ่าน 60/60 · clippy clean
 
 | crate | ทำอะไร |
 |---|---|
-| `chorus-core` | ledger (+ fork-chain `history()`), blob store, memory + approve queue (v2), token counter, render, context assembler, handoff brief, projector, checkpoint (shadow git), compaction ladder (Extractive L1/L2), **mcp (Streamable-HTTP MCP server: `memory_propose` — ทำงานกับ Codex แล้ว)** |
-| `chorus-acp` | ACP client + `acp-probe` + mock (`--fail`) + `CodexAgent` adapter จริง + `bridge_for(name)` (codex/claude/gemini) |
-| `chorus-cli` | lib+bin · `bench` · `run` (multi-turn + `--chain` relay) · `handoff` · `memory` · `compare` · `Session` engine |
-| `chorus-ffi` | staticlib C ABI (`chorus.h`) — engine/run_turn/run_relay/compare/handoff/events_since/working_diff/snapshot/restore/memory_state/memory_review · JSON ล้วน · panic-guarded |
-| `apps/macos` | SwiftUI shell — sidebar (single/relay/compare) · thread + agent blame · Context/Changes/Memory panes · handoff sheet · compare results sheet · snapshot+revert · `apps/macos/build.sh` |
+| `chorus-core` | ledger (+ fork-chain `history()`), blob store, memory + approve queue (v2), token counter, render, context assembler, handoff brief, projector, checkpoint (shadow git + `apply_reverse`), compaction (Extractive + **Ollama**), **mcp (Streamable-HTTP: `memory_propose` — ทำงานกับ Codex)** |
+| `chorus-acp` | ACP client + `acp-probe` + mock (`--fail`) + `CodexAgent` + `bridge_for` (codex/claude/gemini) · strip `CLAUDECODE` |
+| `chorus-cli` | lib+bin · `bench`/`run`(+`--chain`/`--read-only`)/`handoff`/`memory`/`compare` · `Session` engine |
+| `chorus-ffi` | C ABI (`chorus.h`) — engine/run_turn(+interactive callback)/run_relay/compare/handoff/events_since/working_diff/snapshot/restore/reject_hunks/memory_state+review · JSON ล้วน · panic-guarded |
+| `apps/macos` | SwiftUI shell — sidebar (single/relay/compare/**ask-each**) · thread + agent blame · Context/Changes(**per-hunk keep-reject**)/Memory panes · handoff + compare sheets · **interactive permission dialog** · `apps/macos/build.sh` |
 
 **Flow ที่ทำงานจริงกับ Codex**: หลาย agent ใน session เดียว · ledger เป็น SoT · จำข้ามเทิร์นจาก ledger
-(ไม่ใช่ provider session) · handoff กลางคัน + Verify echo-back · brief พก diff อัตโนมัติจาก checkpoint ·
-relay chain auto-failover เมื่อ 429/quota · compare mode (fork ต่อ agent) · projector เขียน AGENTS.md/CLAUDE.md ก่อนทุกเทิร์น (ไม่ทับของ user) · memory approve queue ใน UI
+(ไม่ใช่ provider session) · handoff กลางคัน + Verify echo-back · brief พก diff จาก checkpoint ·
+relay auto-failover 429/quota · compare (fork ต่อ agent) · projector เขียน agent files · memory `memory_propose`→approve queue · per-hunk diff reject · interactive permission
 
-**ทำงานแล้ว (แก้เอง 11 ก.ย.)**:
-- **MCP `memory_propose`** — ทำงานกับ Codex เต็ม (Streamable-HTTP + held-open SSE)
-- **compaction ด้วย Ollama** — `compaction::Ollama` + `best()` · เปิดด้วย `CHORUS_SUMMARY_MODEL=<model>` (ต้อง `brew install ollama` + `ollama pull`)
-- **claude-code-acp** — ต่อได้แล้ว (strip `CLAUDECODE`) · ค้างที่ **OAuth token หมดอายุบนเครื่อง** → `claude` login ใหม่
-- **permission 3 ระดับ** — `Policy` deny/read-only/allow · `--read-only` flag · FFI level int
-
-**ยังต้องเพื่อน**:
-- **Gemini adapter** — ไม่มี `gemini` CLI (`bridge_for` เตรียมไว้แล้ว)
+**ยังต้องเพื่อน (แต่ไม่บล็อกอะไร)**:
+- **Gemini adapter** — ไม่มี `gemini` CLI (`bridge_for` เตรียมไว้ · ลง CLI แล้วใช้ได้ทันที)
+- **claude-code-acp** — โค้ดพร้อม · เครื่องนี้ `claude` OAuth หมดอายุ → login ใหม่
+- **Ollama compaction** — โค้ดพร้อม · `brew install ollama && ollama pull qwen2.5:3b` แล้วตั้ง `CHORUS_SUMMARY_MODEL`
 - **embedding + sqlite-vec** — ต้องตัดสิน dep (MLX / `NLEmbedding` / sqlite-vec)
 - **Seatbelt sandbox · notarize · .app bundle** — ต้อง Apple Developer account
-- **diff review per-hunk** · permission callback แบบ interactive จริง · event push (ยัง poll `events_since`)
+- **event push** — shell ยัง poll `events_since` (ทำงานได้ดี · push เป็น optimization)
 
 ### ตัวเลขจาก `chorus bench` (78 events) — baseline ที่ห้ามถอยหลัง
 
@@ -90,7 +86,7 @@ store.db 92 KB / 78 events   (เดิม 84 KB — schema v2 เพิ่ม�
 ## 4. คำสั่ง
 
 ```bash
-cargo test                              # 57 tests
+cargo test                              # 60 tests
 cargo run -p chorus-cli -- bench        # วัด invariant ทั้ง 3
 cargo run --bin acp-probe -- --cwd /tmp/acp-scratch --mock         # ลอง ACP กับ agent ปลอม
 cargo run -p chorus-acp --example codex_smoke -- /tmp/codex-smoke   # CodexAgent กับ bridge จริง (ต้อง codex login)
