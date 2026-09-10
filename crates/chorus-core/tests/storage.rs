@@ -231,3 +231,57 @@ fn on_disk_store_persists_and_migrates() {
         .unwrap();
     assert_eq!(count, 1);
 }
+
+#[test]
+fn proposed_facts_wait_for_approval() {
+    let store = setup();
+    let c = store.conn();
+    let agent = actor::intern(c, "claude", "anthropic").unwrap();
+
+    let p1 = memory::propose(c, 1, "user prefers tabs over spaces", Some(agent)).unwrap();
+    let _p2 = memory::propose(c, 1, "the build is flaky on CI", Some(agent)).unwrap();
+
+    // Nothing reached `fact` yet.
+    assert!(memory::top(c, 1, 10).unwrap().is_empty());
+    assert_eq!(memory::pending(c).unwrap().len(), 2);
+
+    // Approve one, reject the other.
+    memory::approve(c, p1).unwrap();
+    let pending = memory::pending(c).unwrap();
+    assert_eq!(pending.len(), 1);
+    memory::reject(c, pending[0].id).unwrap();
+
+    assert!(memory::pending(c).unwrap().is_empty());
+    let facts = memory::top(c, 1, 10).unwrap();
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].text, "user prefers tabs over spaces");
+}
+
+#[test]
+fn an_over_long_proposal_is_rejected_at_propose_time() {
+    let store = setup();
+    let long = "x".repeat(200);
+    assert!(memory::propose(store.conn(), 0, &long, None).is_err());
+}
+
+#[test]
+fn schema_v1_database_upgrades_to_v2() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v1.sqlite3");
+
+    // Hand-build a v1 database: run the current migration, then stamp it
+    // back to version 1 and drop the v2 table, as an old build would leave it.
+    {
+        let store = Store::open(&path).unwrap();
+        store
+            .conn()
+            .execute_batch("DROP TABLE fact_proposal; PRAGMA user_version = 1;")
+            .unwrap();
+    }
+
+    // Reopening runs migrate again and must add the v2 table without losing data.
+    let store = Store::open(&path).unwrap();
+    let v: i64 = store.conn().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    assert_eq!(v, schema::SCHEMA_VERSION);
+    assert!(memory::propose(store.conn(), 0, "works after upgrade", None).is_ok());
+}

@@ -14,7 +14,7 @@
 use crate::Result;
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Create (or upgrade) the schema. Safe to call on every open.
 pub fn migrate(conn: &Connection) -> Result<()> {
@@ -86,6 +86,19 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         );
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_scope_text ON fact(scope, text);
+
+        -- v2: agents may not write `fact` directly (see design §4). They
+        -- append here via `memory::propose`; a human moves rows into `fact`
+        -- with `memory::approve` or drops them with `memory::reject`.
+        CREATE TABLE IF NOT EXISTS fact_proposal (
+            id         INTEGER PRIMARY KEY,
+            scope      INTEGER NOT NULL,
+            text       TEXT NOT NULL,
+            src        INTEGER REFERENCES actor(id),
+            created_ms INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_proposal_scope ON fact_proposal(scope, id);
 
         -- TODO(phase-1): vec0 table for embeddings
 

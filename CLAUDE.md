@@ -62,7 +62,7 @@ compaction ladder ตัวจริง, relay chain, Gemini/Ollama adapter
 ledger ดิบ 103,553 token
   @200k window → 16,226 token (15.7%)   demoted/dropped 0/0
   @6k  window →  2,490 token (2.4%)     demoted/dropped 40/11
-store.db 84 KB / 78 events
+store.db 92 KB / 78 events   (เดิม 84 KB — schema v2 เพิ่มตาราง fact_proposal + index ว่าง ~8 KB)
 ```
 
 **Invariant 3 ข้อ** — ถ้า bench แสดงผิดจากนี้แปลว่ามี regression:
