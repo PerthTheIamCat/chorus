@@ -44,6 +44,17 @@ char *chorus_run_turn(ChorusEngine *e,
                       const char *prompt,
                       int allow);
 
+/* A permission callback. `ask_json` is {"tool":"...","kind":"...","detail":"..."};
+ * return non-zero to allow. Called on the calling thread — block here while
+ * you show a dialog. */
+typedef int (*ChorusPermissionCallback)(void *ctx, const char *ask_json);
+
+/* Run one turn, routing each permission request to `callback`.
+ * Same JSON result shape as chorus_run_turn. */
+char *chorus_run_turn_interactive(ChorusEngine *e, const char *agent,
+                                  const char *prompt,
+                                  ChorusPermissionCallback callback, void *ctx);
+
 /* The whole session as a JSON array:
  * [{"seq":N,"kind":"msg","actor":"...","body":"..."}, ...] */
 char *chorus_transcript_json(const ChorusEngine *e);

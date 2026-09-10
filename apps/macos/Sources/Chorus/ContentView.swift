@@ -14,7 +14,7 @@ struct ContentView: View {
     @State private var chainAgents = "codex,claude-opus"
     @State private var compareOutput: String?
 
-    enum SendMode: String, CaseIterable { case single = "Single", relay = "Relay", compare = "Compare" }
+    enum SendMode: String, CaseIterable { case single = "Single", relay = "Relay", compare = "Compare", ask = "Ask each" }
     @State private var showHandoff = false
     @State private var rightTab = RightTab.context
     @State private var confirmRevert = false
@@ -56,6 +56,26 @@ struct ContentView: View {
         }
         .sheet(isPresented: Binding(get: { compareOutput != nil }, set: { if !$0 { compareOutput = nil } })) {
             CompareResultsSheet(json: compareOutput ?? "")
+        }
+        .sheet(item: $engine.pendingAsk) { ask in
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Permission").font(.title3.bold())
+                Text("\(agent) wants to: **\(ask.tool)**")
+                if !ask.kind.isEmpty {
+                    Text("kind: \(ask.kind)").font(.caption).foregroundStyle(.secondary)
+                }
+                if !ask.detail.isEmpty {
+                    Text(ask.detail).font(.callout).textSelection(.enabled)
+                }
+                HStack {
+                    Spacer()
+                    Button("Deny", role: .destructive) { engine.answerPermission(false) }
+                    Button("Allow") { engine.answerPermission(true) }
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(20)
+            .frame(width: 420)
         }
     }
 
@@ -149,6 +169,8 @@ struct ContentView: View {
                 switch sendMode {
                 case .single:
                     engine.send(text, agent: agent, allow: allow)
+                case .ask:
+                    engine.sendInteractive(text, agent: agent)
                 case .relay:
                     engine.sendRelay(text, agents: chainAgents, allow: allow)
                 case .compare:

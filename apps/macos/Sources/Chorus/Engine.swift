@@ -78,6 +78,62 @@ final class Engine: ObservableObject {
         handle = nil
     }
 
+    // MARK: interactive permission
+
+    struct PermissionAsk: Identifiable {
+        let id = UUID()
+        let tool: String
+        let kind: String
+        let detail: String
+    }
+    @Published var pendingAsk: PermissionAsk?
+    private let permGate = DispatchSemaphore(value: 0)
+    private var permAnswer = false
+
+    /// Called from the C callback on the engine's background thread. Publishes
+    /// the ask to the UI and blocks until `answerPermission` is called.
+    fileprivate func askPermissionBlocking(_ json: String) -> Bool {
+        struct Raw: Codable { let tool: String?; let kind: String?; let detail: String? }
+        let raw = (try? JSONDecoder().decode(Raw.self, from: Data(json.utf8)))
+        DispatchQueue.main.async {
+            self.pendingAsk = PermissionAsk(
+                tool: raw?.tool ?? "action", kind: raw?.kind ?? "", detail: raw?.detail ?? "")
+        }
+        permGate.wait()
+        return permAnswer
+    }
+
+    func answerPermission(_ allow: Bool) {
+        permAnswer = allow
+        pendingAsk = nil
+        permGate.signal()
+    }
+
+    /// Run a turn where every permission request pops a dialog.
+    func sendInteractive(_ prompt: String, agent: String) {
+        guard let h = handle, !busy else { return }
+        busy = true; lastError = nil
+        let ctx = Unmanaged.passUnretained(self).toOpaque()
+        let cb: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Int32 = { ctx, ask in
+            guard let ctx, let ask else { return 0 }
+            let engine = Unmanaged<Engine>.fromOpaque(ctx).takeUnretainedValue()
+            return engine.askPermissionBlocking(String(cString: ask)) ? 1 : 0
+        }
+        queue.async { [weak self] in
+            let json = prompt.withCString { p in
+                agent.withCString { a in
+                    Self.string(from: chorus_run_turn_interactive(h, a, p, cb, ctx))
+                }
+            }
+            let r = Self.decode(TurnResult.self, json)
+            DispatchQueue.main.async {
+                self?.busy = false
+                if r?.ok != true { self?.lastError = r?.error ?? "turn failed" }
+                self?.refresh()
+            }
+        }
+    }
+
     /// Run one turn, then refresh the transcript.
     func send(_ prompt: String, agent: String, allow: Bool) {
         guard let h = handle, !busy else { return }

@@ -184,6 +184,70 @@ pub unsafe extern "C" fn chorus_run_turn(
     }
 }
 
+/// A permission callback: given the ask as JSON
+/// (`{"tool":"...","kind":"...","detail":"..."}`), return non-zero to allow.
+/// Called on the same thread as `chorus_run_turn_interactive` (which the
+/// shell already runs off its main thread) — the shell hops to its UI,
+/// shows a dialog, and blocks here until the user answers.
+pub type PermissionCallback =
+    extern "C" fn(ctx: *mut std::ffi::c_void, ask_json: *const c_char) -> c_int;
+
+/// Run one turn, routing every permission request to `callback`.
+///
+/// # Safety
+/// `e` live; `agent`/`prompt` valid UTF-8; `callback` a valid function
+/// pointer for the duration of the call; `ctx` whatever the callback expects.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_run_turn_interactive(
+    e: *mut ChorusEngine,
+    agent: *const c_char,
+    prompt: *const c_char,
+    callback: PermissionCallback,
+    ctx: *mut std::ffi::c_void,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let (Some(agent), Some(prompt)) = (borrow(agent), borrow(prompt)) else {
+        return err("agent/prompt must be valid UTF-8");
+    };
+
+    let ctx_usize = ctx as usize; // move a Copy value into the closure
+    let mut decide = |ask: &chorus_cli::session::PermissionAsk| {
+        let payload = serde_json::json!({
+            "tool": ask.tool, "kind": ask.kind, "detail": ask.detail
+        })
+        .to_string();
+        let c = std::ffi::CString::new(payload).unwrap_or_default();
+        let allow = callback(ctx_usize as *mut std::ffi::c_void, c.as_ptr());
+        if allow != 0 {
+            chorus_cli::session::Permission::Allow
+        } else {
+            chorus_cli::session::Permission::Deny
+        }
+    };
+
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        engine
+            .session
+            .run_turn_decide(agent, "openai", prompt, &mut decide)
+    }));
+    match r {
+        Ok(Ok(t)) => out(serde_json::to_string(&TurnJson {
+            ok: true,
+            user_seq: t.user_seq,
+            agent_event_count: t.agent_seqs.len(),
+            message: t.message,
+            context_used: t.context_used,
+            context_window: t.context_window,
+            stop_reason: t.stop_reason,
+        })
+        .unwrap()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in run_turn_interactive"),
+    }
+}
+
 // ---- transcript --------------------------------------------------
 
 #[derive(Serialize)]

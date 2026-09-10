@@ -8,9 +8,8 @@
 //! still whole.
 
 use anyhow::{Context, Result};
-use chorus_acp::codex::{
-    AgentEvent, CodexAgent, CodexConfig, Permission, PermissionAsk, TurnOutcome,
-};
+use chorus_acp::codex::{AgentEvent, CodexAgent, CodexConfig, TurnOutcome};
+pub use chorus_acp::codex::{Permission, PermissionAsk};
 use chorus_core::checkpoint::Checkpoint;
 use chorus_core::compaction;
 use chorus_core::context::{AssembleInput, Assembler, Budget, TurnItem};
@@ -672,6 +671,17 @@ impl Session {
         text: &str,
         policy: Policy,
     ) -> Result<TurnOutcome> {
+        let mut decide = |ask: &PermissionAsk| policy.decide(ask);
+        self.one_turn_decide(agent_name, bridge, text, &mut decide)
+    }
+
+    fn one_turn_decide(
+        &self,
+        agent_name: &str,
+        bridge: &[String],
+        text: &str,
+        decide: &mut dyn FnMut(&PermissionAsk) -> Permission,
+    ) -> Result<TurnOutcome> {
         self.project_memory(agent_name);
         let mcp_servers = match &self.mcp {
             Some(m) => serde_json::json!([m.mcp_server_entry()]),
@@ -684,8 +694,45 @@ impl Session {
         };
         let mut agent =
             CodexAgent::start(&self.cwd, cfg).with_context(|| format!("start {agent_name}"))?;
-        let mut decide = |ask: &PermissionAsk| policy.decide(ask);
-        agent.prompt(text, &mut decide).context("agent turn")
+        agent.prompt(text, decide).context("agent turn")
+    }
+
+    /// Like [`run_turn`], but each permission request is put to `decide`
+    /// (the shell shows a dialog and blocks until the user answers). The
+    /// history/ledger/persistence path is identical.
+    pub fn run_turn_decide(
+        &mut self,
+        agent_name: &str,
+        provider: &str,
+        user_text: &str,
+        decide: &mut dyn FnMut(&PermissionAsk) -> Permission,
+    ) -> Result<TurnReport> {
+        let agent_actor = actor::intern(self.store.conn(), agent_name, provider)?;
+        let has_history = !ledger::history(self.store.conn(), self.sess, 1)?.is_empty();
+        let prompt = if has_history {
+            let ctx = self.assemble_context(120_000)?;
+            format!(
+                "{ctx}\n\n---\nThat is the session so far, reconstructed from the shared \
+                 ledger. Continue from here.\n\nNew instruction:\n{user_text}"
+            )
+        } else {
+            user_text.to_string()
+        };
+        let user_seq = ledger::append(
+            self.store.conn(),
+            &NewEvent::new(self.sess, EventKind::Msg, self.user, user_text),
+        )?;
+        let bridge = self.resolve_bridge(agent_name, &[]);
+        let outcome = self.one_turn_decide(agent_name, &bridge, &prompt, decide)?;
+        let agent_seqs = self.persist_outcome(&outcome, agent_actor, user_seq)?;
+        Ok(TurnReport {
+            user_seq,
+            agent_seqs,
+            message: outcome.message,
+            context_used: outcome.context_used,
+            context_window: outcome.context_window,
+            stop_reason: outcome.stop_reason,
+        })
     }
 
     /// Render the single memory into the file the agent reads on startup
