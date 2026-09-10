@@ -48,7 +48,7 @@ Swift ทำแค่วาดกับรับ input เพื่อให้�
 
 | crate | ทำอะไร |
 |---|---|
-| `chorus-core` | ledger (+ fork-chain `history()`), blob store, memory + approve queue (v2), token counter, render, context assembler, handoff brief, projector, checkpoint (shadow git), compaction ladder (Extractive L1/L2), **mcp (HTTP MCP server: `memory.propose`)** |
+| `chorus-core` | ledger (+ fork-chain `history()`), blob store, memory + approve queue (v2), token counter, render, context assembler, handoff brief, projector, checkpoint (shadow git), compaction ladder (Extractive L1/L2), **mcp (Streamable-HTTP MCP server: `memory_propose` — ทำงานกับ Codex แล้ว)** |
 | `chorus-acp` | ACP client + `acp-probe` + mock (`--fail`) + `CodexAgent` adapter จริง + `bridge_for(name)` (codex/claude/gemini) |
 | `chorus-cli` | lib+bin · `bench` · `run` (multi-turn + `--chain` relay) · `handoff` · `memory` · `compare` · `Session` engine |
 | `chorus-ffi` | staticlib C ABI (`chorus.h`) — engine/run_turn/run_relay/compare/handoff/events_since/working_diff/snapshot/restore/memory_state/memory_review · JSON ล้วน · panic-guarded |
@@ -59,7 +59,7 @@ Swift ทำแค่วาดกับรับ input เพื่อให้�
 relay chain auto-failover เมื่อ 429/quota · compare mode (fork ต่อ agent) · projector เขียน AGENTS.md/CLAUDE.md ก่อนทุกเทิร์น (ไม่ทับของ user) · memory approve queue ใน UI
 
 **ยังไม่เสร็จ — ส่วนใหญ่ต้องเพื่อนตัดสิน/ลงเครื่องมือ**:
-- **MCP `memory.propose` ยังไม่ถึง Codex** — server เราตอบ plain-POST · Codex ต้องการ MCP Streamable-HTTP เต็ม (SSE + `Mcp-Session-Id`) · ต้อง capture request จริงของ Codex แล้ว match
+- **compaction ด้วย Ollama** — มี `Summarizer` trait รอ · เครื่องนี้ไม่มี `ollama`  *(← MCP `memory_propose` ทำงานกับ Codex แล้ว 11 ก.ย.)*
 - **compaction ด้วย Ollama** — มี `Summarizer` trait รอ · เครื่องนี้ไม่มี `ollama`
 - **Gemini adapter** — ไม่มี `gemini` CLI · `bridge_for` เตรียมไว้แล้ว
 - **claude-code-acp** — error "Query closed before response received" · ต้อง debug (auth / nested claude?)
@@ -128,7 +128,7 @@ crates/chorus-core/src/
   projector.rs  render memory → CLAUDE.md/AGENTS.md/GEMINI.md + drift detect (marker + hash)
   checkpoint.rs shadow git repo <cwd>/.chorus/ckpt — snapshot/diff_since/restore (shell ออก git)
   compaction.rs Summarizer trait + Extractive (model-free L1/L2) — Ollama impl ทีหลัง
-  mcp.rs        HTTP MCP server (std::net, ไม่มี dep) — tool memory.propose · ต่อ Codex ยังไม่ได้ (ดู §3)
+  mcp.rs        Streamable-HTTP MCP server (std::net, ไม่มี dep) — tool memory_propose · ทำงานกับ Codex แล้ว (persistent conn + held-open SSE)
 crates/chorus-cli/src/main.rs           bench + run + handoff + memory + compare subcommands
 crates/chorus-cli/src/session.rs        Session engine — run_turn/run_relay/handoff/compare/assemble_context/events_since
 crates/chorus-acp/src/lib.rs            ACP client (Agent) + mock agent module (--fail สำหรับเทสต์ relay)
@@ -173,7 +173,7 @@ evals/handoff/                          สไปก์ที่ 2 (README + เ
 (tiktoken / count-tokens endpoint) แล้วแคชผลไว้กับ hash ของเนื้อหา
 
 ### 7.2 อย่าให้ agent เขียน memory ตรง ๆ
-ต้องผ่าน `memory.propose` → approve queue (ยังไม่ได้ทำ — Phase 1)
+ผ่าน MCP tool `memory_propose` → approve queue (`chorus memory` / Memory pane) — **ทำแล้ว**
 ปล่อยอิสระเมื่อไหร่ ความจำจะเต็มไปด้วยข้อสรุปผิดภายในไม่กี่วัน
 
 ### 7.3 repo เงาสำหรับ checkpoint
