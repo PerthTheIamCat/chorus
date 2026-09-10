@@ -42,7 +42,7 @@ fn sanitise_cell(cell: &str) -> String {
 /// they appear on every row below it.
 pub fn table(header: &[&str], rows: &[Vec<String>]) -> String {
     let mut out = String::new();
-    out.push_str("(");
+    out.push('(');
     out.push_str(&header.join(" | "));
     out.push_str("):\n");
     for row in rows {
@@ -112,7 +112,7 @@ pub fn repeat_ref(path: &str) -> String {
 /// each distinct `key` is kept verbatim, and every later item with the same
 /// key has its `text` replaced with a `repeat_ref` line naming its label.
 /// Items with `key: None` are never considered duplicates of anything.
-pub fn dedup_window(items: &mut Vec<ContextItem>) {
+pub fn dedup_window(items: &mut [ContextItem]) {
     use std::collections::HashSet;
     let mut seen: HashSet<String> = HashSet::new();
     for item in items.iter_mut() {

@@ -296,7 +296,7 @@ impl<C: TokenCounter> Assembler<C> {
         (text, used, dropped_turns, demoted_turns)
     }
 
-    fn assemble_code(&self, items: &mut Vec<ContextItem>, cap: i64) -> (String, i64) {
+    fn assemble_code(&self, items: &mut [ContextItem], cap: i64) -> (String, i64) {
         render::dedup_window(items);
 
         let mut sizes: Vec<i64> = items.iter().map(|i| self.counter.count(&i.text)).collect();
