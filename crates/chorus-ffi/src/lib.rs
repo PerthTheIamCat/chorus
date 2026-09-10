@@ -236,6 +236,60 @@ pub unsafe extern "C" fn chorus_events_since(e: *const ChorusEngine, after: i64)
     }
 }
 
+// ---- checkpoints -----------------------------------------------
+
+/// The workspace diff since the session base checkpoint.
+/// JSON: {"ok":true,"diff":"..."}
+///
+/// # Safety
+/// `e` must be a live engine handle.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_working_diff(e: *const ChorusEngine) -> *mut c_char {
+    let Some(engine) = e.as_ref() else {
+        return err("null engine");
+    };
+    let diff = catch_unwind(AssertUnwindSafe(|| engine.session.working_diff())).unwrap_or_default();
+    out(serde_json::json!({ "ok": true, "diff": diff }).to_string())
+}
+
+/// Take a manual checkpoint. JSON: {"ok":true,"sha":"..."}
+///
+/// # Safety
+/// `e` live; `message` valid NUL-terminated UTF-8 or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_snapshot(
+    e: *const ChorusEngine,
+    message: *const c_char,
+) -> *mut c_char {
+    let Some(engine) = e.as_ref() else {
+        return err("null engine");
+    };
+    let msg = borrow(message).unwrap_or("manual checkpoint");
+    match catch_unwind(AssertUnwindSafe(|| engine.session.snapshot(msg))) {
+        Ok(Ok(sha)) => out(serde_json::json!({ "ok": true, "sha": sha }).to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in snapshot"),
+    }
+}
+
+/// Roll the workspace back to `sha` (empty = the session base). Destructive.
+/// JSON: {"ok":true}
+///
+/// # Safety
+/// `e` live; `sha` valid NUL-terminated UTF-8 or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_restore(e: *const ChorusEngine, sha: *const c_char) -> *mut c_char {
+    let Some(engine) = e.as_ref() else {
+        return err("null engine");
+    };
+    let sha = borrow(sha).unwrap_or("");
+    match catch_unwind(AssertUnwindSafe(|| engine.session.restore_to(sha))) {
+        Ok(Ok(())) => out(serde_json::json!({ "ok": true }).to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in restore"),
+    }
+}
+
 // ---- handoff ----------------------------------------------------
 
 #[derive(Serialize)]

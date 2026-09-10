@@ -11,6 +11,10 @@ struct ContentView: View {
     @State private var agent = "codex"
     @State private var allow = false
     @State private var showHandoff = false
+    @State private var rightTab = RightTab.context
+    @State private var confirmRevert = false
+
+    enum RightTab: String, CaseIterable { case context = "Context", changes = "Changes" }
 
     var body: some View {
         NavigationSplitView {
@@ -19,7 +23,17 @@ struct ContentView: View {
             HStack(spacing: 0) {
                 thread
                 Divider()
-                contextPane.frame(width: 240)
+                VStack(spacing: 0) {
+                    Picker("", selection: $rightTab) {
+                        ForEach(RightTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .padding(8)
+                    Divider()
+                    if rightTab == .context { contextPane } else { changesPane }
+                }
+                .frame(width: 300)
             }
         }
         .toolbar {
@@ -120,6 +134,42 @@ struct ContentView: View {
     }
 
     // MARK: context pane — budget + last agent
+
+    private var changesPane: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Since session start").font(.headline)
+                Spacer()
+                Button("Snapshot") { engine.snapshot() }
+                    .controlSize(.small)
+                    .disabled(engine.sessionID < 0)
+            }
+            if engine.workingDiff.isEmpty {
+                Text("no changes yet").font(.caption).foregroundStyle(.secondary)
+            } else {
+                ScrollView([.horizontal, .vertical]) {
+                    Text(engine.workingDiff)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                Button(role: .destructive) { confirmRevert = true } label: {
+                    Label("Revert workspace to session start", systemImage: "arrow.uturn.backward")
+                }
+                .controlSize(.small)
+                .confirmationDialog(
+                    "Discard every change agents made this session?",
+                    isPresented: $confirmRevert, titleVisibility: .visible
+                ) {
+                    Button("Revert everything", role: .destructive) { engine.revertToStart() }
+                    Button("Cancel", role: .cancel) {}
+                }
+            }
+            Spacer()
+        }
+        .padding(12)
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
 
     private var contextPane: some View {
         VStack(alignment: .leading, spacing: 12) {

@@ -52,6 +52,17 @@ char *chorus_transcript_json(const ChorusEngine *e);
  * A UI polls this with the highest seq it has rendered. */
 char *chorus_events_since(const ChorusEngine *e, int64_t after);
 
+/* The workspace diff since the session's base checkpoint (agent edits).
+ * JSON: {"ok":true,"diff":"..."} */
+char *chorus_working_diff(const ChorusEngine *e);
+
+/* Take a manual checkpoint. JSON: {"ok":true,"sha":"..."} */
+char *chorus_snapshot(const ChorusEngine *e, const char *message);
+
+/* Roll the workspace back to `sha` (NULL/"" = the session base).
+ * Destructive — confirm with the user first. JSON: {"ok":true} */
+char *chorus_restore(const ChorusEngine *e, const char *sha);
+
 /* Run one turn against a relay chain. `agents` is comma-separated names
  * (e.g. "codex,claude-opus,gemini"). On a rate-limit / quota / context
  * failure the chain hands off to the next link automatically.

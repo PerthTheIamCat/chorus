@@ -212,6 +212,41 @@ impl Session {
         self.sess
     }
 
+    /// The workspace diff since the session's base checkpoint — what the
+    /// agents have changed. Empty when there's no shadow repo or no change.
+    pub fn working_diff(&self) -> String {
+        self.checkpoint
+            .as_ref()
+            .and_then(|ck| ck.diff_since(&self.base_ckpt).ok())
+            .unwrap_or_default()
+    }
+
+    /// Take a manual checkpoint of the current tree. Returns the new sha.
+    pub fn snapshot(&self, message: &str) -> Result<String> {
+        let ck = self
+            .checkpoint
+            .as_ref()
+            .context("no shadow repo for this workspace")?;
+        Ok(ck.snapshot(message)?)
+    }
+
+    /// Roll the workspace back to `sha` (or the session base when empty).
+    /// Destructive — the caller confirms with the user first.
+    pub fn restore_to(&self, sha: &str) -> Result<()> {
+        let ck = self
+            .checkpoint
+            .as_ref()
+            .context("no shadow repo for this workspace")?;
+        let target = if sha.trim().is_empty() {
+            self.base_ckpt.as_str()
+        } else {
+            sha.trim()
+        };
+        anyhow::ensure!(!target.is_empty(), "no checkpoint to restore to");
+        ck.restore(target)?;
+        Ok(())
+    }
+
     /// Run one user turn against `agent_name`, persisting the user message
     /// and every structured thing the agent does back into the ledger.
     ///

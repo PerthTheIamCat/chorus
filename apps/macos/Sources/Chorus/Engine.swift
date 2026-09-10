@@ -21,6 +21,16 @@ struct TurnResult: Codable {
     let error: String?
 }
 
+struct DiffResult: Codable {
+    let ok: Bool?
+    let diff: String?
+}
+
+struct SimpleResult: Codable {
+    let ok: Bool?
+    let error: String?
+}
+
 struct HandoffResult: Codable {
     let ok: Bool
     let handoff_seq: Int64?
@@ -129,6 +139,28 @@ final class Engine: ObservableObject {
         if let rows = Self.decode([LedgerEvent].self, json) {
             events = rows
         }
+        let d = Self.string(from: chorus_working_diff(h))
+        if let obj = Self.decode(DiffResult.self, d) {
+            workingDiff = obj.diff ?? ""
+        }
+    }
+
+    @Published var workingDiff = ""
+
+    func snapshot() {
+        guard let h = handle else { return }
+        _ = "manual checkpoint".withCString { chorus_snapshot(h, $0) }
+        refresh()
+    }
+
+    /// Roll the workspace back to the session start. Destructive.
+    func revertToStart() {
+        guard let h = handle else { return }
+        let r = "".withCString { Self.string(from: chorus_restore(h, $0)) }
+        if let obj = Self.decode(SimpleResult.self, r), obj.ok != true {
+            lastError = obj.error ?? "restore failed"
+        }
+        refresh()
     }
 
     // ---- helpers (thread-agnostic) ----
