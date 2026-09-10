@@ -13,6 +13,7 @@ pub mod context;
 pub mod error;
 pub mod handoff;
 pub mod ledger;
+pub mod mcp;
 pub mod memory;
 pub mod projector;
 pub mod render;

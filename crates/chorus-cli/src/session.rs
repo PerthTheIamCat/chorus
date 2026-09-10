@@ -15,6 +15,7 @@ use chorus_core::checkpoint::Checkpoint;
 use chorus_core::compaction::{self, Extractive};
 use chorus_core::context::{AssembleInput, Assembler, Budget, TurnItem};
 use chorus_core::handoff::{Brief, BriefInput, HandoffMeta, HandoffReason};
+use chorus_core::mcp::McpServer;
 use chorus_core::projector::{self, AgentFile, Drift, Projection};
 use chorus_core::render::ContextItem;
 use chorus_core::tokens::{CachedCounter, HeuristicCounter};
@@ -117,6 +118,9 @@ pub struct Session {
     /// Sha the handoff brief's diff is measured from — the shadow repo's
     /// HEAD when the session opened. Immutable for the life of the `Session`.
     base_ckpt: String,
+    /// The in-process MCP server handed to every agent (exposes
+    /// `memory.propose`). `None` when it couldn't bind a port.
+    mcp: Option<McpServer>,
 }
 
 /// Open the shadow repo and pick the base sha a handoff diff is measured
@@ -145,6 +149,7 @@ impl Session {
         let user = actor::intern(store.conn(), "user", "human")?;
         let sess = ledger::new_session(store.conn(), title, &cwd.to_string_lossy())?;
         let (checkpoint, base_ckpt) = open_checkpoint(&cwd);
+        let mcp = McpServer::start(&db.to_string_lossy()).ok();
         Ok(Self {
             store,
             sess,
@@ -153,6 +158,7 @@ impl Session {
             forced_bridge: None,
             checkpoint,
             base_ckpt,
+            mcp,
         })
     }
 
@@ -171,6 +177,7 @@ impl Session {
         let user = actor::intern(store.conn(), "user", "human")?;
         let cwd = PathBuf::from(cwd);
         let (checkpoint, base_ckpt) = open_checkpoint(&cwd);
+        let mcp = McpServer::start(&db.to_string_lossy()).ok();
         Ok(Self {
             store,
             sess: session_id,
@@ -179,6 +186,7 @@ impl Session {
             forced_bridge: None,
             checkpoint,
             base_ckpt,
+            mcp,
         })
     }
 
@@ -578,8 +586,13 @@ impl Session {
         policy: Policy,
     ) -> Result<TurnOutcome> {
         self.project_memory(agent_name);
+        let mcp_servers = match &self.mcp {
+            Some(m) => serde_json::json!([m.mcp_server_entry()]),
+            None => serde_json::json!([]),
+        };
         let cfg = CodexConfig {
             command: bridge.to_vec(),
+            mcp_servers,
             ..Default::default()
         };
         let mut agent =
