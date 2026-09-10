@@ -310,6 +310,155 @@ pub unsafe extern "C" fn chorus_handoff(
     }
 }
 
+// ---- relay + compare --------------------------------------------
+
+fn specs_from_csv(csv: &str) -> Vec<chorus_cli::session::AgentSpec> {
+    csv.split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|name| {
+            let provider = if name.contains("claude") {
+                "anthropic"
+            } else if name.contains("gemini") {
+                "google"
+            } else {
+                "openai"
+            };
+            chorus_cli::session::AgentSpec::new(name, provider)
+        })
+        .collect()
+}
+
+#[derive(Serialize)]
+struct RelayJson {
+    ok: bool,
+    answered_by: String,
+    message: String,
+    stop_reason: String,
+    handoffs: Vec<[String; 3]>,
+}
+
+/// Run one turn against a relay chain (`agents` = comma-separated names).
+///
+/// # Safety
+/// `e` live; `agents`, `prompt` valid NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_run_relay(
+    e: *mut ChorusEngine,
+    agents: *const c_char,
+    prompt: *const c_char,
+    allow: c_int,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let (Some(agents), Some(prompt)) = (borrow(agents), borrow(prompt)) else {
+        return err("agents/prompt must be valid UTF-8");
+    };
+    let specs = specs_from_csv(agents);
+    if specs.len() < 2 {
+        return err("relay needs at least two agents");
+    }
+    let policy = if allow != 0 {
+        Policy::AllowAll
+    } else {
+        Policy::DenyAll
+    };
+
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        engine.session.run_relay(&specs, prompt, policy)
+    }));
+    match r {
+        Ok(Ok(rr)) => out(serde_json::to_string(&RelayJson {
+            ok: true,
+            answered_by: rr.answered_by,
+            message: rr.turn.message,
+            stop_reason: rr.turn.stop_reason,
+            handoffs: rr
+                .handoffs
+                .into_iter()
+                .map(|(f, t, why)| [f, t, why.as_phrase().to_string()])
+                .collect(),
+        })
+        .unwrap()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in run_relay"),
+    }
+}
+
+#[derive(Serialize)]
+struct CompareJson {
+    ok: bool,
+    branches: Vec<CompareBranchJson>,
+}
+#[derive(Serialize)]
+struct CompareBranchJson {
+    agent: String,
+    session_id: i64,
+    message: String,
+    stop_reason: String,
+    error: Option<String>,
+}
+
+/// Compare mode: fork per agent, run `prompt` on each, return each branch.
+///
+/// # Safety
+/// `e` live; `agents`, `prompt` valid NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_compare(
+    e: *mut ChorusEngine,
+    agents: *const c_char,
+    prompt: *const c_char,
+    allow: c_int,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let (Some(agents), Some(prompt)) = (borrow(agents), borrow(prompt)) else {
+        return err("agents/prompt must be valid UTF-8");
+    };
+    let specs = specs_from_csv(agents);
+    if specs.len() < 2 {
+        return err("compare needs at least two agents");
+    }
+    let policy = if allow != 0 {
+        Policy::AllowAll
+    } else {
+        Policy::DenyAll
+    };
+
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        engine.session.compare(&specs, prompt, policy)
+    }));
+    match r {
+        Ok(Ok(branches)) => out(serde_json::to_string(&CompareJson {
+            ok: true,
+            branches: branches
+                .into_iter()
+                .map(|b| match b.result {
+                    Ok((message, stop_reason)) => CompareBranchJson {
+                        agent: b.agent,
+                        session_id: b.session_id,
+                        message,
+                        stop_reason,
+                        error: None,
+                    },
+                    Err(e) => CompareBranchJson {
+                        agent: b.agent,
+                        session_id: b.session_id,
+                        message: String::new(),
+                        stop_reason: String::new(),
+                        error: Some(format!("{e:#}")),
+                    },
+                })
+                .collect(),
+        })
+        .unwrap()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in compare"),
+    }
+}
+
 fn parse_str_array(s: Option<&str>) -> Vec<String> {
     s.and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
         .unwrap_or_default()

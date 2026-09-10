@@ -52,6 +52,20 @@ char *chorus_transcript_json(const ChorusEngine *e);
  * A UI polls this with the highest seq it has rendered. */
 char *chorus_events_since(const ChorusEngine *e, int64_t after);
 
+/* Run one turn against a relay chain. `agents` is comma-separated names
+ * (e.g. "codex,claude-opus,gemini"). On a rate-limit / quota / context
+ * failure the chain hands off to the next link automatically.
+ * JSON: {"ok":true,"answered_by":"...","message":"...","stop_reason":"...",
+ *        "handoffs":[["from","to","why"], ...]} */
+char *chorus_run_relay(ChorusEngine *e, const char *agents,
+                       const char *prompt, int allow);
+
+/* Compare mode: fork the session per agent, run `prompt` on each.
+ * JSON: {"ok":true,"branches":[{"agent":"...","session_id":N,
+ *        "message":"...","stop_reason":"...","error":null}, ...]} */
+char *chorus_compare(ChorusEngine *e, const char *agents,
+                     const char *prompt, int allow);
+
 /* Hand the session to `to`. `goal` required; `done_json`/`pending_json`
  * are JSON string arrays or NULL.
  * JSON: {"ok":true,"handoff_seq":N,"from":"...","to":"...",
