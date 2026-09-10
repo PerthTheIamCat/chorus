@@ -38,6 +38,30 @@ pub enum HandoffReason {
 }
 
 impl HandoffReason {
+    /// Classify an agent failure message: `Some` when it's the kind of
+    /// transient, agent-specific failure a relay chain should route around
+    /// (rate limit, quota, context window), `None` when it's a real error
+    /// the next agent would hit too.
+    pub fn from_failure(msg: &str) -> Option<Self> {
+        let m = msg.to_lowercase();
+        if m.contains("rate limit") || m.contains("rate_limit") || m.contains("429") {
+            Some(Self::RateLimit)
+        } else if m.contains("quota") || m.contains("insufficient_quota") || m.contains("billing") {
+            Some(Self::QuotaExhausted)
+        } else if m.contains("context")
+            && (m.contains("exhaust")
+                || m.contains("length")
+                || m.contains("too long")
+                || m.contains("window"))
+        {
+            Some(Self::ContextExhausted)
+        } else if m.contains("overloaded") || m.contains("503") || m.contains("unavailable") {
+            Some(Self::Failover)
+        } else {
+            None
+        }
+    }
+
     /// A short phrase for the resume divider ("switched to codex — rate limit").
     pub fn as_phrase(self) -> &'static str {
         match self {

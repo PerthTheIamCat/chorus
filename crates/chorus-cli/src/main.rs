@@ -9,9 +9,9 @@
 //!      truncating the tail, so the task state always survives.
 
 use anyhow::{Context, Result};
-use chorus_cli::session::{Policy, Session};
-use chorus_core::handoff::HandoffReason;
+use chorus_cli::session::{AgentSpec, Policy, Session};
 use chorus_core::context::{AssembleInput, Assembler, Budget, Tier, TurnItem};
+use chorus_core::handoff::HandoffReason;
 use chorus_core::render::{self, ContextItem, FileChange};
 use chorus_core::tokens::{CachedCounter, HeuristicCounter, TokenCounter};
 use chorus_core::{actor, ledger, memory, EventKind, NewEvent, Store};
@@ -97,14 +97,42 @@ fn handoff(args: &[String]) -> Result<()> {
     // Constraints come from project-scope memory facts.
     let constraints: Vec<String> = Vec::new();
 
-    let r = s.handoff(&to, "openai", reason, &goal, done, pending, constraints, diff, policy)?;
+    let r = s.handoff(
+        &to,
+        "openai",
+        reason,
+        &goal,
+        done,
+        pending,
+        constraints,
+        diff,
+        policy,
+    )?;
 
     println!("── brief handed to {} (seq {}) ──", r.to, r.handoff_seq);
     println!("{}", r.brief.render_markdown());
     println!("\n── {} echo-back ──────────────────────────────", r.to);
     println!("{}", r.echo_back.trim());
-    println!("\nstop: {} · {} events recorded", r.stop_reason, r.agent_seqs.len());
+    println!(
+        "\nstop: {} · {} events recorded",
+        r.stop_reason,
+        r.agent_seqs.len()
+    );
     Ok(())
+}
+
+/// Best-guess provider for an agent name, for actor interning.
+fn provider_of(name: &str) -> &'static str {
+    let n = name.to_lowercase();
+    if n.contains("claude") {
+        "anthropic"
+    } else if n.contains("gemini") {
+        "google"
+    } else if n.contains("codex") || n.contains("gpt") || n.contains("o3") {
+        "openai"
+    } else {
+        "local"
+    }
 }
 
 fn parse_reason(s: &str) -> HandoffReason {
@@ -129,6 +157,8 @@ fn run(args: &[String]) -> Result<()> {
     let mut policy = Policy::DenyAll;
     let mut continue_session: Option<i64> = None;
 
+    let mut chain: Vec<String> = Vec::new();
+
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -136,6 +166,15 @@ fn run(args: &[String]) -> Result<()> {
             "--agent" => {
                 if let Some(v) = it.next() {
                     agent = v.clone();
+                }
+            }
+            "--chain" => {
+                if let Some(v) = it.next() {
+                    chain = v
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
                 }
             }
             "--session" => continue_session = it.next().and_then(|v| v.parse().ok()),
@@ -147,7 +186,9 @@ fn run(args: &[String]) -> Result<()> {
     let (mut s, prompt) = match continue_session {
         Some(id) => {
             let [prompt] = positional.as_slice() else {
-                anyhow::bail!("usage: chorus run <prompt> --session N --db PATH [--agent NAME] [--yes]");
+                anyhow::bail!(
+                    "usage: chorus run <prompt> --session N --db PATH [--agent NAME] [--yes]"
+                );
             };
             let db = db.context("--db is required with --session")?;
             let s = Session::open(&db, id).context("open session")?;
@@ -170,7 +211,20 @@ fn run(args: &[String]) -> Result<()> {
         }
     };
 
-    let report = s.run_turn(&agent, "openai", &prompt, policy)?;
+    let report = if chain.is_empty() {
+        s.run_turn(&agent, "openai", &prompt, policy)?
+    } else {
+        let specs: Vec<AgentSpec> = chain
+            .iter()
+            .map(|name| AgentSpec::new(name, provider_of(name)))
+            .collect();
+        let relay = s.run_relay(&specs, &prompt, policy)?;
+        for (from, to, why) in &relay.handoffs {
+            eprintln!("  relay: {from} → {to} ({})", why.as_phrase());
+        }
+        agent = relay.answered_by;
+        relay.turn
+    };
 
     println!("\n── {agent} ──────────────────────────────────────────");
     println!("{}", report.message.trim());
@@ -208,7 +262,12 @@ fn bench() -> Result<()> {
     let reads = 8;
     ledger::append(
         c,
-        &NewEvent::new(sess, EventKind::Msg, user, "หน้า order list ช้ามาก ช่วยดูให้หน่อย"),
+        &NewEvent::new(
+            sess,
+            EventKind::Msg,
+            user,
+            "หน้า order list ช้ามาก ช่วยดูให้หน่อย",
+        ),
     )?;
     for i in 0..reads {
         ledger::append(
@@ -248,10 +307,13 @@ fn bench() -> Result<()> {
 
     let blob_rows: i64 = c.query_row("select count(*) from blob", [], |r| r.get(0))?;
     let event_rows: i64 = c.query_row("select count(*) from event", [], |r| r.get(0))?;
-    let blob_bytes: i64 = c
-        .query_row("select coalesce(sum(length(bytes)),0) from blob", [], |r| r.get(0))?;
-    let orig_bytes: i64 = c
-        .query_row("select coalesce(sum(orig_len),0) from blob", [], |r| r.get(0))?;
+    let blob_bytes: i64 =
+        c.query_row("select coalesce(sum(length(bytes)),0) from blob", [], |r| {
+            r.get(0)
+        })?;
+    let orig_bytes: i64 = c.query_row("select coalesce(sum(orig_len),0) from blob", [], |r| {
+        r.get(0)
+    })?;
     let naive = file.len() as i64 * reads as i64;
 
     println!("── dedup ─────────────────────────────────────────────");
@@ -295,7 +357,10 @@ fn bench() -> Result<()> {
         .map(|(age, e)| {
             let body = ledger::body(c, e).unwrap_or_default();
             TurnItem {
-                text_l1: Some(format!("[สรุป] {}", body.chars().take(80).collect::<String>())),
+                text_l1: Some(format!(
+                    "[สรุป] {}",
+                    body.chars().take(80).collect::<String>()
+                )),
                 text_l2: Some("[สรุปช่วงงาน] สืบสาเหตุ N+1 และเพิ่ม index".into()),
                 text_l0: body,
                 age,
@@ -317,8 +382,18 @@ fn bench() -> Result<()> {
         },
         ContextItem {
             text: render::file_manifest(&[
-                FileChange { path: "src/order/repo.ts".into(), status: "modified".into(), added: 38, removed: 11 },
-                FileChange { path: "migrations/0042_idx.sql".into(), status: "added".into(), added: 6, removed: 0 },
+                FileChange {
+                    path: "src/order/repo.ts".into(),
+                    status: "modified".into(),
+                    added: 38,
+                    removed: 11,
+                },
+                FileChange {
+                    path: "migrations/0042_idx.sql".into(),
+                    status: "added".into(),
+                    added: 6,
+                    removed: 0,
+                },
             ]),
             key: None,
             label: "diff".into(),
@@ -346,7 +421,10 @@ fn bench() -> Result<()> {
             "  assembled             {used} token   ({:.1}% ของดิบ)",
             used as f64 / raw_total.max(1) as f64 * 100.0
         );
-        println!("  demoted / dropped     {} / {}", out.demoted_turns, out.dropped_turns);
+        println!(
+            "  demoted / dropped     {} / {}",
+            out.demoted_turns, out.dropped_turns
+        );
         for (t, n) in &out.per_tier {
             let cap = Budget::new(total).cap(*t);
             println!("    {:<14} {:>7} / {:>7}", tier_name(*t), n, cap);
@@ -361,8 +439,14 @@ fn bench() -> Result<()> {
     c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
     let db_size = std::fs::metadata(&db_path)?.len();
     println!("\n── on disk ───────────────────────────────────────────");
-    println!("  store.db              {:.1} KB for {event_rows} events", db_size as f64 / 1024.0);
-    println!("  per event             {:.0} bytes", db_size as f64 / event_rows as f64);
+    println!(
+        "  store.db              {:.1} KB for {event_rows} events",
+        db_size as f64 / 1024.0
+    );
+    println!(
+        "  per event             {:.0} bytes",
+        db_size as f64 / event_rows as f64
+    );
     println!("\n  {}", db_path.display());
     Ok(())
 }

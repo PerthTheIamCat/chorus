@@ -2,17 +2,30 @@
 //! Proves the core invariant: one prompt turn, every structured thing the
 //! agent did, lands in one app-owned ledger with an actor.
 
-use chorus_cli::session::{Policy, Session};
+use chorus_cli::session::{AgentSpec, Policy, Session};
 use chorus_core::handoff::HandoffReason;
 
-fn mock_bridge() -> Vec<String> {
-    // target/debug/deps/<test> → target/debug/acp-probe --serve-mock
+fn probe_bin() -> std::path::PathBuf {
     let mut p = std::env::current_exe().expect("test exe");
     p.pop();
     if p.ends_with("deps") {
         p.pop();
     }
-    vec![p.join("acp-probe").to_string_lossy().into_owned(), "--serve-mock".into()]
+    p.join("acp-probe")
+}
+
+fn mock_bridge() -> Vec<String> {
+    vec![probe_bin().to_string_lossy().into_owned(), "--serve-mock".into()]
+}
+
+/// A mock that fails every prompt with `msg` in a JSON-RPC error.
+fn failing_bridge(msg: &str) -> Vec<String> {
+    vec![
+        probe_bin().to_string_lossy().into_owned(),
+        "--serve-mock".into(),
+        "--fail".into(),
+        msg.into(),
+    ]
 }
 
 #[test]
@@ -177,6 +190,67 @@ fn the_ledger_survives_when_the_agent_says_no() {
             .any(|(e, b)| e.kind == chorus_core::EventKind::ToolResult && b.contains("failed")),
         "denied tool call should be recorded as failed"
     );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn a_rate_limited_agent_relays_to_the_next_in_the_chain() {
+    let tmp = std::env::temp_dir().join(format!("chorus-relay-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let db = tmp.join("store.db");
+    let _ = std::fs::remove_file(&db);
+
+    let mut s = Session::create(&db, &tmp, "relay").unwrap();
+
+    let chain = vec![
+        AgentSpec {
+            name: "claude-opus".into(),
+            provider: "anthropic".into(),
+            bridge: failing_bridge("Error: 429 rate limit exceeded"),
+        },
+        AgentSpec { name: "codex".into(), provider: "openai".into(), bridge: mock_bridge() },
+    ];
+
+    let r = s.run_relay(&chain, "do the work", Policy::AllowAll).expect("relay resolves");
+
+    assert_eq!(r.answered_by, "codex");
+    assert_eq!(r.handoffs.len(), 1);
+    assert_eq!(r.handoffs[0], ("claude-opus".into(), "codex".into(), HandoffReason::RateLimit));
+
+    // The ledger tells the story: user turn, then a Handoff event, then the
+    // incoming agent's events — all in the one session.
+    let t = s.transcript().unwrap();
+    let kinds: Vec<_> = t.iter().map(|(e, _)| e.kind).collect();
+    assert_eq!(kinds.first(), Some(&chorus_core::EventKind::Msg), "user turn leads");
+    let ho = kinds
+        .iter()
+        .position(|k| *k == chorus_core::EventKind::Handoff)
+        .expect("handoff event recorded");
+    assert!(ho > 0 && ho < kinds.len() - 1, "handoff is mid-ledger: {kinds:?}");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn a_real_error_is_not_routed_around() {
+    let tmp = std::env::temp_dir().join(format!("chorus-relay-err-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let db = tmp.join("store.db");
+    let _ = std::fs::remove_file(&db);
+
+    let mut s = Session::create(&db, &tmp, "relay err").unwrap();
+    let chain = vec![
+        AgentSpec {
+            name: "claude-opus".into(),
+            provider: "anthropic".into(),
+            bridge: failing_bridge("TypeError: cannot read property of undefined"),
+        },
+        AgentSpec { name: "codex".into(), provider: "openai".into(), bridge: mock_bridge() },
+    ];
+
+    // A bug in the first agent is not a reason to burn the chain.
+    assert!(s.run_relay(&chain, "do the work", Policy::AllowAll).is_err());
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

@@ -319,6 +319,14 @@ pub fn serve() -> Result<()> {
     let session = "mock-session-1";
     let mut next_out_id = 1000;
 
+    // `--serve-mock --fail <text>` makes every `session/prompt` return a
+    // JSON-RPC error carrying `<text>` — lets the relay-chain test drive a
+    // simulated rate limit without a network.
+    let fail: Option<String> = {
+        let a: Vec<String> = std::env::args().collect();
+        a.iter().position(|x| x == "--fail").and_then(|i| a.get(i + 1).cloned())
+    };
+
     while let Some(Ok(line)) = lines.next() {
         if line.trim().is_empty() {
             continue;
@@ -345,6 +353,11 @@ pub fn serve() -> Result<()> {
                 "sessionId": session,
                 "modes": {"currentModeId":"default","availableModes":[{"id":"default","name":"Default"}]}
             }}))?,
+
+            "session/prompt" if fail.is_some() => {
+                send(json!({"jsonrpc":"2.0","id":id,
+                    "error":{"code":-32010,"message": fail.clone().unwrap()}}))?;
+            }
 
             "session/prompt" => {
                 update(session, json!({

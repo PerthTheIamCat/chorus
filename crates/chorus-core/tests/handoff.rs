@@ -157,3 +157,15 @@ fn json_round_trips() {
     assert_eq!(brief, back);
     assert_eq!(back.handoff.reason, HandoffReason::RateLimit);
 }
+
+#[test]
+fn failure_classification_routes_only_transient_agent_faults() {
+    use chorus_core::handoff::HandoffReason as R;
+    assert_eq!(R::from_failure("Error: 429 rate limit exceeded"), Some(R::RateLimit));
+    assert_eq!(R::from_failure("insufficient_quota for this org"), Some(R::QuotaExhausted));
+    assert_eq!(R::from_failure("context length exceeded the model window"), Some(R::ContextExhausted));
+    assert_eq!(R::from_failure("upstream overloaded, 503"), Some(R::Failover));
+    // A real bug is not something the next agent should inherit.
+    assert_eq!(R::from_failure("panic: index out of bounds"), None);
+    assert_eq!(R::from_failure("no such file or directory"), None);
+}

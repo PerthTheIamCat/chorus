@@ -8,7 +8,9 @@
 //! still whole.
 
 use anyhow::{Context, Result};
-use chorus_acp::codex::{AgentEvent, CodexAgent, CodexConfig, Permission, PermissionAsk, TurnOutcome};
+use chorus_acp::codex::{
+    AgentEvent, CodexAgent, CodexConfig, Permission, PermissionAsk, TurnOutcome,
+};
 use chorus_core::checkpoint::Checkpoint;
 use chorus_core::context::{AssembleInput, Assembler, Budget, TurnItem};
 use chorus_core::handoff::{Brief, BriefInput, HandoffMeta, HandoffReason};
@@ -48,6 +50,33 @@ pub struct TurnReport {
     pub context_used: Option<i64>,
     pub context_window: Option<i64>,
     pub stop_reason: String,
+}
+
+/// One link in a relay chain.
+#[derive(Debug, Clone)]
+pub struct AgentSpec {
+    pub name: String,
+    pub provider: String,
+    /// ACP command; empty = use the session's default bridge.
+    pub bridge: Vec<String>,
+}
+
+impl AgentSpec {
+    pub fn new(name: impl Into<String>, provider: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            provider: provider.into(),
+            bridge: Vec::new(),
+        }
+    }
+}
+
+/// The result of a relay run: who ended up answering, their turn, and every
+/// automatic handoff it took to get there.
+pub struct RelayReport {
+    pub answered_by: String,
+    pub turn: TurnReport,
+    pub handoffs: Vec<(String, String, HandoffReason)>,
 }
 
 /// The outcome of a `handoff`: the brief that was handed over and the
@@ -238,7 +267,12 @@ impl Session {
             constraints,
             events: &events,
             diff,
-            handoff: HandoffMeta { from: from.clone(), to: to.to_string(), reason, at },
+            handoff: HandoffMeta {
+                from: from.clone(),
+                to: to.to_string(),
+                reason,
+                at,
+            },
         });
 
         let c = self.store.conn();
@@ -261,6 +295,125 @@ impl Session {
             agent_seqs,
             stop_reason: outcome.stop_reason,
         })
+    }
+
+    /// Run a turn against a relay chain: try the first agent; on a transient,
+    /// agent-specific failure (rate limit, quota, context window) hand off to
+    /// the next and let it carry on. A real error is not routed around — it
+    /// propagates. `handoffs` records every switch it took.
+    pub fn run_relay(
+        &mut self,
+        chain: &[AgentSpec],
+        user_text: &str,
+        policy: Policy,
+    ) -> Result<RelayReport> {
+        let first = chain.first().context("relay chain is empty")?;
+        self.bridge = bridge_or_default(&first.bridge, &self.bridge);
+
+        let mut handoffs = Vec::new();
+
+        match self.run_turn(&first.name, &first.provider, user_text, policy) {
+            Ok(turn) if !is_transient_stop(&turn.stop_reason) => Ok(RelayReport {
+                answered_by: first.name.clone(),
+                turn,
+                handoffs,
+            }),
+            Ok(turn) => {
+                // The agent answered but stopped short — relay from here.
+                let reason = HandoffReason::ContextExhausted;
+                if let Some(r) = self.relay_rest(
+                    &chain[1..],
+                    user_text,
+                    policy,
+                    &first.name,
+                    reason,
+                    &mut handoffs,
+                )? {
+                    return Ok(r);
+                }
+                Ok(RelayReport {
+                    answered_by: first.name.clone(),
+                    turn,
+                    handoffs,
+                })
+            }
+            Err(e) => {
+                // `{e:#}` flattens anyhow's context chain so the classifier
+                // sees the underlying "…rate limit…" message, not just the
+                // outermost "agent turn".
+                let reason = HandoffReason::from_failure(&format!("{e:#}"))
+                    .with_context(|| format!("{}: {e:#}", first.name))?;
+                match self.relay_rest(
+                    &chain[1..],
+                    user_text,
+                    policy,
+                    &first.name,
+                    reason,
+                    &mut handoffs,
+                )? {
+                    Some(r) => Ok(r),
+                    None => Err(e).context("relay chain exhausted"),
+                }
+            }
+        }
+    }
+
+    /// Try each remaining link via a handoff. `Ok(Some)` on the first that
+    /// answers cleanly, `Ok(None)` if the whole tail is exhausted.
+    fn relay_rest(
+        &mut self,
+        rest: &[AgentSpec],
+        user_text: &str,
+        policy: Policy,
+        from: &str,
+        reason: HandoffReason,
+        handoffs: &mut Vec<(String, String, HandoffReason)>,
+    ) -> Result<Option<RelayReport>> {
+        let mut from = from.to_string();
+        let mut reason = reason;
+        for spec in rest {
+            self.bridge = bridge_or_default(&spec.bridge, &self.bridge);
+            handoffs.push((from.clone(), spec.name.clone(), reason));
+
+            let h = self.handoff(
+                &spec.name,
+                &spec.provider,
+                reason,
+                user_text,
+                Vec::new(),
+                vec!["carry out the instruction above".into()],
+                Vec::new(),
+                String::new(),
+                policy,
+            );
+            match h {
+                Ok(hr) if !is_transient_stop(&hr.stop_reason) => {
+                    let turn = TurnReport {
+                        user_seq: hr.handoff_seq,
+                        agent_seqs: hr.agent_seqs,
+                        message: hr.echo_back,
+                        context_used: None,
+                        context_window: None,
+                        stop_reason: hr.stop_reason,
+                    };
+                    return Ok(Some(RelayReport {
+                        answered_by: spec.name.clone(),
+                        turn,
+                        handoffs: std::mem::take(handoffs),
+                    }));
+                }
+                Ok(_) => {
+                    reason = HandoffReason::ContextExhausted;
+                    from = spec.name.clone();
+                }
+                Err(e) => {
+                    reason = HandoffReason::from_failure(&format!("{e:#}"))
+                        .unwrap_or(HandoffReason::Failover);
+                    from = spec.name.clone();
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Rebuild the hot context from the ledger, sized to `budget` tokens.
@@ -307,7 +460,11 @@ impl Session {
         let memory_items: Vec<ContextItem> = memory::render(&facts)
             .lines()
             .filter(|l| !l.trim().is_empty())
-            .map(|l| ContextItem { text: l.to_string(), key: None, label: "fact".into() })
+            .map(|l| ContextItem {
+                text: l.to_string(),
+                key: None,
+                label: "fact".into(),
+            })
             .collect();
 
         let input = AssembleInput {
@@ -326,7 +483,10 @@ impl Session {
     // ---- internals --------------------------------------------------
 
     fn one_turn(&self, agent_name: &str, text: &str, policy: Policy) -> Result<TurnOutcome> {
-        let cfg = CodexConfig { command: self.bridge.clone(), ..Default::default() };
+        let cfg = CodexConfig {
+            command: self.bridge.clone(),
+            ..Default::default()
+        };
         let mut agent =
             CodexAgent::start(&self.cwd, cfg).with_context(|| format!("start {agent_name}"))?;
         let mut decide = |ask: &PermissionAsk| policy.decide(ask);
@@ -402,6 +562,20 @@ impl Session {
 
 fn first_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
+}
+
+fn bridge_or_default(spec: &[String], default: &[String]) -> Vec<String> {
+    if spec.is_empty() {
+        default.to_vec()
+    } else {
+        spec.to_vec()
+    }
+}
+
+/// Stop reasons that mean the agent hit its own limit mid-answer — relay
+/// onward. A `cancelled` (a denied permission) is a real outcome, not this.
+fn is_transient_stop(stop: &str) -> bool {
+    matches!(stop, "max_tokens" | "context_exhausted" | "error")
 }
 
 fn kind_name(k: EventKind) -> &'static str {
