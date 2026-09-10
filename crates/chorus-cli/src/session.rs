@@ -22,25 +22,48 @@ use chorus_core::tokens::{CachedCounter, HeuristicCounter};
 use chorus_core::{actor, ledger, memory, Event, EventKind, NewEvent, Store};
 use std::path::{Path, PathBuf};
 
-/// How to answer the agent's permission requests for a whole run.
+/// How to answer the agent's permission requests for a whole run. The
+/// three levels mirror the design's per-agent permission (§7): deny
+/// everything the sandbox escalates, auto-allow only reads, or allow all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Policy {
     /// Deny everything the sandbox escalates (the safe default).
     DenyAll,
+    /// Auto-allow read-only tool calls; deny writes, commands, network.
+    ReadOnly,
     /// Allow everything — only for throwaway directories.
     AllowAll,
 }
 
 impl Policy {
+    /// Map a level int (0 deny · 1 read-only · 2 allow) from the FFI/UI.
+    pub fn from_level(level: i32) -> Self {
+        match level {
+            1 => Policy::ReadOnly,
+            n if n >= 2 => Policy::AllowAll,
+            _ => Policy::DenyAll,
+        }
+    }
+
     fn decide(self, ask: &PermissionAsk) -> Permission {
-        let verb = match self {
-            Policy::DenyAll => "DENY",
-            Policy::AllowAll => "ALLOW",
+        let allow = match self {
+            Policy::DenyAll => false,
+            Policy::AllowAll => true,
+            Policy::ReadOnly => {
+                let k = ask.kind.to_lowercase();
+                k == "read" || k.contains("read") || k == "fetch" || k == "search"
+            }
         };
-        eprintln!("  permission: {} ({}) — {verb}", ask.tool, ask.kind);
-        match self {
-            Policy::DenyAll => Permission::Deny,
-            Policy::AllowAll => Permission::Allow,
+        eprintln!(
+            "  permission: {} ({}) — {}",
+            ask.tool,
+            ask.kind,
+            if allow { "ALLOW" } else { "DENY" }
+        );
+        if allow {
+            Permission::Allow
+        } else {
+            Permission::Deny
         }
     }
 }

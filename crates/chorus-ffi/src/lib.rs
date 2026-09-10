@@ -163,11 +163,7 @@ pub unsafe extern "C" fn chorus_run_turn(
     let (Some(agent), Some(prompt)) = (borrow(agent), borrow(prompt)) else {
         return err("agent/prompt must be valid UTF-8");
     };
-    let policy = if allow != 0 {
-        Policy::AllowAll
-    } else {
-        Policy::DenyAll
-    };
+    let policy = Policy::from_level(allow);
 
     let r = catch_unwind(AssertUnwindSafe(|| {
         engine.session.run_turn(agent, "openai", prompt, policy)
@@ -379,11 +375,7 @@ pub unsafe extern "C" fn chorus_handoff(
     let reason = parse_reason(borrow(reason).unwrap_or("manual"));
     let done = parse_str_array(borrow(done_json));
     let pending = parse_str_array(borrow(pending_json));
-    let policy = if allow != 0 {
-        Policy::AllowAll
-    } else {
-        Policy::DenyAll
-    };
+    let policy = Policy::from_level(allow);
 
     let r = catch_unwind(AssertUnwindSafe(|| {
         engine.session.handoff(
@@ -464,11 +456,7 @@ pub unsafe extern "C" fn chorus_run_relay(
     if specs.len() < 2 {
         return err("relay needs at least two agents");
     }
-    let policy = if allow != 0 {
-        Policy::AllowAll
-    } else {
-        Policy::DenyAll
-    };
+    let policy = Policy::from_level(allow);
 
     let r = catch_unwind(AssertUnwindSafe(|| {
         engine.session.run_relay(&specs, prompt, policy)
@@ -526,11 +514,7 @@ pub unsafe extern "C" fn chorus_compare(
     if specs.len() < 2 {
         return err("compare needs at least two agents");
     }
-    let policy = if allow != 0 {
-        Policy::AllowAll
-    } else {
-        Policy::DenyAll
-    };
+    let policy = Policy::from_level(allow);
 
     let r = catch_unwind(AssertUnwindSafe(|| {
         engine.session.compare(&specs, prompt, policy)

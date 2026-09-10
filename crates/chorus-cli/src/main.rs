@@ -143,6 +143,7 @@ fn compare_cmd(args: &[String]) -> Result<()> {
                 }
             }
             "--yes" => policy = Policy::AllowAll,
+            "--read-only" => policy = Policy::ReadOnly,
             _ => positional.push(a),
         }
     }
@@ -201,6 +202,7 @@ fn handoff(args: &[String]) -> Result<()> {
             "--pending" => pending.push(next()),
             "--diff-file" => diff_file = Some(PathBuf::from(next())),
             "--yes" => policy = Policy::AllowAll,
+            "--read-only" => policy = Policy::ReadOnly,
             other => anyhow::bail!("unknown flag {other:?}"),
         }
     }
@@ -297,6 +299,7 @@ fn run(args: &[String]) -> Result<()> {
             }
             "--session" => continue_session = it.next().and_then(|v| v.parse().ok()),
             "--yes" => policy = Policy::AllowAll,
+            "--read-only" => policy = Policy::ReadOnly,
             _ => positional.push(a),
         }
     }
