@@ -105,7 +105,7 @@ apps/macos/build.sh                     # cargo build -p chorus-ffi + swift buil
 
 **รัน `cargo test` และ `bench` ทุกครั้งที่แก้ core** — bench คือตัวที่จับ regression ที่ test จับไม่ได้
 ไม่มี rustfmt.toml — โค้ดสไตล์กว้างกว่า default **ห้าม `cargo fmt` ทั้ง crate** (จะรื้อไฟล์อื่น)
-format เฉพาะไฟล์ที่แก้: `rustfmt --edition 2021 <file>`  ·  clippy ตามปกติ (เหลือ 2 warning เก่าใน render.rs)
+format เฉพาะไฟล์ที่แก้: `rustfmt --edition 2021 <file>`  ·  clippy ตามปกติ (ตอนนี้ clean)
 
 ---
 
@@ -126,7 +126,7 @@ crates/chorus-core/src/
   handoff.rs    Brief::build + render_markdown + to_json + HandoffReason::from_failure (relay classifier) — pure
   projector.rs  render memory → CLAUDE.md/AGENTS.md/GEMINI.md + drift detect (marker + hash)
   checkpoint.rs shadow git repo <cwd>/.chorus/ckpt — snapshot/diff_since/restore (shell ออก git)
-  compaction.rs Summarizer trait + Extractive (model-free L1/L2) — Ollama impl ทีหลัง
+  compaction.rs Summarizer trait · Extractive (model-free) + Ollama (localhost:11434) · best() เลือกให้
   mcp.rs        Streamable-HTTP MCP server (std::net, ไม่มี dep) — tool memory_propose · ทำงานกับ Codex แล้ว (persistent conn + held-open SSE)
 crates/chorus-cli/src/main.rs           bench + run + handoff + memory + compare subcommands
 crates/chorus-cli/src/session.rs        Session engine — run_turn/run_relay/handoff/compare/assemble_context/events_since
