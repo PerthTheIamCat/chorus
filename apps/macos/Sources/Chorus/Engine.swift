@@ -103,6 +103,44 @@ final class Engine: ObservableObject {
         }
     }
 
+    /// Run one turn against a relay chain (comma-separated agent names).
+    func sendRelay(_ prompt: String, agents: String, allow: Bool) {
+        guard let h = handle, !busy else { return }
+        busy = true; lastError = nil
+        queue.async { [weak self] in
+            let json = prompt.withCString { p in
+                agents.withCString { a in
+                    Self.string(from: chorus_run_relay(h, a, p, allow ? 1 : 0))
+                }
+            }
+            let obj = Self.decode(SimpleResult.self, json)
+            DispatchQueue.main.async {
+                self?.busy = false
+                if obj?.ok != true { self?.lastError = obj?.error ?? "relay failed" }
+                self?.refresh()
+            }
+        }
+    }
+
+    /// Compare mode — fork per agent, run the prompt on each.
+    func compare(_ prompt: String, agents: String, allow: Bool,
+                 completion: @escaping (String) -> Void) {
+        guard let h = handle, !busy else { return }
+        busy = true; lastError = nil
+        queue.async { [weak self] in
+            let json = prompt.withCString { p in
+                agents.withCString { a in
+                    Self.string(from: chorus_compare(h, a, p, allow ? 1 : 0))
+                }
+            }
+            DispatchQueue.main.async {
+                self?.busy = false
+                self?.refresh()
+                completion(json)
+            }
+        }
+    }
+
     /// Hand the session to another agent.
     func handoff(to: String, reason: String, goal: String, done: [String], pending: [String], allow: Bool,
                  completion: @escaping (HandoffResult?) -> Void) {

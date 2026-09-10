@@ -10,6 +10,11 @@ struct ContentView: View {
     @State private var draft = ""
     @State private var agent = "codex"
     @State private var allow = false
+    @State private var sendMode = SendMode.single
+    @State private var chainAgents = "codex,claude-opus"
+    @State private var compareOutput: String?
+
+    enum SendMode: String, CaseIterable { case single = "Single", relay = "Relay", compare = "Compare" }
     @State private var showHandoff = false
     @State private var rightTab = RightTab.context
     @State private var confirmRevert = false
@@ -45,6 +50,9 @@ struct ContentView: View {
         .sheet(isPresented: $showHandoff) {
             HandoffSheet().environmentObject(engine)
         }
+        .sheet(isPresented: Binding(get: { compareOutput != nil }, set: { if !$0 { compareOutput = nil } })) {
+            CompareResultsSheet(json: compareOutput ?? "")
+        }
     }
 
     // MARK: sidebar — open / start a session
@@ -65,10 +73,22 @@ struct ContentView: View {
                 .disabled(engine.busy)
             }
             Section("Agent") {
-                Picker("current", selection: $agent) {
-                    Text("codex").tag("codex")
-                    Text("claude-opus").tag("claude-opus")
-                    Text("gemini").tag("gemini")
+                Picker("send as", selection: $sendMode) {
+                    ForEach(SendMode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                if sendMode == .single {
+                    Picker("current", selection: $agent) {
+                        Text("codex").tag("codex")
+                        Text("claude-opus").tag("claude-opus")
+                        Text("gemini").tag("gemini")
+                    }
+                } else {
+                    TextField("chain (comma-separated)", text: $chainAgents)
+                        .textFieldStyle(.roundedBorder)
+                    Text(sendMode == .relay
+                         ? "tries each in order; hands off on rate limit / quota"
+                         : "forks per agent, runs the same prompt, compare the diffs")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Toggle("Allow file writes / commands", isOn: $allow)
             }
@@ -122,7 +142,14 @@ struct ContentView: View {
                 let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else { return }
                 draft = ""
-                engine.send(text, agent: agent, allow: allow)
+                switch sendMode {
+                case .single:
+                    engine.send(text, agent: agent, allow: allow)
+                case .relay:
+                    engine.sendRelay(text, agents: chainAgents, allow: allow)
+                case .compare:
+                    engine.compare(text, agents: chainAgents, allow: allow) { compareOutput = $0 }
+                }
             } label: {
                 if engine.busy { ProgressView().controlSize(.small) }
                 else { Image(systemName: "arrow.up.circle.fill").font(.title2) }
@@ -283,5 +310,58 @@ struct HandoffSheet: View {
         }
         .padding(20)
         .frame(width: 480)
+    }
+}
+
+struct CompareResultsSheet: View {
+    let json: String
+    @Environment(\.dismiss) private var dismiss
+
+    struct Branch: Codable, Identifiable {
+        let agent: String
+        let session_id: Int64
+        let message: String
+        let stop_reason: String
+        let error: String?
+        var id: Int64 { session_id }
+    }
+    struct Payload: Codable { let ok: Bool?; let branches: [Branch]? ; let error: String? }
+
+    private var payload: Payload? {
+        guard let d = json.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(Payload.self, from: d)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Compare").font(.title3.bold())
+            if let err = payload?.error {
+                Text(err).foregroundStyle(.red)
+            }
+            ScrollView {
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(payload?.branches ?? []) { b in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(b.agent).font(.headline)
+                            Text("resume: --session \(b.session_id)")
+                                .font(.caption2).foregroundStyle(.secondary)
+                            Divider()
+                            if let e = b.error {
+                                Text(e).font(.caption).foregroundStyle(.red)
+                            } else {
+                                Text(b.message).font(.callout).textSelection(.enabled)
+                                Text("[\(b.stop_reason)]").font(.caption2).foregroundStyle(.tertiary)
+                            }
+                        }
+                        .frame(width: 260, alignment: .leading)
+                        .padding(10)
+                        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+            }
+            HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
+        }
+        .padding(20)
+        .frame(minWidth: 560, minHeight: 320)
     }
 }
