@@ -114,6 +114,39 @@ impl Checkpoint {
         Ok(())
     }
 
+    /// Reverse-apply `patch` to the work tree — undo exactly the hunks it
+    /// contains. Used by per-hunk diff review to reject a selection without
+    /// touching the rest. The patch must be a valid unified diff.
+    pub fn apply_reverse(&self, patch: &str) -> Result<()> {
+        let mut child = Command::new("git")
+            .arg("--git-dir")
+            .arg(&self.git_dir)
+            .arg("--work-tree")
+            .arg(&self.work_tree)
+            .args(["apply", "--reverse", "--recount", "-"])
+            .current_dir(&self.work_tree)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| ChorusError::Invalid(format!("run git apply: {e}")))?;
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(patch.as_bytes())
+            .map_err(ChorusError::Io)?;
+        let out = child.wait_with_output().map_err(ChorusError::Io)?;
+        if !out.status.success() {
+            return Err(ChorusError::Invalid(format!(
+                "git apply --reverse: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(())
+    }
+
     fn git(&self, args: &[&str]) -> Result<String> {
         let out = Command::new("git")
             .arg("--git-dir")

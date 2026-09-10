@@ -18,6 +18,7 @@ struct ContentView: View {
     @State private var showHandoff = false
     @State private var rightTab = RightTab.context
     @State private var confirmRevert = false
+    @State private var rejected: Set<UUID> = []
 
     enum RightTab: String, CaseIterable { case context = "Context", changes = "Changes", memory = "Memory" }
 
@@ -189,25 +190,41 @@ struct ContentView: View {
     // MARK: context pane — budget + last agent
 
     private var changesPane: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let hunks = parseHunks(engine.workingDiff)
+        return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Since session start").font(.headline)
                 Spacer()
                 Button("Snapshot") { engine.snapshot() }
-                    .controlSize(.small)
-                    .disabled(engine.sessionID < 0)
+                    .controlSize(.small).disabled(engine.sessionID < 0)
             }
-            if engine.workingDiff.isEmpty {
+            if hunks.isEmpty {
                 Text("no changes yet").font(.caption).foregroundStyle(.secondary)
+                Spacer()
             } else {
-                ScrollView([.horizontal, .vertical]) {
-                    Text(engine.workingDiff)
-                        .font(.caption.monospaced())
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(hunks) { hunk in
+                            HunkView(hunk: hunk, rejected: rejected.contains(hunk.id)) {
+                                if rejected.contains(hunk.id) { rejected.remove(hunk.id) }
+                                else { rejected.insert(hunk.id) }
+                            }
+                        }
+                    }
+                }
+                if !rejected.isEmpty {
+                    Button(role: .destructive) {
+                        let patch = hunks.filter { rejected.contains($0.id) }
+                            .map(\.patch).joined()
+                        engine.rejectHunks(patch)
+                        rejected.removeAll()
+                    } label: {
+                        Label("Reject \(rejected.count) hunk(s)", systemImage: "xmark.circle")
+                    }
+                    .controlSize(.small)
                 }
                 Button(role: .destructive) { confirmRevert = true } label: {
-                    Label("Revert workspace to session start", systemImage: "arrow.uturn.backward")
+                    Label("Revert everything", systemImage: "arrow.uturn.backward")
                 }
                 .controlSize(.small)
                 .confirmationDialog(
@@ -218,7 +235,6 @@ struct ContentView: View {
                     Button("Cancel", role: .cancel) {}
                 }
             }
-            Spacer()
         }
         .padding(12)
         .frame(maxHeight: .infinity, alignment: .top)
@@ -422,5 +438,87 @@ struct CompareResultsSheet: View {
         }
         .padding(20)
         .frame(minWidth: 560, minHeight: 320)
+    }
+}
+
+/// A minimal unified-diff model: each hunk carries the file preamble it
+/// needs to be a valid standalone patch.
+struct DiffHunk: Identifiable {
+    let id = UUID()
+    let file: String
+    let preamble: String   // "diff --git … / --- … / +++ …"
+    let header: String     // "@@ -a,b +c,d @@ …"
+    let lines: [String]    // body lines (context / +/-)
+
+    var patch: String { preamble + header + "\n" + lines.joined(separator: "\n") + "\n" }
+    var addCount: Int { lines.filter { $0.hasPrefix("+") }.count }
+    var delCount: Int { lines.filter { $0.hasPrefix("-") }.count }
+}
+
+func parseHunks(_ diff: String) -> [DiffHunk] {
+    var hunks: [DiffHunk] = []
+    var file = ""
+    var preamble = ""
+    var inPreamble = false
+    var curHeader: String?
+    var curLines: [String] = []
+
+    func flush() {
+        if let h = curHeader {
+            hunks.append(DiffHunk(file: file, preamble: preamble, header: h, lines: curLines))
+        }
+        curHeader = nil
+        curLines = []
+    }
+
+    for line in diff.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+        if line.hasPrefix("diff --git") {
+            flush()
+            preamble = line + "\n"
+            inPreamble = true
+            if let r = line.range(of: " b/") { file = String(line[r.upperBound...]) }
+        } else if inPreamble && (line.hasPrefix("index ") || line.hasPrefix("--- ") || line.hasPrefix("+++ ")
+                                 || line.hasPrefix("new file") || line.hasPrefix("deleted file")
+                                 || line.hasPrefix("similarity") || line.hasPrefix("rename ")) {
+            preamble += line + "\n"
+        } else if line.hasPrefix("@@") {
+            flush()
+            inPreamble = false
+            curHeader = line
+        } else if curHeader != nil {
+            curLines.append(line)
+        }
+    }
+    flush()
+    return hunks
+}
+
+struct HunkView: View {
+    let hunk: DiffHunk
+    let rejected: Bool
+    let toggle: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(hunk.file).font(.caption.bold())
+                Text("+\(hunk.addCount) −\(hunk.delCount)").font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                Button(rejected ? "rejected" : "keep") { toggle() }
+                    .controlSize(.mini)
+                    .buttonStyle(.bordered)
+                    .tint(rejected ? .red : .green)
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(hunk.lines.prefix(40).enumerated()), id: \.offset) { _, l in
+                    Text(l).font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(l.hasPrefix("+") ? .green : l.hasPrefix("-") ? .red : .secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(4)
+            .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 4))
+            .opacity(rejected ? 0.45 : 1)
+        }
     }
 }

@@ -332,6 +332,29 @@ pub unsafe extern "C" fn chorus_snapshot(
     }
 }
 
+/// Reject a hunk selection: reverse-apply `patch` (only the rejected
+/// hunks) to the workspace. JSON: {"ok":true}
+///
+/// # Safety
+/// `e` live; `patch` valid NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_reject_hunks(
+    e: *const ChorusEngine,
+    patch: *const c_char,
+) -> *mut c_char {
+    let Some(engine) = e.as_ref() else {
+        return err("null engine");
+    };
+    let Some(patch) = borrow(patch) else {
+        return err("patch must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| engine.session.reject_hunks(patch))) {
+        Ok(Ok(())) => out(serde_json::json!({ "ok": true }).to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in reject_hunks"),
+    }
+}
+
 /// Roll the workspace back to `sha` (empty = the session base). Destructive.
 /// JSON: {"ok":true}
 ///

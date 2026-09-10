@@ -82,6 +82,10 @@ char *chorus_snapshot(const ChorusEngine *e, const char *message);
  * Destructive — confirm with the user first. JSON: {"ok":true} */
 char *chorus_restore(const ChorusEngine *e, const char *sha);
 
+/* Reject a hunk selection: reverse-apply `patch` (containing only the
+ * rejected hunks) to the workspace. JSON: {"ok":true} */
+char *chorus_reject_hunks(const ChorusEngine *e, const char *patch);
+
 /* Run one turn against a relay chain. `agents` is comma-separated names
  * (e.g. "codex,claude-opus,gemini"). On a rate-limit / quota / context
  * failure the chain hands off to the next link automatically.

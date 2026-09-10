@@ -281,6 +281,16 @@ impl Session {
         Ok(())
     }
 
+    /// Reject a selection of hunks: reverse-apply `patch` (which contains
+    /// only the hunks the user rejected) to the workspace.
+    pub fn reject_hunks(&self, patch: &str) -> Result<()> {
+        let ck = self
+            .checkpoint
+            .as_ref()
+            .context("no shadow repo for this workspace")?;
+        Ok(ck.apply_reverse(patch)?)
+    }
+
     /// Roll the workspace back to `sha` (or the session base when empty).
     /// Destructive — the caller confirms with the user first.
     pub fn restore_to(&self, sha: &str) -> Result<()> {

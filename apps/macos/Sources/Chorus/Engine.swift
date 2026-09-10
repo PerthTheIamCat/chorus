@@ -276,6 +276,16 @@ final class Engine: ObservableObject {
         refresh()
     }
 
+    /// Reverse-apply `patch` (the hunks the user rejected).
+    func rejectHunks(_ patch: String) {
+        guard let h = handle else { return }
+        let r = patch.withCString { Self.string(from: chorus_reject_hunks(h, $0)) }
+        if let obj = Self.decode(SimpleResult.self, r), obj.ok != true {
+            lastError = obj.error ?? "reject failed"
+        }
+        refresh()
+    }
+
     /// Roll the workspace back to the session start. Destructive.
     func revertToStart() {
         guard let h = handle else { return }
