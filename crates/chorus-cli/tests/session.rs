@@ -62,6 +62,42 @@ fn one_turn_persists_user_and_every_agent_event_to_the_ledger() {
 }
 
 #[test]
+fn a_second_turn_reconstructs_history_from_the_ledger() {
+    let tmp = std::env::temp_dir().join(format!("chorus-multi-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let db = tmp.join("store.db");
+    let _ = std::fs::remove_file(&db);
+
+    let mut s = Session::create(&db, &tmp, "multi turn")
+        .unwrap()
+        .with_bridge(mock_bridge());
+
+    s.run_turn("codex", "openai", "first: look at the readme", Policy::AllowAll).unwrap();
+
+    // Context assembled from the ledger carries the first turn back.
+    let ctx = s.assemble_context(120_000).unwrap();
+    assert!(ctx.contains("first: look at the readme"), "history missing from context:\n{ctx}");
+    assert!(ctx.contains("user:") || ctx.contains("user :") || ctx.contains("codex:"));
+
+    let r2 = s
+        .run_turn("codex", "openai", "second: now summarise", Policy::AllowAll)
+        .unwrap();
+    assert_eq!(r2.stop_reason, "end_turn");
+
+    let user_msgs: Vec<_> = s
+        .transcript()
+        .unwrap()
+        .into_iter()
+        .filter(|(e, _)| e.kind == chorus_core::EventKind::Msg && e.body.is_some())
+        .filter(|(_, b)| b.starts_with("first:") || b.starts_with("second:"))
+        .map(|(_, b)| b)
+        .collect();
+    assert_eq!(user_msgs, vec!["first: look at the readme", "second: now summarise"]);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
 fn handoff_records_the_switch_and_runs_the_incoming_agent() {
     let tmp = std::env::temp_dir().join(format!("chorus-ho-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();

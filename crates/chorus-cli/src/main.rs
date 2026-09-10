@@ -127,6 +127,7 @@ fn run(args: &[String]) -> Result<()> {
     let mut db: Option<PathBuf> = None;
     let mut agent = "codex".to_string();
     let mut policy = Policy::DenyAll;
+    let mut continue_session: Option<i64> = None;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -137,22 +138,39 @@ fn run(args: &[String]) -> Result<()> {
                     agent = v.clone();
                 }
             }
+            "--session" => continue_session = it.next().and_then(|v| v.parse().ok()),
             "--yes" => policy = Policy::AllowAll,
             _ => positional.push(a),
         }
     }
-    let [cwd, prompt] = positional.as_slice() else {
-        anyhow::bail!("usage: chorus run <cwd> <prompt> [--db PATH] [--agent NAME] [--yes]");
+
+    let (mut s, prompt) = match continue_session {
+        Some(id) => {
+            let [prompt] = positional.as_slice() else {
+                anyhow::bail!("usage: chorus run <prompt> --session N --db PATH [--agent NAME] [--yes]");
+            };
+            let db = db.context("--db is required with --session")?;
+            let s = Session::open(&db, id).context("open session")?;
+            eprintln!("continuing session {id} · store {}", db.display());
+            (s, (*prompt).clone())
+        }
+        None => {
+            let [cwd, prompt] = positional.as_slice() else {
+                anyhow::bail!(
+                    "usage: chorus run <cwd> <prompt> [--db PATH] [--agent NAME] [--yes]\n   \
+                     or: chorus run <prompt> --session N --db PATH"
+                );
+            };
+            let db = db.unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("chorus-run-{}.db", std::process::id()))
+            });
+            let s = Session::create(&db, &PathBuf::from(cwd), prompt).context("create session")?;
+            eprintln!("session {} · store {}", s.session_id(), db.display());
+            (s, (*prompt).clone())
+        }
     };
 
-    let db = db.unwrap_or_else(|| {
-        std::env::temp_dir().join(format!("chorus-run-{}.db", std::process::id()))
-    });
-    let cwd = PathBuf::from(cwd);
-    let mut s = Session::create(&db, &cwd, prompt).context("create session")?;
-    eprintln!("session {} · store {}", s.session_id(), db.display());
-
-    let report = s.run_turn(&agent, "openai", prompt, policy)?;
+    let report = s.run_turn(&agent, "openai", &prompt, policy)?;
 
     println!("\n── {agent} ──────────────────────────────────────────");
     println!("{}", report.message.trim());

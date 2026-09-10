@@ -9,8 +9,11 @@
 
 use anyhow::{Context, Result};
 use chorus_acp::codex::{AgentEvent, CodexAgent, CodexConfig, Permission, PermissionAsk, TurnOutcome};
+use chorus_core::context::{AssembleInput, Assembler, Budget, TurnItem};
 use chorus_core::handoff::{Brief, BriefInput, HandoffMeta, HandoffReason};
-use chorus_core::{actor, ledger, EventKind, NewEvent, Store};
+use chorus_core::render::ContextItem;
+use chorus_core::tokens::{CachedCounter, HeuristicCounter};
+use chorus_core::{actor, ledger, memory, Event, EventKind, NewEvent, Store};
 use std::path::{Path, PathBuf};
 
 /// How to answer the agent's permission requests for a whole run.
@@ -118,6 +121,10 @@ impl Session {
 
     /// Run one user turn against `agent_name`, persisting the user message
     /// and every structured thing the agent does back into the ledger.
+    ///
+    /// When the session already has history, that history is assembled from
+    /// the ledger (never from a provider's own session) and prepended to the
+    /// prompt — only `user_text` is stored as the new event.
     pub fn run_turn(
         &mut self,
         agent_name: &str,
@@ -125,13 +132,26 @@ impl Session {
         user_text: &str,
         policy: Policy,
     ) -> Result<TurnReport> {
-        let c = self.store.conn();
-        let agent_actor = actor::intern(c, agent_name, provider)?;
+        let agent_actor = actor::intern(self.store.conn(), agent_name, provider)?;
+        let has_history = ledger::tail(self.store.conn(), self.sess, 1)?.len() == 1;
 
-        let user_seq =
-            ledger::append(c, &NewEvent::new(self.sess, EventKind::Msg, self.user, user_text))?;
+        // Assemble history from the ledger *before* adding this turn, so the
+        // new instruction isn't also fed back as the last thing said.
+        let prompt = if has_history {
+            let ctx = self.assemble_context(120_000)?;
+            format!(
+                "{ctx}\n\n---\nThat is the session so far, reconstructed from the shared \
+                 ledger. Continue from here.\n\nNew instruction:\n{user_text}"
+            )
+        } else {
+            user_text.to_string()
+        };
 
-        let outcome = self.one_turn(agent_name, user_text, policy)?;
+        let user_seq = ledger::append(
+            self.store.conn(),
+            &NewEvent::new(self.sess, EventKind::Msg, self.user, user_text),
+        )?;
+        let outcome = self.one_turn(agent_name, &prompt, policy)?;
         let agent_seqs = self.persist_outcome(&outcome, agent_actor, user_seq)?;
 
         Ok(TurnReport {
@@ -200,6 +220,66 @@ impl Session {
         })
     }
 
+    /// Rebuild the hot context from the ledger, sized to `budget` tokens.
+    /// This is the "session is the app's" invariant in practice: history for
+    /// the next turn comes from here, never from a provider's session state.
+    pub fn assemble_context(&self, budget: i64) -> Result<String> {
+        let c = self.store.conn();
+        let events = ledger::tail(c, self.sess, 400)?;
+        let bodies: Vec<(Event, String)> = events
+            .into_iter()
+            .map(|e| {
+                let b = ledger::body(c, &e)?;
+                Ok((e, b))
+            })
+            .collect::<Result<_>>()?;
+
+        let n = bodies.len();
+        let turns: Vec<TurnItem> = bodies
+            .iter()
+            .enumerate()
+            .map(|(i, (e, body))| {
+                let who = actor::name(c, e.actor).unwrap_or_else(|_| "?".into());
+                TurnItem {
+                    text_l1: Some(format!("{who}: {}", first_chars(body, 100))),
+                    text_l2: Some(format!("{who}: {}", first_chars(body, 40))),
+                    text_l0: format!("{who}: {body}"),
+                    age: n - 1 - i,
+                    key: e.blob.as_ref().map(|b| b.0.clone()),
+                }
+            })
+            .collect();
+
+        let code: Vec<ContextItem> = bodies
+            .iter()
+            .filter(|(e, _)| e.kind == EventKind::Diff)
+            .map(|(e, body)| ContextItem {
+                text: body.clone(),
+                key: e.blob.as_ref().map(|b| b.0.clone()),
+                label: "diff".into(),
+            })
+            .collect();
+
+        let facts = memory::top(c, 1, 12)?;
+        let memory_items: Vec<ContextItem> = memory::render(&facts)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| ContextItem { text: l.to_string(), key: None, label: "fact".into() })
+            .collect();
+
+        let input = AssembleInput {
+            system: "You are one of several agents sharing this session. The context below \
+                     was assembled by Chorus from the shared ledger."
+                .into(),
+            task_state: String::new(),
+            memory: memory_items,
+            turns,
+            code,
+        };
+        let assembler = Assembler::new(Budget::new(budget), CachedCounter::new(HeuristicCounter));
+        Ok(assembler.assemble(&input).text)
+    }
+
     // ---- internals --------------------------------------------------
 
     fn one_turn(&self, agent_name: &str, text: &str, policy: Policy) -> Result<TurnOutcome> {
@@ -263,6 +343,10 @@ impl Session {
             })
             .collect()
     }
+}
+
+fn first_chars(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
 }
 
 /// A minimal unified diff for the ledger. Not a patch tool — just enough
