@@ -14,6 +14,7 @@ use chorus_acp::codex::{
 use chorus_core::checkpoint::Checkpoint;
 use chorus_core::context::{AssembleInput, Assembler, Budget, TurnItem};
 use chorus_core::handoff::{Brief, BriefInput, HandoffMeta, HandoffReason};
+use chorus_core::projector::{self, AgentFile, Drift, Projection};
 use chorus_core::render::ContextItem;
 use chorus_core::tokens::{CachedCounter, HeuristicCounter};
 use chorus_core::{actor, ledger, memory, Event, EventKind, NewEvent, Store};
@@ -483,6 +484,7 @@ impl Session {
     // ---- internals --------------------------------------------------
 
     fn one_turn(&self, agent_name: &str, text: &str, policy: Policy) -> Result<TurnOutcome> {
+        self.project_memory(agent_name);
         let cfg = CodexConfig {
             command: self.bridge.clone(),
             ..Default::default()
@@ -491,6 +493,44 @@ impl Session {
             CodexAgent::start(&self.cwd, cfg).with_context(|| format!("start {agent_name}"))?;
         let mut decide = |ask: &PermissionAsk| policy.decide(ask);
         agent.prompt(text, &mut decide).context("agent turn")
+    }
+
+    /// Render the single memory into the file the agent reads on startup
+    /// (`CLAUDE.md` / `AGENTS.md` / `GEMINI.md`), unless the user has taken
+    /// that file over by hand. Best-effort — a projection failure never
+    /// blocks a turn.
+    fn project_memory(&self, agent_name: &str) {
+        let target = match agent_name.to_lowercase() {
+            n if n.contains("claude") => AgentFile::Claude,
+            n if n.contains("gemini") => AgentFile::Gemini,
+            _ => AgentFile::Codex,
+        };
+        let path = self.cwd.join(target.filename());
+
+        let existing = std::fs::read_to_string(&path).ok();
+        match projector::drift(existing.as_deref()) {
+            Drift::Foreign | Drift::Edited => return, // never clobber a human's file
+            Drift::Missing | Drift::Untouched => {}
+        }
+
+        let project =
+            std::fs::read_to_string(self.cwd.join(".chorus/project.md")).unwrap_or_default();
+        let facts = memory::top(self.store.conn(), 1, 24)
+            .map(|f| memory::render(&f))
+            .unwrap_or_default();
+        if project.trim().is_empty() && facts.trim().is_empty() {
+            return; // nothing to project yet
+        }
+
+        let out = projector::render(
+            target,
+            &Projection {
+                project,
+                facts,
+                task_state: String::new(),
+            },
+        );
+        let _ = std::fs::write(&path, out);
     }
 
     fn persist_outcome(
