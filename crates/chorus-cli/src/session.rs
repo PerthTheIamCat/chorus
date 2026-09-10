@@ -12,7 +12,7 @@ use chorus_acp::codex::{
     AgentEvent, CodexAgent, CodexConfig, Permission, PermissionAsk, TurnOutcome,
 };
 use chorus_core::checkpoint::Checkpoint;
-use chorus_core::compaction::{self, Extractive};
+use chorus_core::compaction;
 use chorus_core::context::{AssembleInput, Assembler, Budget, TurnItem};
 use chorus_core::handoff::{Brief, BriefInput, HandoffMeta, HandoffReason};
 use chorus_core::mcp::McpServer;
@@ -589,13 +589,13 @@ impl Session {
             .collect::<Result<_>>()?;
 
         let n = bodies.len();
-        let summarizer = Extractive;
+        let summarizer = compaction::best();
         let turns: Vec<TurnItem> = bodies
             .iter()
             .enumerate()
             .map(|(i, (e, body))| {
                 let who = actor::name(c, e.actor).unwrap_or_else(|_| "?".into());
-                let r = compaction::rungs_for(&summarizer, body);
+                let r = compaction::rungs_for(summarizer.as_ref(), body);
                 TurnItem {
                     text_l1: Some(format!("{who}: {}", r.l1)),
                     text_l2: Some(format!("{who}: {}", r.l2)),
