@@ -5,20 +5,34 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 
 fn rpc(url: &str, body: serde_json::Value) -> serde_json::Value {
+    use std::io::{BufRead, BufReader};
     let addr = url.trim_start_matches("http://").split('/').next().unwrap();
     let payload = serde_json::to_vec(&body).unwrap();
     let mut s = TcpStream::connect(addr).unwrap();
     write!(
         s,
-        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
         payload.len()
     )
     .unwrap();
     s.write_all(&payload).unwrap();
-    let mut raw = String::new();
-    s.read_to_string(&mut raw).unwrap();
-    let json_body = raw.split("\r\n\r\n").nth(1).unwrap_or("");
-    serde_json::from_str(json_body).unwrap_or(serde_json::Value::Null)
+
+    let mut reader = BufReader::new(s);
+    let mut len = 0usize;
+    loop {
+        let mut h = String::new();
+        reader.read_line(&mut h).unwrap();
+        let h = h.trim_end();
+        if h.is_empty() {
+            break;
+        }
+        if let Some(v) = h.to_lowercase().strip_prefix("content-length:") {
+            len = v.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut buf = vec![0u8; len];
+    reader.read_exact(&mut buf).unwrap();
+    serde_json::from_slice(&buf).unwrap_or(serde_json::Value::Null)
 }
 
 #[test]
@@ -46,13 +60,13 @@ fn an_agent_can_list_and_call_memory_propose() {
             "jsonrpc": "2.0", "id": 2, "method": "tools/list"
         }),
     );
-    assert_eq!(tools["result"]["tools"][0]["name"], "memory.propose");
+    assert_eq!(tools["result"]["tools"][0]["name"], "memory_propose");
 
     let call = rpc(
         server.url(),
         serde_json::json!({
             "jsonrpc": "2.0", "id": 3, "method": "tools/call",
-            "params": { "name": "memory.propose", "arguments": { "text": "ใช้ pnpm ไม่ใช่ npm" } }
+            "params": { "name": "memory_propose", "arguments": { "text": "ใช้ pnpm ไม่ใช่ npm" } }
         }),
     );
     assert!(call["result"]["content"][0]["text"]
@@ -72,7 +86,7 @@ fn an_agent_can_list_and_call_memory_propose() {
         server.url(),
         serde_json::json!({
             "jsonrpc": "2.0", "id": 4, "method": "tools/call",
-            "params": { "name": "memory.propose", "arguments": { "text": "x".repeat(200) } }
+            "params": { "name": "memory_propose", "arguments": { "text": "x".repeat(200) } }
         }),
     );
     assert!(
