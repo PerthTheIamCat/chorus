@@ -71,13 +71,20 @@ pub enum Inbound {
 impl Agent {
     pub fn spawn(cmd: &[String], log: Log) -> Result<Self> {
         let (program, args) = cmd.split_first().ok_or_else(|| anyhow!("empty command"))?;
-        let mut child = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("spawn {cmd:?}"))?;
+            .stderr(Stdio::piped());
+        // Chorus is the session host, not a nested agent. If we were
+        // launched from inside another agent's CLI (Claude Code sets
+        // `CLAUDECODE`), strip its markers so a spawned `claude` bridge
+        // doesn't refuse to run "inside another Claude Code session".
+        for var in ["CLAUDECODE", "CLAUDE_CODE_SSE_PORT", "CLAUDE_CODE_ENTRYPOINT"] {
+            command.env_remove(var);
+        }
+        let mut child = command.spawn().with_context(|| format!("spawn {cmd:?}"))?;
 
         let stdout = child.stdout.take().expect("piped");
         let stderr = child.stderr.take().expect("piped");
