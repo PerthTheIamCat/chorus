@@ -87,62 +87,102 @@ struct ContentView: View {
 
     // MARK: sidebar — open / start a session
 
+    // A plain leading-aligned VStack instead of `Form`: Form's two-column
+    // label|control layout was the cause of the earlier truncated labels —
+    // there just isn't enough width in a sidebar for a label column plus a
+    // control column plus a text field. Every label sits above its control
+    // instead, and gets the sidebar's full width to wrap in.
     private var sidebar: some View {
-        Form {
-            Section("Workspace") {
-                TextField("/path/to/a/small/project", text: $workspace)
-                    .textFieldStyle(.roundedBorder)
-                Text("A real project folder — the first turn snapshots the whole tree, "
-                     + "so avoid your home directory or anything iCloud-synced.")
-                    .font(.caption2).foregroundStyle(.secondary)
-                Button {
-                    let db = (workspace as NSString)
-                        .appendingPathComponent(".chorus/store.db")
-                    try? FileManager.default.createDirectory(
-                        atPath: (db as NSString).deletingLastPathComponent,
-                        withIntermediateDirectories: true)
-                    engine.open(db: db, cwd: workspace, title: "session")
-                } label: {
-                    if engine.busy {
-                        HStack(spacing: 6) {
-                            ProgressView().controlSize(.small)
-                            Text("Snapshotting workspace…")
-                        }
-                    } else {
-                        Text("Start session here")
-                    }
-                }
-                .disabled(engine.busy || workspace.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-            Section("Agent") {
-                Picker("send as", selection: $sendMode) {
-                    ForEach(SendMode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                }
-                if sendMode == .single {
-                    Picker("current", selection: $agent) {
-                        Text("codex").tag("codex")
-                        Text("claude-opus").tag("claude-opus")
-                        Text("gemini").tag("gemini")
-                    }
-                } else {
-                    TextField("chain (comma-separated)", text: $chainAgents)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                sidebarSection("Workspace") {
+                    TextField("/path/to/a/small/project", text: $workspace)
                         .textFieldStyle(.roundedBorder)
-                    Text(sendMode == .relay
-                         ? "tries each in order; hands off on rate limit / quota"
-                         : "forks per agent, runs the same prompt, compare the diffs")
-                        .font(.caption).foregroundStyle(.secondary)
+                    Text("A real project folder — the first turn snapshots the whole "
+                         + "tree, so avoid your home directory or anything iCloud-synced.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button {
+                        let db = (workspace as NSString)
+                            .appendingPathComponent(".chorus/store.db")
+                        try? FileManager.default.createDirectory(
+                            atPath: (db as NSString).deletingLastPathComponent,
+                            withIntermediateDirectories: true)
+                        engine.open(db: db, cwd: workspace, title: "session")
+                    } label: {
+                        HStack(spacing: 6) {
+                            if engine.busy {
+                                ProgressView().controlSize(.small)
+                                Text("Snapshotting workspace…")
+                            } else {
+                                Text("Start session here")
+                            }
+                            Spacer(minLength: 0)
+                        }
+                    }
+                    .disabled(engine.busy || workspace.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .frame(maxWidth: .infinity)
                 }
-                Toggle("Allow file writes / commands", isOn: $allow)
-            }
-            if engine.sessionID >= 0 {
-                Section {
+
+                sidebarSection("Agent") {
+                    Text("send as").font(.caption).foregroundStyle(.secondary)
+                    Picker("", selection: $sendMode) {
+                        ForEach(SendMode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity)
+
+                    if sendMode == .single {
+                        Text("current").font(.caption).foregroundStyle(.secondary)
+                        Picker("", selection: $agent) {
+                            Text("codex").tag("codex")
+                            Text("claude-opus").tag("claude-opus")
+                            Text("gemini").tag("gemini")
+                        }
+                        .labelsHidden()
+                        .frame(maxWidth: .infinity)
+                    } else {
+                        Text("chain (comma-separated)").font(.caption).foregroundStyle(.secondary)
+                        TextField("codex,claude-opus", text: $chainAgents)
+                            .textFieldStyle(.roundedBorder)
+                        Text(sendMode == .relay
+                             ? "tries each in order; hands off on rate limit / quota"
+                             : "forks per agent, runs the same prompt, compare the diffs")
+                            .font(.caption2).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Toggle(isOn: $allow) {
+                        Text("Allow file writes / commands")
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .toggleStyle(.checkbox)
+                }
+
+                if engine.sessionID >= 0 {
                     Button("Hand off…") { showHandoff = true }
                         .disabled(engine.busy)
+                        .frame(maxWidth: .infinity)
                 }
+
+                Spacer(minLength: 0)
             }
+            .padding(16)
         }
         .navigationTitle("Chorus")
-        .frame(minWidth: 240)
+        .frame(minWidth: 280, idealWidth: 300)
+    }
+
+    /// A section header plus its content, spaced and left-aligned — the
+    /// sidebar's substitute for `Form`'s `Section`.
+    @ViewBuilder
+    private func sidebarSection<Content: View>(
+        _ title: String, @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.subheadline.bold())
+            content()
+        }
     }
 
     // MARK: thread — the ledger, plus the compose box
