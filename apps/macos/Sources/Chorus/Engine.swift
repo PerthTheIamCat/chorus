@@ -56,21 +56,35 @@ final class Engine: ObservableObject {
     private var handle: OpaquePointer?
     private let queue = DispatchQueue(label: "chorus.engine")
 
+    /// Opening a session runs `git init` + a first snapshot of the whole
+    /// workspace tree (checkpoint.rs) — on a large or slow-to-enumerate
+    /// directory (a home folder, an iCloud-synced tree) that can take a
+    /// long time. Do it off the main thread so the UI stays responsive
+    /// (`busy` drives a spinner) instead of looking hung.
     func open(db: String, cwd: String, title: String) {
         close()
-        handle = db.withCString { d in
-            cwd.withCString { c in
-                title.withCString { t in
-                    chorus_engine_open(d, c, t)
+        busy = true
+        lastError = nil
+        queue.async { [weak self] in
+            let h = db.withCString { d in
+                cwd.withCString { c in
+                    title.withCString { t in
+                        chorus_engine_open(d, c, t)
+                    }
                 }
             }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.busy = false
+                guard let h else {
+                    self.lastError = "could not open a session (is the workspace path valid?)"
+                    return
+                }
+                self.handle = h
+                self.sessionID = chorus_engine_session_id(h)
+                self.refresh()
+            }
         }
-        guard let h = handle else {
-            lastError = "could not open a session (is the workspace path valid?)"
-            return
-        }
-        sessionID = chorus_engine_session_id(h)
-        refresh()
     }
 
     func close() {
@@ -227,17 +241,31 @@ final class Engine: ObservableObject {
         }
     }
 
+    /// `chorus_working_diff` runs `git add -A` under the hood (checkpoint.rs)
+    /// — on a large or iCloud-synced workspace that can take a while, so
+    /// this hops to the background queue rather than blocking whatever
+    /// thread called `refresh()` (including the main thread, since several
+    /// call sites are already inside a `DispatchQueue.main.async`).
     func refresh() {
         guard let h = handle else { return }
-        let json = Self.string(from: chorus_transcript_json(h))
-        if let rows = Self.decode([LedgerEvent].self, json) {
-            events = rows
+        queue.async { [weak self] in
+            let eventsJSON = Self.string(from: chorus_transcript_json(h))
+            let diffJSON = Self.string(from: chorus_working_diff(h))
+            let memJSON = Self.string(from: chorus_memory_state(h))
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let rows = Self.decode([LedgerEvent].self, eventsJSON) {
+                    self.events = rows
+                }
+                if let obj = Self.decode(DiffResult.self, diffJSON) {
+                    self.workingDiff = obj.diff ?? ""
+                }
+                if let s = Self.decode(MemoryState.self, memJSON) {
+                    self.facts = s.facts ?? []
+                    self.pending = s.pending ?? []
+                }
+            }
         }
-        let d = Self.string(from: chorus_working_diff(h))
-        if let obj = Self.decode(DiffResult.self, d) {
-            workingDiff = obj.diff ?? ""
-        }
-        refreshMemory()
     }
 
     @Published var workingDiff = ""
@@ -270,30 +298,41 @@ final class Engine: ObservableObject {
         refreshMemory()
     }
 
+    // All three below run `git` under the hood (checkpoint.rs) — off the
+    // main thread for the same reason as `open`/`refresh`.
+
     func snapshot() {
         guard let h = handle else { return }
-        _ = "manual checkpoint".withCString { chorus_snapshot(h, $0) }
-        refresh()
+        queue.async {
+            _ = "manual checkpoint".withCString { chorus_snapshot(h, $0) }
+            DispatchQueue.main.async { [weak self] in self?.refresh() }
+        }
     }
 
     /// Reverse-apply `patch` (the hunks the user rejected).
     func rejectHunks(_ patch: String) {
         guard let h = handle else { return }
-        let r = patch.withCString { Self.string(from: chorus_reject_hunks(h, $0)) }
-        if let obj = Self.decode(SimpleResult.self, r), obj.ok != true {
-            lastError = obj.error ?? "reject failed"
+        queue.async { [weak self] in
+            let r = patch.withCString { Self.string(from: chorus_reject_hunks(h, $0)) }
+            let obj = Self.decode(SimpleResult.self, r)
+            DispatchQueue.main.async {
+                if obj?.ok != true { self?.lastError = obj?.error ?? "reject failed" }
+                self?.refresh()
+            }
         }
-        refresh()
     }
 
     /// Roll the workspace back to the session start. Destructive.
     func revertToStart() {
         guard let h = handle else { return }
-        let r = "".withCString { Self.string(from: chorus_restore(h, $0)) }
-        if let obj = Self.decode(SimpleResult.self, r), obj.ok != true {
-            lastError = obj.error ?? "restore failed"
+        queue.async { [weak self] in
+            let r = "".withCString { Self.string(from: chorus_restore(h, $0)) }
+            let obj = Self.decode(SimpleResult.self, r)
+            DispatchQueue.main.async {
+                if obj?.ok != true { self?.lastError = obj?.error ?? "restore failed" }
+                self?.refresh()
+            }
         }
-        refresh()
     }
 
     // ---- helpers (thread-agnostic) ----

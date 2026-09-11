@@ -6,7 +6,12 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var engine: Engine
 
-    @State private var workspace = NSHomeDirectory()
+    // Empty on purpose: defaulting to the home directory made "Start
+    // session" look hung — it snapshots the whole tree (checkpoint.rs does
+    // `git add -A`) before the first turn, which is minutes-to-forever over
+    // a home folder (worse still if it's iCloud-synced). Force a real
+    // project path instead of silently picking something enormous.
+    @State private var workspace = ""
     @State private var draft = ""
     @State private var agent = "codex"
     @State private var allow = false
@@ -85,17 +90,29 @@ struct ContentView: View {
     private var sidebar: some View {
         Form {
             Section("Workspace") {
-                TextField("path", text: $workspace)
+                TextField("/path/to/a/small/project", text: $workspace)
                     .textFieldStyle(.roundedBorder)
-                Button("Start session here") {
+                Text("A real project folder — the first turn snapshots the whole tree, "
+                     + "so avoid your home directory or anything iCloud-synced.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Button {
                     let db = (workspace as NSString)
                         .appendingPathComponent(".chorus/store.db")
                     try? FileManager.default.createDirectory(
                         atPath: (db as NSString).deletingLastPathComponent,
                         withIntermediateDirectories: true)
                     engine.open(db: db, cwd: workspace, title: "session")
+                } label: {
+                    if engine.busy {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Snapshotting workspace…")
+                        }
+                    } else {
+                        Text("Start session here")
+                    }
                 }
-                .disabled(engine.busy)
+                .disabled(engine.busy || workspace.trimmingCharacters(in: .whitespaces).isEmpty)
             }
             Section("Agent") {
                 Picker("send as", selection: $sendMode) {
