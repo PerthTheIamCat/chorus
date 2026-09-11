@@ -179,7 +179,7 @@ pub unsafe extern "C" fn chorus_run_turn(
             stop_reason: t.stop_reason,
         })
         .unwrap()),
-        Ok(Err(e)) => err(e),
+        Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in run_turn"),
     }
 }
@@ -243,7 +243,7 @@ pub unsafe extern "C" fn chorus_run_turn_interactive(
             stop_reason: t.stop_reason,
         })
         .unwrap()),
-        Ok(Err(e)) => err(e),
+        Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in run_turn_interactive"),
     }
 }
@@ -291,7 +291,7 @@ pub unsafe extern "C" fn chorus_events_since(e: *const ChorusEngine, after: i64)
                 .collect();
             out(serde_json::to_string(&events).unwrap())
         }
-        Ok(Err(e)) => err(e),
+        Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in transcript"),
     }
 }
@@ -327,7 +327,7 @@ pub unsafe extern "C" fn chorus_snapshot(
     let msg = borrow(message).unwrap_or("manual checkpoint");
     match catch_unwind(AssertUnwindSafe(|| engine.session.snapshot(msg))) {
         Ok(Ok(sha)) => out(serde_json::json!({ "ok": true, "sha": sha }).to_string()),
-        Ok(Err(e)) => err(e),
+        Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in snapshot"),
     }
 }
@@ -350,7 +350,7 @@ pub unsafe extern "C" fn chorus_reject_hunks(
     };
     match catch_unwind(AssertUnwindSafe(|| engine.session.reject_hunks(patch))) {
         Ok(Ok(())) => out(serde_json::json!({ "ok": true }).to_string()),
-        Ok(Err(e)) => err(e),
+        Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in reject_hunks"),
     }
 }
@@ -368,7 +368,7 @@ pub unsafe extern "C" fn chorus_restore(e: *const ChorusEngine, sha: *const c_ch
     let sha = borrow(sha).unwrap_or("");
     match catch_unwind(AssertUnwindSafe(|| engine.session.restore_to(sha))) {
         Ok(Ok(())) => out(serde_json::json!({ "ok": true }).to_string()),
-        Ok(Err(e)) => err(e),
+        Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in restore"),
     }
 }
@@ -396,7 +396,7 @@ pub unsafe extern "C" fn chorus_memory_state(e: *const ChorusEngine) -> *mut c_c
             }).collect::<Vec<_>>(),
         })
         .to_string()),
-        Ok(Err(e)) => err(e),
+        Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in memory_state"),
     }
 }
@@ -419,7 +419,7 @@ pub unsafe extern "C" fn chorus_memory_review(
     }));
     match r {
         Ok(Ok(())) => out(serde_json::json!({ "ok": true }).to_string()),
-        Ok(Err(e)) => err(e),
+        Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in memory_review"),
     }
 }
@@ -489,7 +489,7 @@ pub unsafe extern "C" fn chorus_handoff(
             stop_reason: h.stop_reason,
         })
         .unwrap()),
-        Ok(Err(e)) => err(e),
+        Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in handoff"),
     }
 }
@@ -561,7 +561,7 @@ pub unsafe extern "C" fn chorus_run_relay(
                 .collect(),
         })
         .unwrap()),
-        Ok(Err(e)) => err(e),
+        Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in run_relay"),
     }
 }
@@ -630,7 +630,7 @@ pub unsafe extern "C" fn chorus_compare(
                 .collect(),
         })
         .unwrap()),
-        Ok(Err(e)) => err(e),
+        Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in compare"),
     }
 }
