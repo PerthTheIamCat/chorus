@@ -1316,6 +1316,18 @@ impl Session {
             }
         };
 
+        // Codex applies its own Seatbelt profile for every mode except
+        // `agent-full-access`, and macOS refuses a sandbox inside a sandbox
+        // (`sandbox_apply: Operation not permitted`) — every shell command it
+        // ran died. When ours is the wall around the bridge, ask Codex not to
+        // build a second one; ours still confines writes.
+        let sandboxed = command.as_slice() != bridge;
+        let mode = if sandboxed && crate::accounts::split(agent_name).0 == "codex" {
+            "agent-full-access"
+        } else {
+            mode
+        };
+
         let mut env = crate::accounts::env_for(agent_name);
         let cli_paths = integration_catalog::cli_paths_for(&self.cwd)
             .context("load enabled catalog CLI tools")?;
