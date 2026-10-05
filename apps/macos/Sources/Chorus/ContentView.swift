@@ -63,6 +63,7 @@ struct ContentView: View {
 
     @State private var rightTab = RightTab.context
     @State private var showPalette = false
+    @State private var showInspector = true
     @State private var expanded: Set<String> = []
     @StateObject private var projects = ProjectStore()
     @StateObject private var fileIndex = FileIndex()
@@ -86,26 +87,26 @@ struct ContentView: View {
         NavigationSplitView {
             sidebar
         } detail: {
-            HStack(spacing: 0) {
-                thread
-                Divider()
-                VStack(spacing: 0) {
-                    Picker("", selection: $rightTab) {
-                        ForEach(RightTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            thread
+                // The right panel is a system inspector: on macOS 26+ it
+                // floats as its own glass panel, like the sidebar, and folds away.
+                .inspector(isPresented: $showInspector) {
+                    VStack(spacing: 0) {
+                        Picker("", selection: $rightTab) {
+                            ForEach(RightTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .padding(10)
+                        switch rightTab {
+                        case .context: contextPane
+                        case .subagents: subagentsPane
+                        case .changes: changesPane
+                        case .memory: memoryPane
+                        }
                     }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .padding(8)
-                    Divider()
-                    switch rightTab {
-                    case .context: contextPane
-                    case .subagents: subagentsPane
-                    case .changes: changesPane
-                    case .memory: memoryPane
-                    }
+                    .inspectorColumnWidth(min: 260, ideal: 310, max: 460)
                 }
-                .frame(width: 300)
-            }
         }
         .toolbar {
             ToolbarItem(placement: .principal) {
@@ -114,6 +115,13 @@ struct ContentView: View {
                         ?? "เซสชัน \(engine.sessionID)")
                     .lineLimit(1)
                     .font(.headline)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button { withAnimation { showInspector.toggle() } } label: {
+                    Label("แผงข้อมูล", systemImage: "sidebar.right")
+                }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+                .help("เปิด/ปิดแผงคอนเท็กซ์ ที่แก้ไป ความจำ (⌘⌥I)")
             }
             ToolbarItemGroup(placement: .primaryAction) {
                 // Handing over is one click per agent. Everything the next
@@ -291,7 +299,6 @@ struct ContentView: View {
     /// stays visible instead of hiding in a settings form.
     private var agentFooter: some View {
         VStack(spacing: 0) {
-            Divider()
             HStack(spacing: 10) {
                 if engine.agents.isEmpty {
                     ProgressView().controlSize(.mini)
@@ -312,7 +319,6 @@ struct ContentView: View {
             }
             .padding(.horizontal, 14).padding(.vertical, 9)
         }
-        .background(.bar)
     }
 
     /// The agent whose model id is currently selected.
@@ -412,20 +418,13 @@ struct ContentView: View {
     // MARK: thread — the ledger, plus the compose box
 
     private var thread: some View {
-        VStack(spacing: 0) {
-            if let err = engine.lastError {
-                Text(err)
-                    .font(.callout).foregroundStyle(.red)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
-                    .background(.red.opacity(0.08))
-            }
+        Group {
             if engine.sessionID < 0 {
                 emptyState
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 10) {
+                        LazyVStack(alignment: .leading, spacing: 12) {
                             ForEach(engine.events) { ev in
                                 EventRow(event: ev).id(ev.seq)
                             }
@@ -434,7 +433,9 @@ struct ContentView: View {
                                 ThinkingBlock(text: engine.lastThoughts, running: false)
                             }
                         }
-                        .padding(12)
+                        .frame(maxWidth: 820)
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 20).padding(.vertical, 16)
                     }
                     .onChange(of: engine.events.count) { _, _ in
                         if let last = engine.events.last { proxy.scrollTo(last.seq, anchor: .bottom) }
@@ -447,10 +448,30 @@ struct ContentView: View {
                     }
                 }
             }
-            Divider()
-            composer
         }
-        .frame(minWidth: 380)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Floating composer: the thread scrolls underneath it instead of
+        // stopping at a divider, the way Claude/Codex/ChatGPT do.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            composer
+                .frame(maxWidth: 820)
+                .padding(.horizontal, 16).padding(.bottom, 14).padding(.top, 4)
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let err = engine.lastError {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+                    Text(err).font(.callout).lineLimit(3).textSelection(.enabled)
+                    Spacer(minLength: 0)
+                    Button { engine.lastError = nil } label: { Image(systemName: "xmark") }
+                        .buttonStyle(.borderless)
+                }
+                .padding(.horizontal, 14).padding(.vertical, 9)
+                .floatingPanel(cornerRadius: 14, tint: .red)
+                .padding(.horizontal, 16).padding(.top, 8)
+            }
+        }
+        .frame(minWidth: 420)
     }
 
     /// The running turn, live: reasoning (collapsible, like the thinking
@@ -557,9 +578,8 @@ struct ContentView: View {
                 .help(engine.busy ? "เข้าคิว (↩)" : "ส่ง (↩ · ⇧↩ ขึ้นบรรทัดใหม่)")
             }
         }
-        .padding(10)
-        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
-        .padding(10)
+        .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 10)
+        .floatingPanel(cornerRadius: 22)
     }
 
     /// `@codex fix this` → ("codex's default model", "fix this"). Matches agent
@@ -1605,5 +1625,23 @@ struct ThinkingBlock: View {
         }
         .padding(8)
         .background(Color.purple.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+
+extension View {
+    /// A floating panel: Liquid Glass on macOS 26+, a material card with a
+    /// soft shadow before that.
+    @ViewBuilder
+    func floatingPanel(cornerRadius: CGFloat, tint: Color? = nil) -> some View {
+        if #available(macOS 26, *) {
+            self.glassEffect(tint.map { Glass.regular.tint($0.opacity(0.25)) } ?? .regular,
+                             in: .rect(cornerRadius: cornerRadius))
+        } else {
+            self
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: cornerRadius))
+                .overlay(RoundedRectangle(cornerRadius: cornerRadius).stroke(.quaternary))
+                .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+        }
     }
 }
