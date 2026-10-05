@@ -42,6 +42,8 @@ fn start_then_prompt_folds_the_update_stream_into_an_outcome() {
             AgentEvent::Message(_) => "msg",
             AgentEvent::ToolCall { .. } => "call",
             AgentEvent::ToolResult { .. } => "result",
+            AgentEvent::SubagentSpawned { .. } => "subagent_spawned",
+            AgentEvent::SubagentState { .. } => "subagent_state",
             AgentEvent::Diff { .. } => "diff",
         })
         .collect();

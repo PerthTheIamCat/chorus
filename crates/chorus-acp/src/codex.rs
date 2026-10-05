@@ -86,6 +86,19 @@ pub enum AgentEvent {
     ToolCall { title: String, kind: String },
     /// The resolution of a tool call.
     ToolResult { title: String, status: String },
+    /// A child session announced by the bridge, including nested children.
+    SubagentSpawned {
+        session_id: String,
+        parent_session_id: String,
+        name: String,
+        task: String,
+    },
+    /// The child session's final state and any message it sent while running.
+    SubagentState {
+        session_id: String,
+        state: String,
+        message: String,
+    },
     /// A file edit the agent proposed, as a unified-diff-ready triple.
     Diff {
         path: String,
@@ -353,7 +366,10 @@ impl CodexAgent {
                 None => return Err(anyhow!("prompt content is missing its type")),
             }
         }
-        let mut acc = Accumulator::default();
+        let mut acc = Accumulator {
+            root_session_id: self.session_id.clone(),
+            ..Default::default()
+        };
         let cwd = self.cwd.clone();
 
         let id = self.agent.request(
@@ -421,7 +437,8 @@ impl CodexAgent {
                 "protocolVersion": 1,
                 "clientCapabilities": {
                     "fs": { "readTextFile": true, "writeTextFile": true },
-                    "terminal": false
+                    "terminal": false,
+                    "subagents": {}
                 },
                 "clientInfo": { "name": "chorus", "version": env!("CARGO_PKG_VERSION") }
             }),
@@ -681,9 +698,11 @@ fn report_progress(params: &Value) {
 /// Folds a turn's `session/update` stream into a [`TurnOutcome`].
 #[derive(Default)]
 struct Accumulator {
+    root_session_id: String,
     message: String,
     thoughts: String,
     events: Vec<AgentEvent>,
+    child_messages: std::collections::HashMap<String, String>,
     /// `toolCallId` → title, so a `tool_call_update` (which carries only the
     /// id) can name the call it resolves.
     titles: std::collections::HashMap<String, String>,
@@ -703,6 +722,44 @@ impl Accumulator {
             .get("sessionUpdate")
             .and_then(Value::as_str)
             .unwrap_or("");
+        let session_id = params.get("sessionId").and_then(Value::as_str).unwrap_or("");
+        match kind {
+            "subagent_spawned" => {
+                if let Some(child) = update.get("subagentSessionId").and_then(Value::as_str) {
+                    self.events.push(AgentEvent::SubagentSpawned {
+                        session_id: child.to_string(),
+                        parent_session_id: session_id.to_string(),
+                        name: update.get("name").and_then(Value::as_str).unwrap_or("Agent").to_string(),
+                        task: update.get("task").and_then(Value::as_str).unwrap_or("").to_string(),
+                    });
+                }
+                return;
+            }
+            "subagent_state_update" => {
+                if let (Some(child), Some(state)) = (
+                    update.get("subagentSessionId").and_then(Value::as_str),
+                    update.get("state").and_then(Value::as_str),
+                ) {
+                    self.events.push(AgentEvent::SubagentState {
+                        session_id: child.to_string(),
+                        state: state.to_string(),
+                        message: self.child_messages.remove(child).unwrap_or_default(),
+                    });
+                }
+                return;
+            }
+            _ => {}
+        }
+        // Child updates share the transport with the parent. Their prose and
+        // tools must not become the parent's answer or tool history.
+        if !session_id.is_empty() && session_id != self.root_session_id {
+            if kind == "agent_message_chunk" {
+                if let Some(text) = chunk_text(update) {
+                    self.child_messages.entry(session_id.to_string()).or_default().push_str(&text);
+                }
+            }
+            return;
+        }
         match kind {
             "agent_message_chunk" => {
                 if let Some(t) = chunk_text(update) {

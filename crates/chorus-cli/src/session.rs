@@ -1643,6 +1643,25 @@ impl Session {
                 AgentEvent::ToolResult { title, status } => {
                     (EventKind::ToolResult, format!("{title} → {status}"))
                 }
+                AgentEvent::SubagentSpawned { session_id, parent_session_id, name, task } => (
+                    EventKind::ToolCall,
+                    serde_json::json!({
+                        "event": "subagent_spawned",
+                        "sessionId": session_id,
+                        "parentSessionId": parent_session_id,
+                        "name": name,
+                        "task": task,
+                    }).to_string(),
+                ),
+                AgentEvent::SubagentState { session_id, state, message } => (
+                    EventKind::ToolResult,
+                    serde_json::json!({
+                        "event": "subagent_state_update",
+                        "sessionId": session_id,
+                        "state": state,
+                        "message": message,
+                    }).to_string(),
+                ),
                 AgentEvent::Diff { path, old, new } => {
                     (EventKind::Diff, render_diff(path, old, new))
                 }

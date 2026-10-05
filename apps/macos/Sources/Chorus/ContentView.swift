@@ -1,6 +1,27 @@
 import AppKit
 import SwiftUI
 
+private struct SubagentLedgerPayload: Decodable {
+    let event: String
+    let sessionId: String
+    let parentSessionId: String?
+    let name: String?
+    let task: String?
+    let state: String?
+    let message: String?
+}
+
+private struct SubagentEntry: Identifiable {
+    let id: String
+    let parentSessionId: String
+    var name: String
+    var task: String
+    let actor: String
+    let seq: Int64
+    var state: String?
+    var message: String
+}
+
 /// Mirrors `Policy::from_level` in chorus-cli/session.rs — the FFI takes
 /// this as a plain int, not a bool, since read-only sits between deny
 /// and allow (auto-approves reads, still denies writes/commands/network).
@@ -328,10 +349,12 @@ struct ContentView: View {
 
     private func badge(_ t: RightTab) -> Int {
         switch t {
-        case .context: 0
-        case .changes: Set(parseHunks(engine.workingDiff).map(\.file)).count
-        case .memory: engine.pending.count
-        case .subagents: engine.events.filter { $0.kind == "tool_call" && Self.isSubagentCall($0.body) }.count
+        case .context: return 0
+        case .changes: return Set(parseHunks(engine.workingDiff).map(\.file)).count
+        case .memory: return engine.pending.count
+        case .subagents:
+            let native = subagentEntries.count
+            return native > 0 ? native : engine.events.filter { $0.kind == "tool_call" && Self.isSubagentCall($0.body) }.count
         }
     }
 
@@ -1617,20 +1640,49 @@ struct ContentView: View {
     /// when a turn ends, not while it streams.
     private var subagentsPane: some View {
         let evs = engine.events
+        let children = subagentEntries
         let calls: [(call: LedgerEvent, result: LedgerEvent?)] = evs.enumerated().compactMap { i, e in
             guard e.kind == "tool_call", Self.isSubagentCall(e.body) else { return nil }
             let r = evs[(i + 1)...].first { $0.kind == "tool_result" }
             return (e, r)
         }
-        let byAgent = Dictionary(grouping: evs.filter { $0.actor != "user" && $0.kind == "tool_call" }, by: \.actor)
         return VStack(spacing: 0) {
-          PaneHeader(title: "งานย่อย", subtitle: calls.isEmpty ? nil : "\(calls.count) งานที่เอเจนต์แตกออกไป") { EmptyView() }
-          if calls.isEmpty && byAgent.isEmpty {
+          PaneHeader(title: "งานย่อย", subtitle: children.isEmpty && calls.isEmpty ? nil : "\(children.isEmpty ? calls.count : children.count) งานที่เอเจนต์แตกออกไป") { EmptyView() }
+          if children.isEmpty && calls.isEmpty {
             EmptyPane(icon: "point.3.connected.trianglepath.dotted", title: "ยังไม่มีงานย่อย",
                       hint: "เมื่อเอเจนต์แตกงานให้ subagent (Task/Agent) จะขึ้นที่นี่พร้อมผลลัพธ์")
           } else {
           ScrollView {
             VStack(alignment: .leading, spacing: 10) {
+                if !children.isEmpty {
+                    ForEach(children) { child in
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(spacing: 6) {
+                                Image(systemName: child.state == nil ? "hourglass" : child.state == "completed" ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                                    .foregroundStyle(child.state == nil ? Color.orange : child.state == "completed" ? Color.green : Color.secondary)
+                                Text(child.name).font(.caption.bold())
+                                Spacer()
+                                Text(child.state.map(Self.subagentStateLabel) ?? "กำลังทำ")
+                                    .font(.caption2).foregroundStyle(.secondary)
+                            }
+                            if let parent = children.first(where: { $0.id == child.parentSessionId }) {
+                                Text("แตกงานจาก \(parent.name)").font(.caption2).foregroundStyle(.secondary)
+                            } else if !child.parentSessionId.isEmpty {
+                                Text("แตกงานจากเอเจนต์หลัก").font(.caption2).foregroundStyle(.secondary)
+                            }
+                            if !child.task.isEmpty { Text(child.task).font(.caption) }
+                            if !child.message.isEmpty {
+                                DisclosureGroup("ผลลัพธ์") {
+                                    Text(child.message).font(.caption2.monospaced()).textSelection(.enabled)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }.font(.caption2)
+                            }
+                        }
+                        .padding(10)
+                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .hoverHighlight(cornerRadius: 10)
+                    }
+                } else {
                 ForEach(calls, id: \.call.seq) { c in
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 6) {
@@ -1652,13 +1704,6 @@ struct ContentView: View {
                     .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                     .hoverHighlight(cornerRadius: 10)
                 }
-                SectionLabel("กิจกรรมต่อเอเจนต์", count: nil, tint: .secondary)
-                ForEach(byAgent.keys.sorted(), id: \.self) { a in
-                    HStack {
-                        Text(a).font(.caption)
-                        Spacer()
-                        Text("\(byAgent[a]?.count ?? 0) tool calls").font(.caption2).foregroundStyle(.secondary)
-                    }
                 }
             }
             .padding(12)
@@ -1671,6 +1716,45 @@ struct ContentView: View {
     private static func isSubagentCall(_ body: String) -> Bool {
         let t = body.lowercased()
         return ["task:", "agent:", "subagent", "delegate", "spawn"].contains { t.contains($0) }
+    }
+
+    private static func subagentStateLabel(_ state: String) -> String {
+        switch state {
+        case "completed": "เสร็จแล้ว"
+        case "failed": "ล้มเหลว"
+        case "cancelled": "ยกเลิกแล้ว"
+        case "disconnected": "ขาดการเชื่อมต่อ"
+        default: state
+        }
+    }
+
+    private var subagentEntries: [SubagentEntry] {
+        var entries: [SubagentEntry] = []
+        var indexByID: [String: Int] = [:]
+        for event in engine.events where event.kind == "tool_call" || event.kind == "tool_result" {
+            guard let data = event.body.data(using: .utf8),
+                  let payload = try? JSONDecoder().decode(SubagentLedgerPayload.self, from: data) else { continue }
+            if payload.event == "subagent_spawned" {
+                if let index = indexByID[payload.sessionId] {
+                    entries[index].name = payload.name ?? entries[index].name
+                    entries[index].task = payload.task ?? entries[index].task
+                } else {
+                    indexByID[payload.sessionId] = entries.count
+                    entries.append(SubagentEntry(id: payload.sessionId,
+                                                 parentSessionId: payload.parentSessionId ?? "",
+                                                 name: payload.name ?? "Agent",
+                                                 task: payload.task ?? "",
+                                                 actor: event.actor,
+                                                 seq: event.seq,
+                                                 state: nil,
+                                                 message: ""))
+                }
+            } else if payload.event == "subagent_state_update", let index = indexByID[payload.sessionId] {
+                entries[index].state = payload.state
+                if let message = payload.message, !message.isEmpty { entries[index].message = message }
+            }
+        }
+        return entries
     }
 
     private var dbPath: String {
@@ -1918,16 +2002,28 @@ struct EventRow: View {
     /// One collapsed line per tool call; click to see the payload.
     private var toolRow: some View {
         DisclosureGroup {
-            Text(event.body)
-                .font(.caption2.monospaced())
+            if let payload = subagentPayload {
+                VStack(alignment: .leading, spacing: 4) {
+                    if let task = payload.task, !task.isEmpty { Text(task) }
+                    if let message = payload.message, !message.isEmpty { Text(message) }
+                    if let state = payload.state { Text(Self.subagentStateLabel(state)).foregroundStyle(.secondary) }
+                }
+                .font(.caption2)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 4)
+            } else {
+                Text(event.body)
+                    .font(.caption2.monospaced())
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 4)
+            }
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: event.kind == "diff" ? "plusminus" : "wrench.and.screwdriver")
+                Image(systemName: subagentPayload == nil ? (event.kind == "diff" ? "plusminus" : "wrench.and.screwdriver") : "point.3.connected.trianglepath.dotted")
                     .font(.caption2).foregroundStyle(.secondary)
-                Text(firstLine).font(.caption).lineLimit(1).foregroundStyle(.secondary)
+                Text(toolLabel).font(.caption).lineLimit(1).foregroundStyle(.secondary)
             }
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
@@ -1938,6 +2034,27 @@ struct EventRow: View {
     private var firstLine: String {
         let l = event.body.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? event.kind
         return l.count > 110 ? String(l.prefix(110)) + "…" : l
+    }
+
+    private var subagentPayload: SubagentLedgerPayload? {
+        guard let data = event.body.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(SubagentLedgerPayload.self, from: data)
+    }
+
+    private var toolLabel: String {
+        guard let payload = subagentPayload else { return firstLine }
+        if payload.event == "subagent_spawned" { return "งานย่อย · \(payload.name ?? "Agent")" }
+        return "สถานะงานย่อย · \(payload.state.map(Self.subagentStateLabel) ?? "อัปเดต")"
+    }
+
+    private static func subagentStateLabel(_ state: String) -> String {
+        switch state {
+        case "completed": "เสร็จแล้ว"
+        case "failed": "ล้มเหลว"
+        case "cancelled": "ยกเลิกแล้ว"
+        case "disconnected": "ขาดการเชื่อมต่อ"
+        default: state
+        }
     }
 
     private func note(_ t: String) -> some View {
