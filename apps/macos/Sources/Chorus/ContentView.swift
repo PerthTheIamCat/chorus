@@ -79,10 +79,58 @@ struct ContentView: View {
     @State private var queued: [(model: String, text: String)] = []
     @State private var hint: String?
     @State private var confirmRevert = false
-    @State private var rejected: Set<UUID> = []
+    @State private var rejected: Set<String> = []
 
     enum RightTab: String, CaseIterable {
-        case context = "คอนเท็กซ์", subagents = "งานย่อย", changes = "ที่แก้ไป", memory = "ความจำ"
+        case context = "คอนเท็กซ์", changes = "ที่แก้ไป", memory = "ความจำ", subagents = "งานย่อย"
+
+        var icon: String {
+            switch self {
+            case .context: "gauge.with.dots.needle.50percent"
+            case .changes: "plusminus"
+            case .memory: "brain.head.profile"
+            case .subagents: "point.3.connected.trianglepath.dotted"
+            }
+        }
+    }
+
+    private func badge(_ t: RightTab) -> Int {
+        switch t {
+        case .context: 0
+        case .changes: Set(parseHunks(engine.workingDiff).map(\.file)).count
+        case .memory: engine.pending.count
+        case .subagents: engine.events.filter { $0.kind == "tool_call" && Self.isSubagentCall($0.body) }.count
+        }
+    }
+
+    /// Icon tabs with counts, so the panel says where something needs you
+    /// (files changed, proposals waiting) before you open the tab.
+    private var inspectorTabs: some View {
+        HStack(spacing: 2) {
+            ForEach(RightTab.allCases, id: \.self) { t in
+                let n = badge(t)
+                Button { rightTab = t } label: {
+                    VStack(spacing: 3) {
+                        ZStack(alignment: .topTrailing) {
+                            Image(systemName: t.icon).font(.system(size: 14, weight: .medium))
+                                .frame(width: 26, height: 18)
+                            if n > 0 {
+                                Text("\(n)").font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
+                                    .padding(.horizontal, 4).padding(.vertical, 1)
+                                    .background(t == .memory ? Color.orange : Color.accentColor, in: Capsule())
+                                    .offset(x: 8, y: -5)
+                            }
+                        }
+                        Text(t.rawValue).font(.caption2)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .foregroundStyle(rightTab == t ? Color.accentColor : .secondary)
+                }
+                .buttonStyle(InteractiveStyle(cornerRadius: 9, selected: rightTab == t,
+                                              padding: .init(top: 6, leading: 2, bottom: 5, trailing: 2)))
+            }
+        }
+        .padding(8)
     }
 
     var body: some View {
@@ -98,12 +146,8 @@ struct ContentView: View {
             thread
             if showInspector {
                 VStack(spacing: 0) {
-                    Picker("", selection: $rightTab) {
-                        ForEach(RightTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .padding(10)
+                    inspectorTabs
+                    Divider().opacity(0.5)
                     switch rightTab {
                     case .context: contextPane
                     case .subagents: subagentsPane
@@ -741,92 +785,104 @@ struct ContentView: View {
 
     private var changesPane: some View {
         let hunks = parseHunks(engine.workingDiff)
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Since session start").font(.headline)
-                Spacer()
-                Button("Snapshot") { engine.snapshot() }
-                    .controlSize(.small).disabled(engine.sessionID < 0)
+        let files = Dictionary(grouping: hunks, by: \.file)
+        let order = hunks.map(\.file).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+        return VStack(spacing: 0) {
+            PaneHeader(title: "ที่แก้ไปในเซสชันนี้",
+                       subtitle: hunks.isEmpty ? nil
+                           : "\(order.count) ไฟล์ · +\(hunks.map(\.addCount).reduce(0, +)) −\(hunks.map(\.delCount).reduce(0, +))") {
+                Button { engine.snapshot() } label: { Image(systemName: "camera") }
+                    .buttonStyle(InteractiveStyle(cornerRadius: 6, padding: .init(top: 4, leading: 6, bottom: 4, trailing: 6)))
+                    .disabled(engine.sessionID < 0)
+                    .help("บันทึกจุดย้อนกลับตอนนี้")
             }
             if hunks.isEmpty {
-                Text("no changes yet").font(.caption).foregroundStyle(.secondary)
-                Spacer()
+                EmptyPane(icon: "checkmark.seal", title: "ยังไม่มีไฟล์ถูกแก้",
+                          hint: "เมื่อเอเจนต์แก้ไฟล์ จะเห็นทีละก้อนที่นี่ เก็บหรือตีกลับได้ทีละก้อน")
             } else {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 10) {
-                        ForEach(hunks) { hunk in
-                            HunkView(hunk: hunk, rejected: rejected.contains(hunk.id)) {
-                                if rejected.contains(hunk.id) { rejected.remove(hunk.id) }
-                                else { rejected.insert(hunk.id) }
-                            }
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(order, id: \.self) { f in
+                            FileChanges(file: f, hunks: files[f] ?? [], rejected: $rejected)
                         }
                     }
+                    .padding(10)
                 }
-                if !rejected.isEmpty {
-                    Button(role: .destructive) {
-                        let patch = hunks.filter { rejected.contains($0.id) }
-                            .map(\.patch).joined()
-                        engine.rejectHunks(patch)
-                        rejected.removeAll()
-                    } label: {
-                        Label("Reject \(rejected.count) hunk(s)", systemImage: "xmark.circle")
+                VStack(spacing: 6) {
+                    if !rejected.isEmpty {
+                        Button {
+                            let patch = hunks.filter { rejected.contains($0.id) }.map(\.patch).joined()
+                            engine.rejectHunks(patch)
+                            rejected.removeAll()
+                        } label: {
+                            Label("ตีกลับ \(rejected.count) ก้อนที่เลือก", systemImage: "arrow.uturn.backward")
+                                .frame(maxWidth: .infinity)
+                                .foregroundStyle(.white)
+                        }
+                        .buttonStyle(InteractiveStyle(cornerRadius: 8))
+                        .background(Color.red.opacity(0.85), in: RoundedRectangle(cornerRadius: 8))
                     }
-                    .controlSize(.small)
+                    Button { confirmRevert = true } label: {
+                        Label("ย้อนทุกอย่างกลับไปตอนเริ่มเซสชัน", systemImage: "clock.arrow.circlepath")
+                            .frame(maxWidth: .infinity)
+                            .foregroundStyle(.red)
+                    }
+                    .buttonStyle(InteractiveStyle(cornerRadius: 8))
+                    .confirmationDialog(
+                        "ทิ้งทุกอย่างที่เอเจนต์แก้ในเซสชันนี้?",
+                        isPresented: $confirmRevert, titleVisibility: .visible
+                    ) {
+                        Button("ย้อนทั้งหมด", role: .destructive) { engine.revertToStart() }
+                        Button("ยกเลิก", role: .cancel) {}
+                    }
                 }
-                Button(role: .destructive) { confirmRevert = true } label: {
-                    Label("Revert everything", systemImage: "arrow.uturn.backward")
-                }
-                .controlSize(.small)
-                .confirmationDialog(
-                    "Discard every change agents made this session?",
-                    isPresented: $confirmRevert, titleVisibility: .visible
-                ) {
-                    Button("Revert everything", role: .destructive) { engine.revertToStart() }
-                    Button("Cancel", role: .cancel) {}
-                }
+                .padding(10)
             }
         }
-        .padding(12)
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private var memoryPane: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: engine.memoryScope == nil ? "folder" : "square.stack.3d.up.fill")
-                    .foregroundStyle(Color.accentColor)
-                Text(engine.memoryScope.map { "ความจำร่วมของโปรเจกต์ \($0)" } ?? "ความจำของโฟลเดอร์นี้")
-                    .font(.caption.weight(.semibold))
-            }
-            .help("ทุกเซสชันและทุกเอเจนต์ในโปรเจกต์นี้อ่านความจำชุดเดียวกัน")
-            if !engine.pending.isEmpty {
-                Text("Proposed (\(engine.pending.count))").font(.headline)
-                ForEach(engine.pending) { p in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(p.text).font(.callout)
-                        HStack {
-                            Button("Approve") { engine.review(p.id, approve: true) }
-                                .controlSize(.small)
-                            Button("Reject", role: .destructive) { engine.review(p.id, approve: false) }
-                                .controlSize(.small)
+        VStack(spacing: 0) {
+            PaneHeader(title: engine.memoryScope.map { "ความจำร่วม · \($0)" } ?? "ความจำของโฟลเดอร์นี้",
+                       subtitle: "ทุกเอเจนต์ในเซสชันนี้อ่านชุดเดียวกัน") { EmptyView() }
+            if engine.facts.isEmpty && engine.pending.isEmpty {
+                EmptyPane(icon: "brain", title: "ยังไม่มีความจำ",
+                          hint: "เอเจนต์เสนอเรื่องที่ควรจำผ่าน memory_propose แล้วจะมารอให้คุณอนุมัติที่นี่")
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if !engine.pending.isEmpty {
+                            SectionLabel("รออนุมัติ", count: engine.pending.count, tint: .orange)
+                            ForEach(engine.pending) { p in
+                                HStack(alignment: .top, spacing: 8) {
+                                    Text(p.text).font(.callout).frame(maxWidth: .infinity, alignment: .leading)
+                                    Button { engine.review(p.id, approve: false) } label: { Image(systemName: "xmark") }
+                                        .buttonStyle(InteractiveStyle(cornerRadius: 6, padding: .init(top: 4, leading: 6, bottom: 4, trailing: 6)))
+                                        .foregroundStyle(.red).help("ปฏิเสธ")
+                                    Button { engine.review(p.id, approve: true) } label: { Image(systemName: "checkmark") }
+                                        .buttonStyle(InteractiveStyle(cornerRadius: 6, padding: .init(top: 4, leading: 6, bottom: 4, trailing: 6)))
+                                        .foregroundStyle(.green).help("อนุมัติ")
+                                }
+                                .padding(10)
+                                .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            }
+                        }
+                        SectionLabel("จำไว้แล้ว", count: engine.facts.count, tint: .secondary)
+                        ForEach(Array(engine.facts.enumerated()), id: \.offset) { _, f in
+                            HStack(alignment: .top, spacing: 8) {
+                                Circle().fill(Color.accentColor.opacity(0.6)).frame(width: 5, height: 5).padding(.top, 6)
+                                Text(f).font(.callout).textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .padding(.horizontal, 8).padding(.vertical, 6)
+                            .hoverHighlight(cornerRadius: 8)
                         }
                     }
-                    .padding(8)
-                    .background(.yellow.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+                    .padding(10)
                 }
-                Divider()
             }
-            Text("Facts (\(engine.facts.count))").font(.headline)
-            if engine.facts.isEmpty {
-                Text("none yet").font(.caption).foregroundStyle(.secondary)
-            }
-            ForEach(Array(engine.facts.enumerated()), id: \.offset) { _, f in
-                Text("• \(f)").font(.callout).textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            Spacer()
         }
-        .padding(12)
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
@@ -1038,13 +1094,14 @@ struct ContentView: View {
             return (e, r)
         }
         let byAgent = Dictionary(grouping: evs.filter { $0.actor != "user" && $0.kind == "tool_call" }, by: \.actor)
-        return ScrollView {
+        return VStack(spacing: 0) {
+          PaneHeader(title: "งานย่อย", subtitle: calls.isEmpty ? nil : "\(calls.count) งานที่เอเจนต์แตกออกไป") { EmptyView() }
+          if calls.isEmpty && byAgent.isEmpty {
+            EmptyPane(icon: "point.3.connected.trianglepath.dotted", title: "ยังไม่มีงานย่อย",
+                      hint: "เมื่อเอเจนต์แตกงานให้ subagent (Task/Agent) จะขึ้นที่นี่พร้อมผลลัพธ์")
+          } else {
+          ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                Text("งานที่ agent แตกออกไปทำ").font(.headline)
-                if calls.isEmpty {
-                    Text("ยังไม่มี subagent ในเซสชันนี้ — เมื่อ agent เรียก Task/Agent จะขึ้นที่นี่หลังเทิร์นจบ")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
                 ForEach(calls, id: \.call.seq) { c in
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 6) {
@@ -1062,11 +1119,11 @@ struct ContentView: View {
                             }.font(.caption2)
                         }
                     }
-                    .padding(8)
-                    .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+                    .padding(10)
+                    .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .hoverHighlight(cornerRadius: 10)
                 }
-                Divider()
-                Text("กิจกรรมต่อ agent").font(.subheadline.bold())
+                SectionLabel("กิจกรรมต่อเอเจนต์", count: nil, tint: .secondary)
                 ForEach(byAgent.keys.sorted(), id: \.self) { a in
                     HStack {
                         Text(a).font(.caption)
@@ -1076,7 +1133,10 @@ struct ContentView: View {
                 }
             }
             .padding(12)
+          }
+          }
         }
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private static func isSubagentCall(_ body: String) -> Bool {
@@ -1089,65 +1149,180 @@ struct ContentView: View {
     }
 
     private var contextPane: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("คอนเท็กซ์").font(.headline)
-            if let used = engine.contextUsed, let win = engine.contextWindow, win > 0 {
-                let frac = Double(used) / Double(win)
-                ProgressView(value: frac) {
-                    Text("\(used) / \(win)").font(.caption).monospacedDigit()
+        VStack(spacing: 0) {
+            PaneHeader(title: "คอนเท็กซ์", subtitle: "สิ่งที่เอเจนต์ถัดไปจะได้รับ") { EmptyView() }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 14) {
+                        let frac: Double? = {
+                            guard let u = engine.contextUsed, let w = engine.contextWindow, w > 0 else { return nil }
+                            return Double(u) / Double(w)
+                        }()
+                        ZStack {
+                            Circle().stroke(Color.primary.opacity(0.08), lineWidth: 7)
+                            Circle().trim(from: 0, to: frac ?? 0)
+                                .stroke(frac ?? 0 > 0.8 ? Color.orange : Color.accentColor,
+                                        style: StrokeStyle(lineWidth: 7, lineCap: .round))
+                                .rotationEffect(.degrees(-90))
+                            Text(frac.map { "\(Int($0 * 100))%" } ?? "—")
+                                .font(.callout.weight(.semibold)).monospacedDigit()
+                        }
+                        .frame(width: 64, height: 64)
+                        .animation(.easeOut, value: frac)
+                        VStack(alignment: .leading, spacing: 3) {
+                            if let u = engine.contextUsed, let w = engine.contextWindow {
+                                Text("\(u.formatted()) / \(w.formatted())").font(.callout.monospacedDigit())
+                                Text("token ในหน้าต่างของเอเจนต์").font(.caption).foregroundStyle(.secondary)
+                                if (frac ?? 0) > 0.8 {
+                                    Label("ใกล้เต็ม — ส่งต่องานได้", systemImage: "exclamationmark.triangle.fill")
+                                        .font(.caption).foregroundStyle(.orange)
+                                }
+                            } else {
+                                Text("ยังไม่มีเทิร์น").font(.callout)
+                                Text("ตัวเลขขึ้นหลังเอเจนต์ตอบครั้งแรก").font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                    Button {
+                        engine.assembledContext { text, tokens in inspected = (text, tokens) }
+                    } label: {
+                        Label("ดูสิ่งที่เอเจนต์เห็นจริง ๆ", systemImage: "doc.text.magnifyingglass")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(InteractiveStyle(cornerRadius: 8))
+                    .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+                    .disabled(engine.sessionID < 0)
+
+                    // The tier the design never trims. Showing it is also the
+                    // cheapest way to notice if it ever goes empty again.
+                    if !engine.taskState.isEmpty {
+                        SectionLabel("สถานะงาน", count: nil, tint: .secondary)
+                        Text(engine.taskState)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
                 }
-                if frac > 0.8 {
-                    Label("near the window — consider a handoff", systemImage: "exclamationmark.triangle")
-                        .font(.caption).foregroundStyle(.orange)
-                }
-            } else {
-                Text("ยังไม่มีเทิร์น").font(.caption).foregroundStyle(.secondary)
+                .padding(10)
             }
-
-            Button {
-                engine.assembledContext { text, tokens in
-                    inspected = (text, tokens)
-                }
-            } label: {
-                Label("ดูสิ่งที่ agent เห็นจริง ๆ", systemImage: "doc.text.magnifyingglass")
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(engine.sessionID < 0)
-
-            // The tier the design never trims. Showing it is also the cheapest
-            // way to notice if it ever goes empty again.
-            if !engine.taskState.isEmpty {
-                Divider()
-                Text("Task state").font(.caption.weight(.semibold))
-                ScrollView {
-                    Text(engine.taskState)
-                        .font(.caption.monospaced())
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(maxHeight: 160)
-            }
-
-            Spacer()
-
-            // The warm tier catches up a little after every turn; this is just
-            // so a backlog is visible rather than mysterious.
+            // The warm tier catches up after every turn; this keeps a backlog
+            // visible rather than mysterious.
             HStack(spacing: 6) {
-                Text("\(engine.events.count) events")
+                Label("\(engine.events.count) events", systemImage: "list.bullet")
                 if engine.uncompacted > 0 {
                     Text("·")
-                    Text("\(engine.uncompacted) to summarise")
-                    Button("Now") { engine.compactNow(limit: 500) }
-                        .buttonStyle(.link)
+                    Text("รอสรุป \(engine.uncompacted)")
+                    Spacer()
+                    Button("สรุปตอนนี้") { engine.compactNow(limit: 500) }
+                        .buttonStyle(InteractiveStyle(cornerRadius: 6, padding: .init(top: 2, leading: 6, bottom: 2, trailing: 6)))
                         .disabled(engine.busy)
+                } else {
+                    Spacer()
                 }
             }
             .font(.caption)
             .foregroundStyle(.secondary)
+            .padding(.horizontal, 12).padding(.vertical, 8)
         }
-        .padding(12)
         .frame(maxHeight: .infinity, alignment: .top)
+    }
+}
+
+/// Title + optional subtitle + trailing actions — the top of every inspector tab.
+struct PaneHeader<Trailing: View>: View {
+    let title: String
+    var subtitle: String?
+    @ViewBuilder var trailing: () -> Trailing
+
+    var body: some View {
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.headline).lineLimit(1)
+                if let subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+            }
+            Spacer(minLength: 4)
+            trailing()
+        }
+        .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 6)
+    }
+}
+
+struct SectionLabel: View {
+    let text: String
+    let count: Int?
+    let tint: Color
+    init(_ text: String, count: Int?, tint: Color) { self.text = text; self.count = count; self.tint = tint }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Text(text).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            if let count {
+                Text("\(count)").font(.caption2.weight(.bold)).foregroundStyle(tint)
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(tint.opacity(0.15), in: Capsule())
+            }
+        }
+        .padding(.top, 4)
+    }
+}
+
+/// An empty tab that says what will appear and how it gets there.
+struct EmptyPane: View {
+    let icon: String
+    let title: String
+    let hint: String
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: icon).font(.system(size: 28)).foregroundStyle(.tertiary)
+            Text(title).font(.callout.weight(.medium))
+            Text(hint).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// One file's hunks, collapsible, each hunk with its own keep/reject pill.
+struct FileChanges: View {
+    let file: String
+    let hunks: [DiffHunk]
+    @Binding var rejected: Set<String>
+    @State private var open = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button { withAnimation(.easeOut(duration: 0.15)) { open.toggle() } } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
+                        .rotationEffect(.degrees(open ? 90 : 0)).foregroundStyle(.secondary)
+                    Image(systemName: "doc.text").foregroundStyle(.secondary)
+                    Text((file as NSString).lastPathComponent).font(.callout.weight(.medium)).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text("+\(hunks.map(\.addCount).reduce(0, +))").foregroundStyle(.green)
+                    Text("−\(hunks.map(\.delCount).reduce(0, +))").foregroundStyle(.red)
+                }
+                .font(.caption.monospacedDigit())
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(InteractiveStyle(cornerRadius: 7, padding: .init(top: 5, leading: 6, bottom: 5, trailing: 6)))
+            .help(file)
+            if open {
+                ForEach(hunks) { h in
+                    HunkView(hunk: h, rejected: rejected.contains(h.id)) {
+                        if rejected.contains(h.id) { rejected.remove(h.id) } else { rejected.insert(h.id) }
+                    }
+                }
+            }
+        }
+        .padding(6)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 
@@ -1325,7 +1500,9 @@ struct CompareResultsSheet: View {
 /// A minimal unified-diff model: each hunk carries the file preamble it
 /// needs to be a valid standalone patch.
 struct DiffHunk: Identifiable {
-    let id = UUID()
+    /// Stable across re-parses: the diff is re-parsed on every render, and a
+    /// fresh UUID each time silently dropped every keep/reject the user set.
+    var id: String { file + "|" + header }
     let file: String
     let preamble: String   // "diff --git … / --- … / +++ …"
     let header: String     // "@@ -a,b +c,d @@ …"
@@ -1380,27 +1557,39 @@ struct HunkView: View {
     let toggle: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(hunk.file).font(.caption.bold())
-                Text("+\(hunk.addCount) −\(hunk.delCount)").font(.caption2).foregroundStyle(.secondary)
+                Text(hunk.header.components(separatedBy: "@@").dropFirst().first?.trimmingCharacters(in: .whitespaces) ?? "")
+                    .font(.caption2.monospaced()).foregroundStyle(.tertiary).lineLimit(1)
                 Spacer()
-                Button(rejected ? "rejected" : "keep") { toggle() }
-                    .controlSize(.mini)
-                    .buttonStyle(.bordered)
-                    .tint(rejected ? .red : .green)
+                Button(action: toggle) {
+                    Label(rejected ? "ตีกลับ" : "เก็บ", systemImage: rejected ? "xmark" : "checkmark")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(rejected ? .red : .green)
+                }
+                .buttonStyle(InteractiveStyle(cornerRadius: 99, selected: rejected,
+                                              padding: .init(top: 2, leading: 7, bottom: 2, trailing: 7)))
+                .help(rejected ? "กดอีกครั้งเพื่อเก็บไว้" : "กดเพื่อเลือกตีกลับก้อนนี้")
             }
             VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(hunk.lines.prefix(40).enumerated()), id: \.offset) { _, l in
-                    Text(l).font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(l.hasPrefix("+") ? .green : l.hasPrefix("-") ? .red : .secondary)
+                ForEach(Array(hunk.lines.prefix(60).enumerated()), id: \.offset) { _, l in
+                    Text(l.isEmpty ? " " : l).font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(l.hasPrefix("+") ? Color.green : l.hasPrefix("-") ? .red : .secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 6)
+                        .background(l.hasPrefix("+") ? Color.green.opacity(0.08)
+                                    : l.hasPrefix("-") ? Color.red.opacity(0.08) : .clear)
+                }
+                if hunk.lines.count > 60 {
+                    Text("… อีก \(hunk.lines.count - 60) บรรทัด").font(.caption2).foregroundStyle(.tertiary).padding(6)
                 }
             }
-            .padding(4)
-            .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 4))
-            .opacity(rejected ? 0.45 : 1)
+            .padding(.vertical, 4)
+            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+            .opacity(rejected ? 0.4 : 1)
+            .strikethrough(rejected)
         }
+        .padding(.horizontal, 4)
     }
 }
 
