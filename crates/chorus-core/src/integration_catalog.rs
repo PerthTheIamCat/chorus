@@ -1273,15 +1273,18 @@ pub struct Metric {
     pub value: String,
 }
 
-/// `kind`: `url` (open in browser), `reveal` (show in Finder) or `run`
-/// (`run_action` starts the tool's own command).
+/// A button on a tool's page. `kind`: `url` (open in browser), `reveal` (show
+/// in Finder) or `run` (`run_action` executes it). `effects` is the plain list
+/// of what will happen, shown in the confirmation every time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DashboardAction {
+pub struct ToolAction {
     pub key: &'static str,
     pub title: String,
     pub kind: &'static str,
     pub target: Option<String>,
-    pub hint: Option<String>,
+    pub summary: String,
+    pub effects: Vec<String>,
+    pub danger: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1294,7 +1297,7 @@ pub struct Dashboard {
     pub disk_bytes: Option<u64>,
     pub projects: Vec<String>,
     pub metrics: Vec<Metric>,
-    pub actions: Vec<DashboardAction>,
+    pub actions: Vec<ToolAction>,
     pub history: Vec<String>,
 }
 
@@ -1364,7 +1367,6 @@ pub fn dashboard(id: &str, project: &Path) -> Result<Dashboard, CatalogError> {
         .collect();
 
     let mut metrics = Vec::new();
-    let mut actions = Vec::new();
     match id {
         "rtk" => {
             if let Ok(out) = Command::new(&record.runtime_path).args(["gain", "--format", "json"]).output() {
@@ -1385,26 +1387,19 @@ pub fn dashboard(id: &str, project: &Path) -> Result<Dashboard, CatalogError> {
                     let mins = t.as_secs() / 60;
                     metrics.push(metric("อัปเดตล่าสุด", if mins < 60 { format!("{mins} นาทีก่อน") } else if mins < 2880 { format!("{} ชม.ก่อน", mins / 60) } else { format!("{} วันก่อน", mins / 1440) }));
                 }
-                actions.push(DashboardAction { key: "reveal", title: "เปิดโฟลเดอร์ graph".into(), kind: "reveal", target: Some(graph.to_string_lossy().into_owned()), hint: None });
             } else {
                 metrics.push(metric("graph ของโปรเจกต์นี้", "ยังไม่ได้สร้าง"));
             }
         }
-        "headroom" => {
-            actions.push(DashboardAction { key: "dashboard", title: "เปิด dashboard ของ Headroom".into(), kind: "run", target: None,
-                hint: Some("Headroom เปิดหน้าสถิติในเบราว์เซอร์".into()) });
-        }
-        "serena" => {
-            actions.push(DashboardAction { key: "dashboard", title: "เปิด dashboard ของ Serena".into(), kind: "url",
-                target: Some("http://localhost:24282/dashboard/index.html".into()),
-                hint: Some("เปิดได้เมื่อมีเซสชันที่กำลังใช้ Serena อยู่".into()) });
-        }
         _ => {
-            if let Ok(meta) = std::fs::metadata(&record.runtime_path) {
-                metrics.push(metric("ขนาดไฟล์ skill", format!("{} ไบต์", meta.len())));
+            if id == "chorus-review" {
+                if let Ok(meta) = std::fs::metadata(&record.runtime_path) {
+                    metrics.push(metric("ขนาดไฟล์ skill", format!("{} ไบต์", meta.len())));
+                }
             }
         }
     }
+    let actions = tool_actions(id, project);
 
     Ok(Dashboard {
         id: id.into(),
@@ -1420,21 +1415,120 @@ pub fn dashboard(id: &str, project: &Path) -> Result<Dashboard, CatalogError> {
     })
 }
 
-/// Start a tool's own `run` action (see [`DashboardAction`]) without waiting.
-pub fn run_action(id: &str, key: &str) -> Result<(), CatalogError> {
+fn act(key: &'static str, title: &str, kind: &'static str, target: Option<String>, summary: &str, effects: &[&str], danger: bool) -> ToolAction {
+    ToolAction { key, title: title.into(), kind, target, summary: summary.into(), effects: effects.iter().map(|e| e.to_string()).collect(), danger }
+}
+
+/// The buttons each tool offers. Every one is confirmed before it runs, with
+/// the `effects` list as the warning.
+pub fn tool_actions(id: &str, project: &Path) -> Vec<ToolAction> {
+    let proj = project_name(project);
+    let has_project = !proj.is_empty();
+    let mut out = Vec::new();
+    match id {
+        "rtk" => {
+            out.push(act("stats", "ดูสถิติรายวัน", "run", None, "แสดงตัวเลขที่ประหยัดได้แยกตามวัน",
+                &["อ่านสถิติที่ RTK เก็บไว้", "ไม่แก้ไขอะไร"], false));
+            out.push(act("reset", "รีเซ็ตสถิติ", "run", None, "ล้างตัวเลขสะสมของ RTK",
+                &["ล้างสถิติที่ประหยัดได้ทั้งหมดของ RTK ในทุกโปรเจกต์", "กู้คืนไม่ได้", "ตัวโปรแกรมและการตั้งค่าอื่นไม่ถูกแตะ"], true));
+        }
+        "graft" => {
+            if has_project {
+                out.push(act("build", "สร้าง / อัปเดต graph", "run", None, &format!("ให้ Graft ไล่อ่านโปรเจกต์ {proj}"),
+                    &[&format!("อ่านซอร์สทั้งหมดในโปรเจกต์ {proj}"), "เขียนโฟลเดอร์ graft/ ในโปรเจกต์ (ไม่ใช้ API key ไม่ส่งโค้ดออกนอกเครื่อง)", "สร้างใหม่ได้เสมอ อาจใช้เวลาสักครู่"], false));
+                if project.join("graft").is_dir() {
+                    out.push(act("clear", "ลบ graph ของโปรเจกต์นี้", "run", None, "ลบโฟลเดอร์ graft/ ที่สร้างไว้",
+                        &[&format!("ลบโฟลเดอร์ {}", display_path(&project.join("graft"))), "ไฟล์ซอร์สของคุณไม่ถูกแตะ", "สร้างกลับมาได้ด้วยปุ่มสร้าง graph"], true));
+                }
+            }
+            out.push(act("telemetry", "ดูสถานะ telemetry", "run", None, "ตรวจว่า Graft ส่งสถิติการใช้งานหรือไม่",
+                &["อ่านการตั้งค่า ไม่แก้ไขอะไร"], false));
+            out.push(act("telemetry_off", "ปิด telemetry", "run", None, "หยุดส่งสถิติการใช้งานแบบไม่ระบุตัวตน",
+                &["แก้การตั้งค่าระดับผู้ใช้ของ Graft ให้ไม่ส่งสถิติ", "เปิดกลับได้ด้วยคำสั่ง graft telemetry enable"], false));
+        }
+        "serena" => {
+            out.push(act("dashboard", "เปิด dashboard", "url", Some("http://localhost:24282/dashboard/index.html".into()),
+                "หน้าควบคุมของ Serena", &["เปิดเบราว์เซอร์ไป localhost:24282", "ใช้ได้เมื่อมีเซสชันที่กำลังใช้ Serena อยู่เท่านั้น"], false));
+            if has_project {
+                out.push(act("index", "สร้าง index ของโปรเจกต์", "run", None, &format!("ให้ Serena จัดทำ index ของ {proj}"),
+                    &[&format!("อ่านซอร์สในโปรเจกต์ {proj} ผ่าน language server"), "เขียน cache ใน .serena/ ของโปรเจกต์", "อาจใช้เวลาหลายนาทีในโปรเจกต์ใหญ่"], false));
+            }
+            if let Ok(home) = home() {
+                let config = home.join(".serena/serena_config.yml");
+                if config.exists() {
+                    out.push(act("config", "เปิดไฟล์ตั้งค่า", "reveal", Some(config.to_string_lossy().into_owned()),
+                        "ไฟล์ตั้งค่าของ Serena", &["แสดงไฟล์ใน Finder ไม่แก้ไขอะไร", "การแก้ไฟล์นี้กระทบทุกโปรเจกต์ที่ใช้ Serena"], false));
+                }
+            }
+        }
+        "headroom" => {
+            out.push(act("dashboard", "เปิด dashboard", "run", None, "หน้าสถิติของ Headroom",
+                &["สั่ง Headroom เปิดหน้าสถิติในเบราว์เซอร์"], false));
+            out.push(act("doctor", "ตรวจระบบ", "run", None, "เช็กว่า Headroom ทำงานครบ",
+                &["รัน headroom doctor อ่านอย่างเดียว", "ไม่แก้ไขอะไร"], false));
+        }
+        "chorus-review" => {
+            if let Ok(state) = load_state() {
+                if let Some(record) = state.installed.get(id) {
+                    out.push(act("skill", "เปิดไฟล์ skill", "reveal", Some(record.runtime_path.to_string_lossy().into_owned()),
+                        "ไฟล์ SKILL.md ที่ agent อ่าน", &["แสดงไฟล์ใน Finder ไม่แก้ไขอะไร"], false));
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ActionOutput {
+    pub ok: bool,
+    pub output: String,
+}
+
+/// Run a `run` action and return what it printed (last ~4 KB).
+pub fn run_action(id: &str, key: &str, project: &Path) -> Result<ActionOutput, CatalogError> {
     let entry = get(id).ok_or_else(|| CatalogError::Unknown(id.into()))?;
     let state = load_state()?;
     let record = current_record(entry, &state)
         .ok_or_else(|| CatalogError::Install(format!("{id} is not installed")))?;
-    let args: &[&str] = match (id, key) {
-        ("headroom", "dashboard") => &["dashboard"],
+    if !tool_actions(id, project).iter().any(|a| a.key == key && a.kind == "run") {
+        return Err(CatalogError::Install(format!("unknown action {key} for {id}")));
+    }
+    if (id, key) == ("graft", "clear") {
+        let graph = std::fs::canonicalize(project.join("graft"))?;
+        let root = std::fs::canonicalize(project)?;
+        if graph.parent() != Some(root.as_path()) || graph.file_name().is_none_or(|n| n != "graft") {
+            return Err(CatalogError::Install("refusing to remove a folder that is not <project>/graft".into()));
+        }
+        std::fs::remove_dir_all(&graph)?;
+        return Ok(ActionOutput { ok: true, output: format!("ลบ {} แล้ว", display_path(&graph)) });
+    }
+    let (args, in_project): (&[&str], bool) = match (id, key) {
+        ("rtk", "stats") => (&["gain", "--daily"], false),
+        ("rtk", "reset") => (&["gain", "--reset", "--yes"], false),
+        ("graft", "build") => (&["build"], true),
+        ("graft", "telemetry") => (&["telemetry", "status"], false),
+        ("graft", "telemetry_off") => (&["telemetry", "disable"], false),
+        ("serena", "index") => (&["project", "index"], true),
+        ("headroom", "dashboard") => (&["dashboard"], false),
+        ("headroom", "doctor") => (&["doctor"], false),
         _ => return Err(CatalogError::Install(format!("unknown action {key} for {id}"))),
     };
-    use std::process::Stdio;
-    Command::new(&record.runtime_path)
-        .args(args)
-        .env("PATH", child_path())
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
-        .spawn()?;
-    Ok(())
+    let mut command = Command::new(&record.runtime_path);
+    command.args(args).env("PATH", child_path());
+    if in_project {
+        command.current_dir(project);
+    }
+    if (id, key) == ("headroom", "dashboard") {
+        use std::process::Stdio;
+        command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+        return Ok(ActionOutput { ok: true, output: "เปิดในเบราว์เซอร์แล้ว".into() });
+    }
+    let out = command.output()?;
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    let text = text.trim();
+    let tail: String = text.chars().rev().take(4000).collect::<Vec<_>>().into_iter().rev().collect();
+    Ok(ActionOutput { ok: out.status.success(), output: if tail.is_empty() { "เสร็จแล้ว (ไม่มีข้อความตอบกลับ)".into() } else { tail } })
 }

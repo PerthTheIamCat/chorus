@@ -64,6 +64,8 @@ struct ContentView: View {
     @State private var pendingRoute: PendingRoute?
     @State private var reviewModel = ""
     @State private var showSettings = false
+    /// A tool's own page shown in place of the thread (nil = the thread).
+    @State private var toolPage: String?
     @State private var settingsSection = SettingsSheet.Section.accounts
     @State private var compareOutput: String?
     @State private var inspected: (text: String, tokens: Int64)?
@@ -390,6 +392,11 @@ struct ContentView: View {
         }
         .padding(10)
         .background(Backdrop())
+        .overlay(alignment: .top) {
+            InstallStatusChip(onOpen: { settingsSection = .integrations; showSettings = true })
+                .padding(.top, 8)
+        }
+        .onChange(of: engine.sessionID) { _, _ in toolPage = nil }
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: showSidebar)
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: showInspector)
         .toolbar {
@@ -626,10 +633,40 @@ struct ContentView: View {
                         .buttonStyle(InteractiveStyle())
                     }
                     ForEach(projects.projects) { p in projectRow(p) }
+                    toolsSection
                 }
                 .padding(.horizontal, 6).padding(.bottom, 8)
             }
             agentFooter
+        }
+    }
+
+    /// Installed tools, each with its own page. Kept out of Settings so a tool
+    /// is one click away while working.
+    private var toolsSection: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text("เครื่องมือ")
+                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                .padding(.horizontal, 10).padding(.top, 14).padding(.bottom, 4)
+            ForEach(engine.catalog.filter(\.isInstalled)) { tool in
+                Button { toolPage = tool.id } label: {
+                    HStack(spacing: 9) {
+                        IntegrationIcon(id: tool.id, size: 22)
+                        Text(tool.title)
+                        Spacer(minLength: 4)
+                        if tool.isWorking { ProgressView().controlSize(.mini) }
+                        else if tool.isHealthy == false { Circle().fill(.orange).frame(width: 6, height: 6) }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(InteractiveStyle(selected: toolPage == tool.id))
+            }
+            Button { settingsSection = .integrations; showSettings = true } label: {
+                Label("เพิ่มเครื่องมือ", systemImage: "plus.circle")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(InteractiveStyle())
+            .foregroundStyle(.secondary)
         }
     }
 
@@ -759,7 +796,10 @@ struct ContentView: View {
 
     private var thread: some View {
         Group {
-            if engine.sessionID < 0 {
+            if let toolPage {
+                ToolPage(toolID: toolPage, workspace: workspace, onClose: { self.toolPage = nil })
+                    .id(toolPage)
+            } else if engine.sessionID < 0 {
                 emptyState
             } else {
                 ScrollViewReader { proxy in
@@ -796,9 +836,11 @@ struct ContentView: View {
         // Floating composer: the thread scrolls underneath it instead of
         // stopping at a divider, the way Claude/Codex/ChatGPT do.
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            composer
-                .frame(maxWidth: 820)
-                .padding(.horizontal, 16).padding(.bottom, 14).padding(.top, 4)
+            if toolPage == nil {
+                composer
+                    .frame(maxWidth: 820)
+                    .padding(.horizontal, 16).padding(.bottom, 14).padding(.top, 4)
+            }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             VStack(spacing: 8) {

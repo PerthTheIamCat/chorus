@@ -117,17 +117,18 @@ pub unsafe extern "C" fn chorus_catalog_dashboard_json(project: *const c_char, i
     }
 }
 
-/// Start an integration's own dashboard command (`run` actions).
+/// Run one of an integration's `run` actions. The shell must have shown the
+/// action's `effects` and got a yes first.
 ///
 /// # Safety
 /// All pointers must point to valid NUL-terminated UTF-8 strings.
 #[no_mangle]
-pub unsafe extern "C" fn chorus_catalog_run_json(id: *const c_char, key: *const c_char) -> *mut c_char {
-    let (Some(id), Some(key)) = (borrow(id), borrow(key)) else {
+pub unsafe extern "C" fn chorus_catalog_run_json(project: *const c_char, id: *const c_char, key: *const c_char) -> *mut c_char {
+    let (Some(project), Some(id), Some(key)) = (borrow(project), borrow(id), borrow(key)) else {
         return err("run arguments must be valid UTF-8");
     };
-    match catch_unwind(AssertUnwindSafe(|| integration_catalog::run_action(id, key))) {
-        Ok(Ok(())) => out("{\"ok\":true}".to_string()),
+    match catch_unwind(AssertUnwindSafe(|| integration_catalog::run_action(id, key, Path::new(project)))) {
+        Ok(Ok(result)) => out(serde_json::json!({"ok":true,"result":result}).to_string()),
         Ok(Err(error)) => err(error),
         Err(_) => err("panic in catalog run"),
     }

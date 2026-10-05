@@ -374,7 +374,7 @@ struct IntegrationIcon: View {
 /// Apple-style install sheet: shows exactly what will be created or removed,
 /// then the same list ticks off live while it runs. The list comes from the
 /// core, so the preview and the actual change cannot disagree.
-private struct InstallSheet: View {
+struct InstallSheet: View {
     let entry: CatalogIntegration
     let projectName: String
     let kind: CatalogActionKind

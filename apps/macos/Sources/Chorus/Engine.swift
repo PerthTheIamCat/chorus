@@ -598,13 +598,22 @@ final class Engine: ObservableObject {
         }
     }
 
-    func runCatalogAction(id: String, key: String, completion: @escaping (String?) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let json = id.withCString { identifier in
-                key.withCString { Self.string(from: chorus_catalog_run_json(identifier, $0)) }
+    private struct ToolActionResult: Decodable {
+        let ok: Bool
+        let error: String?
+        let result: ToolActionOutput?
+    }
+
+    func runToolAction(project: String, id: String, key: String,
+                       completion: @escaping (ToolActionOutput?, String?) -> Void) {
+        catalogQueue.async {
+            let json = project.withCString { path in
+                id.withCString { identifier in
+                    key.withCString { Self.string(from: chorus_catalog_run_json(path, identifier, $0)) }
+                }
             }
-            let result = Self.decode(SimpleResult.self, json)
-            DispatchQueue.main.async { completion(result?.ok == true ? nil : (result?.error ?? "เปิดไม่ได้")) }
+            let result = Self.decode(ToolActionResult.self, json)
+            DispatchQueue.main.async { completion(result?.result, result?.ok == true ? nil : (result?.error ?? "สั่งงานไม่ได้")) }
         }
     }
 

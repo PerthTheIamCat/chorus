@@ -141,3 +141,33 @@ fn show_what_this_mac_has() {
         }
     }
 }
+
+#[test]
+fn tool_buttons_warn_and_only_touch_what_they_say() {
+    use std::os::unix::fs::PermissionsExt;
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("HOME", home.path());
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    let bin = home.path().join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let graft = bin.join("graft");
+    std::fs::write(&graft, "#!/bin/sh\necho \"graft $@\"\n").unwrap();
+    std::fs::set_permissions(&graft, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let project = home.path().join("demo");
+    std::fs::create_dir_all(project.join("graft")).unwrap();
+    std::fs::write(project.join("graft/a.md"), "x").unwrap();
+    std::fs::write(project.join("main.rs"), "fn main(){}").unwrap();
+
+    let actions = cat::tool_actions("graft", &project);
+    assert!(actions.iter().all(|a| !a.effects.is_empty()), "every button carries a warning");
+    assert!(actions.iter().find(|a| a.key == "clear").unwrap().danger);
+
+    let out = cat::run_action("graft", "telemetry", &project).unwrap();
+    assert!(out.ok && out.output.contains("telemetry status"));
+    assert!(cat::run_action("graft", "format-disk", &project).is_err());
+
+    cat::run_action("graft", "clear", &project).unwrap();
+    assert!(!project.join("graft").exists());
+    assert!(project.join("main.rs").exists(), "source files stay");
+}
