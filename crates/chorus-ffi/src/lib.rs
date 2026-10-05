@@ -659,6 +659,31 @@ pub extern "C" fn chorus_cancel() -> *mut c_char {
     out(serde_json::json!({ "ok": true, "was_running": chorus_cli::cancel_active() }).to_string())
 }
 
+/// Live view of the running turn. `cb(ctx, kind, text)` is called from the
+/// turn's thread for each update: kind is `thought` | `message` | `tool` |
+/// `tool_done`. Both strings are only valid during the call. Pass a null `cb`
+/// to stop. Display only: the ledger is unaffected.
+///
+/// # Safety
+/// `ctx` must stay valid until the callback is replaced or cleared.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_progress_callback(
+    cb: Option<extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char)>,
+    ctx: *mut std::ffi::c_void,
+) {
+    let Some(cb) = cb else {
+        chorus_cli::set_progress_sink(None);
+        return;
+    };
+    let ctx = ctx as usize;
+    chorus_cli::set_progress_sink(Some(Box::new(move |kind: &str, text: &str| {
+        let (Ok(k), Ok(t)) = (CString::new(kind), CString::new(text.replace('\0', ""))) else {
+            return;
+        };
+        cb(ctx as *mut std::ffi::c_void, k.as_ptr(), t.as_ptr());
+    })));
+}
+
 /// How many events still have no stored summary rungs. The shell polls this
 /// to decide whether a background compaction pass is worth running.
 /// JSON: {"ok":true,"pending":N}

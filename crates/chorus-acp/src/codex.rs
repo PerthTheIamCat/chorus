@@ -335,6 +335,7 @@ impl CodexAgent {
         let mut handle = |a: &Agent, inbound: Inbound| match inbound {
             Inbound::Notification { method, params } => {
                 if method == "session/update" {
+                    report_progress(&params);
                     acc.absorb(&params);
                 }
             }
@@ -607,6 +608,37 @@ fn resolve_inside(cwd: &Path, path: &str) -> Result<PathBuf> {
         ));
     }
     Ok(canon)
+}
+
+/// Forward one `session/update` to the live progress sink, if any.
+fn report_progress(params: &Value) {
+    let Some(update) = params.get("update") else { return };
+    let kind = update.get("sessionUpdate").and_then(Value::as_str).unwrap_or("");
+    match kind {
+        "agent_thought_chunk" => {
+            if let Some(t) = chunk_text(update) {
+                crate::emit_progress("thought", &t);
+            }
+        }
+        "agent_message_chunk" => {
+            if let Some(t) = chunk_text(update) {
+                crate::emit_progress("message", &t);
+            }
+        }
+        "tool_call" => {
+            let title = update.get("title").and_then(Value::as_str).unwrap_or("tool");
+            crate::emit_progress("tool", title);
+        }
+        "tool_call_update" => {
+            if let Some(st) = update.get("status").and_then(Value::as_str) {
+                if st == "completed" || st == "failed" {
+                    let title = update.get("title").and_then(Value::as_str).unwrap_or("");
+                    crate::emit_progress("tool_done", &format!("{st}\t{title}"));
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Folds a turn's `session/update` stream into a [`TurnOutcome`].

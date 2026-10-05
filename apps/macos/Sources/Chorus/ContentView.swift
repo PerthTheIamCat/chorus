@@ -128,7 +128,7 @@ struct ContentView: View {
                 }
             }
         }
-        .onAppear { engine.loadAgents() }
+        .onAppear { engine.loadAgents(); engine.registerProgress() }
         .onChange(of: workspace) { _, w in fileIndex.load(w); engine.loadSkills(cwd: w) }
         .onChange(of: engine.sessionID) { _, _ in if !workspace.isEmpty { engine.loadSessions(db: dbPath) } }
         .onChange(of: engine.busy) { _, _ in flushQueue() }
@@ -352,11 +352,17 @@ struct ContentView: View {
                                 EventRow(event: ev).id(ev.seq)
                             }
                             if engine.busy { workingRow.id("working") }
+                            else if !engine.lastThoughts.isEmpty {
+                                ThinkingBlock(text: engine.lastThoughts, running: false)
+                            }
                         }
                         .padding(12)
                     }
                     .onChange(of: engine.events.count) { _, _ in
                         if let last = engine.events.last { proxy.scrollTo(last.seq, anchor: .bottom) }
+                    }
+                    .onChange(of: engine.live.message.count + engine.live.thoughts.count / 200 + engine.live.tools.count) { _, _ in
+                        if engine.busy { proxy.scrollTo("working", anchor: .bottom) }
                     }
                     .onChange(of: engine.busy) { _, b in
                         if b { withAnimation { proxy.scrollTo("working", anchor: .bottom) } }
@@ -369,27 +375,50 @@ struct ContentView: View {
         .frame(minWidth: 380)
     }
 
+    /// The running turn, live: reasoning (collapsible, like the thinking
+    /// block in Claude/Codex), tool calls as they start and finish, and the
+    /// answer as it streams — then Stop.
     private var workingRow: some View {
-        HStack(spacing: 8) {
-            ProgressView().controlSize(.small)
-            if let t = engine.turnStartedAt {
-                TimelineView(.periodic(from: t, by: 1)) { ctx in
-                    Text("กำลังทำงาน… \(Int(ctx.date.timeIntervalSince(t))) วิ")
+        let live = engine.live
+        return VStack(alignment: .leading, spacing: 8) {
+            if !live.thoughts.isEmpty {
+                ThinkingBlock(text: live.thoughts, running: live.message.isEmpty)
+            }
+            ForEach(live.tools) { t in
+                HStack(spacing: 6) {
+                    switch t.state {
+                    case "running": ProgressView().controlSize(.mini)
+                    case "failed": Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
+                    default: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    }
+                    Text(t.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
-            } else {
-                Text("กำลังทำงาน…")
             }
-            Spacer()
-            Button { engine.cancel(); queued.removeAll() } label: {
-                Label("หยุด", systemImage: "stop.fill")
+            if !live.message.isEmpty {
+                MarkdownText(text: live.message)
             }
-            .controlSize(.small)
-            .keyboardShortcut(".", modifiers: .command)
-            .help("หยุดเทิร์นนี้ (⌘.) — ล้างคิวด้วย")
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                if let t = engine.turnStartedAt {
+                    TimelineView(.periodic(from: t, by: 1)) { ctx in
+                        Text(live.isEmpty ? "กำลังเริ่ม agent… \(Int(ctx.date.timeIntervalSince(t))) วิ"
+                                          : "กำลังทำงาน… \(Int(ctx.date.timeIntervalSince(t))) วิ")
+                    }
+                } else {
+                    Text("กำลังทำงาน…")
+                }
+                Spacer()
+                Button { engine.cancel(); queued.removeAll() } label: {
+                    Label("หยุด", systemImage: "stop.fill")
+                }
+                .controlSize(.small)
+                .keyboardShortcut(".", modifiers: .command)
+                .help("หยุดเทิร์นนี้ (⌘.) — ล้างคิวด้วย")
+            }
+            .font(.callout).foregroundStyle(.secondary)
         }
-        .font(.callout).foregroundStyle(.secondary)
         .padding(10)
-        .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .background(.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var emptyState: some View {
@@ -1492,3 +1521,44 @@ struct MarkdownText: View {
     }
 }
 
+
+
+/// Collapsible reasoning. Open while the agent is still thinking, collapsed
+/// to one line once it starts answering.
+struct ThinkingBlock: View {
+    let text: String
+    let running: Bool
+    @State private var open: Bool?
+
+    var body: some View {
+        let isOpen = open ?? running
+        VStack(alignment: .leading, spacing: 6) {
+            Button { open = !isOpen } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "brain").foregroundStyle(.purple)
+                    Text(running ? "กำลังคิด…" : "ความคิด").font(.caption.weight(.semibold))
+                    Text("\(text.count) ตัวอักษร").font(.caption2).foregroundStyle(.tertiary)
+                    Image(systemName: isOpen ? "chevron.up" : "chevron.down").font(.caption2)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if isOpen {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        Text(text)
+                            .font(.caption).foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Color.clear.frame(height: 1).id("end")
+                    }
+                    .frame(maxHeight: 160)
+                    .onChange(of: text.count) { _, _ in if running { proxy.scrollTo("end") } }
+                }
+            }
+        }
+        .padding(8)
+        .background(Color.purple.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+    }
+}

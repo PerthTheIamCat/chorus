@@ -57,6 +57,28 @@ fn log_raw(log: &Log, dir: &str, text: &str) {
 static ACTIVE_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Where live `session/update`s go while a turn runs: `(kind, text)` with kind
+/// one of `thought`, `message`, `tool`, `tool_done`. Process-global for the same
+/// reason as [`ACTIVE_PID`]: the shell wants a live view of the one running
+/// turn and has no other way in while that turn blocks its engine queue.
+/// Display only — nothing here is written to the ledger.
+pub type ProgressSink = Box<dyn Fn(&str, &str) + Send + Sync>;
+static PROGRESS: Mutex<Option<ProgressSink>> = Mutex::new(None);
+
+pub fn set_progress_sink(sink: Option<ProgressSink>) {
+    if let Ok(mut p) = PROGRESS.lock() {
+        *p = sink;
+    }
+}
+
+pub fn emit_progress(kind: &str, text: &str) {
+    if let Ok(p) = PROGRESS.lock() {
+        if let Some(f) = p.as_ref() {
+            f(kind, text);
+        }
+    }
+}
+
 /// Stop the running turn. Returns false when no agent is running.
 pub fn cancel_active() -> bool {
     use std::sync::atomic::Ordering::SeqCst;

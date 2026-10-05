@@ -165,11 +165,63 @@ final class Engine: ObservableObject {
     private func echoUser(_ text: String) {
         compactWork?.cancel()
         echoCounter += 1
+        live = LiveTurn()
+        lastThoughts = ""
         events.append(LedgerEvent(seq: Int64.min + echoCounter, kind: "msg", actor: "user", body: text))
         turnStartedAt = Date()
     }
 
     @Published var turnStartedAt: Date?
+
+    /// What the running turn is doing right now, streamed from the agent.
+    /// Display only — the ledger refresh after the turn is the record.
+    struct LiveTurn {
+        struct Tool: Identifiable { let id = UUID(); var title: String; var state = "running" }
+        var thoughts = ""
+        var message = ""
+        var tools: [Tool] = []
+        var isEmpty: Bool { thoughts.isEmpty && message.isEmpty && tools.isEmpty }
+    }
+    @Published var live = LiveTurn()
+    /// The finished turn's reasoning. Agents send it but it is not stored in
+    /// the ledger, so it lives here until the next turn starts.
+    @Published var lastThoughts = ""
+
+    private var progressRegistered = false
+    func registerProgress() {
+        guard !progressRegistered else { return }
+        progressRegistered = true
+        let cb: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, UnsafePointer<CChar>?) -> Void = { ctx, k, t in
+            guard let ctx, let k, let t else { return }
+            let kind = String(cString: k), text = String(cString: t)
+            let engine = Unmanaged<Engine>.fromOpaque(ctx).takeUnretainedValue()
+            DispatchQueue.main.async { engine.absorb(kind, text) }
+        }
+        chorus_set_progress_callback(cb, Unmanaged.passUnretained(self).toOpaque())
+    }
+
+    private func absorb(_ kind: String, _ text: String) {
+        switch kind {
+        case "thought": live.thoughts += text
+        case "message": live.message += text
+        case "tool": live.tools.append(.init(title: text))
+        case "tool_done":
+            let parts = text.split(separator: "\t", maxSplits: 1).map(String.init)
+            let state = parts.first ?? "completed"
+            let title = parts.count > 1 ? parts[1] : ""
+            if let i = live.tools.lastIndex(where: { $0.state == "running" && (title.isEmpty || $0.title == title) })
+                ?? live.tools.lastIndex(where: { $0.state == "running" }) {
+                live.tools[i].state = state
+            }
+        default: break
+        }
+    }
+
+    /// Turn finished: keep the reasoning, drop the live view (the ledger now has the rest).
+    private func endLive() {
+        if !live.thoughts.isEmpty { lastThoughts = live.thoughts }
+        live = LiveTurn()
+    }
 
     /// Stop button. Kills the agent process; the turn thread then returns an
     /// error, which `stopped` turns into a plain note instead of a red banner.
@@ -197,6 +249,7 @@ final class Engine: ObservableObject {
             let r = Self.decode(TurnResult.self, json)
             DispatchQueue.main.async {
                 self?.busy = false
+                self?.endLive()
                 if r?.ok != true, !Self.isStop(r?.error) { self?.lastError = r?.error ?? "turn failed" }
                 self?.refresh()
                 self?.compactIfIdle()
@@ -221,6 +274,7 @@ final class Engine: ObservableObject {
             let result = Self.decode(TurnResult.self, json)
             DispatchQueue.main.async {
                 self?.busy = false
+                self?.endLive()
                 if let r = result, r.ok {
                     self?.contextUsed = r.context_used
                     self?.contextWindow = r.context_window
@@ -247,6 +301,7 @@ final class Engine: ObservableObject {
             let obj = Self.decode(SimpleResult.self, json)
             DispatchQueue.main.async {
                 self?.busy = false
+                self?.endLive()
                 if obj?.ok != true, !Self.isStop(obj?.error) { self?.lastError = obj?.error ?? "relay failed" }
                 self?.refresh()
                 self?.compactIfIdle()
@@ -267,6 +322,7 @@ final class Engine: ObservableObject {
             }
             DispatchQueue.main.async {
                 self?.busy = false
+                self?.endLive()
                 self?.refresh()
                 completion(json)
             }
@@ -296,6 +352,7 @@ final class Engine: ObservableObject {
             let result = Self.decode(HandoffResult.self, json)
             DispatchQueue.main.async {
                 self?.busy = false
+                self?.endLive()
                 if result?.ok != true { self?.lastError = result?.error ?? "handoff failed" }
                 self?.refresh()
                 completion(result)
@@ -606,9 +663,9 @@ final class Engine: ObservableObject {
 
     func snapshot() {
         guard let h = handle else { return }
-        queue.async {
+        queue.async { [weak self] in
             _ = "manual checkpoint".withCString { chorus_snapshot(h.raw, $0) }
-            DispatchQueue.main.async { [weak self] in self?.refresh() }
+            DispatchQueue.main.async { self?.refresh() }
         }
     }
 

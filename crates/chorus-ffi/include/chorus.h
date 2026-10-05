@@ -82,6 +82,11 @@ char *chorus_cancel(void);
 /* Skills visible in a workspace (chorus/project/user). {"ok":true,"skills":[{name,description,path,source}]} */
 char *chorus_list_skills(const char *cwd);
 
+/* Live updates of the running turn: kind = thought|message|tool|tool_done.
+   Strings valid only during the call. NULL cb clears. Display only. */
+typedef void (*chorus_progress_cb)(void *ctx, const char *kind, const char *text);
+void chorus_set_progress_callback(chorus_progress_cb cb, void *ctx);
+
 char *chorus_snapshot(const ChorusEngine *e, const char *message);
 
 /* Roll the workspace back to `sha` (NULL/"" = the session base).

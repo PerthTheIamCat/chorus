@@ -3,4 +3,4 @@
 
 pub mod agents;
 pub mod session;
-pub use chorus_acp::cancel_active;
+pub use chorus_acp::{cancel_active, set_progress_sink};
