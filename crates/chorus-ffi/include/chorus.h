@@ -117,4 +117,56 @@ char *chorus_handoff(ChorusEngine *e,
 }
 #endif
 
+
+/* Warm tier (summary rungs). `chorus_compact` may be slow — it can run a
+ * local model per event — so call it off the UI thread and never inside a
+ * turn. Context assembly reads these rows and never generates them. */
+char *chorus_uncompacted(const ChorusEngine *e);
+/* JSON: {"ok":true,"compacted":N,"remaining":N,"model":"...",
+ *        "took_ms":N,"hit_budget":true|false}
+ * A pass stops at whichever comes first, `limit` events or an internal wall
+ * clock budget (CHORUS_COMPACT_BUDGET_MS, default 3s), and always reports
+ * what is left — so calling it again after the next turn is the whole
+ * catch-up strategy. `hit_budget` means slow summariser, not failure. */
+char *chorus_compact(const ChorusEngine *e, int limit);
+
+/* goal / done / pending / constraints for this session. */
+char *chorus_task_state(const ChorusEngine *e);
+
+/* Exactly the context a turn would hand an agent right now, assembled from
+ * the ledger. Not a description of it — the thing itself. */
+char *chorus_assembled_context(const ChorusEngine *e, long long budget);
+
+/* Every session in db_path, newest activity first. Does not need a
+ * ChorusEngine — a store-level query, no shadow-git/MCP handles opened.
+ * JSON: {"ok":true,"sessions":[{"id":N,"title":"...","cwd":"...",
+ *        "started_ms":N,"last_ms":N,"events":N,"agents":["..."],
+ *        "goal":"...","forked_from":N|null}, ...]} */
+char *chorus_list_sessions(const char *db_path);
+
+/* Every agent Chorus knows how to bridge to, with whether it can run right
+ * now. Cheap and non-blocking: no login, no network, no credential file is
+ * ever read — existence only.
+ * JSON: {"ok":true,"agents":[{"id":"...","label":"...",
+ *        "models":[{"id":"...","label":"...","is_default":true}, ...],
+ *        "auth":"ok"|"needs_login"|"missing_cli","hint":"...",
+ *        "detail":"..."}, ...]} */
+char *chorus_list_agents(void);
+
+/* Pin the model an agent runs, by the id it reports itself (models[].id from
+ * chorus_list_agents). Empty model clears the pin. Applied when the next turn
+ * opens its session — without this a model picker only changes a label. */
+char *chorus_set_model(ChorusEngine *e, const char *agent, const char *model);
+
+/* One agent's current runnability, by id ("claude" | "codex"). Same shape
+ * as one entry of chorus_list_agents. */
+char *chorus_auth_status(const char *agent_id);
+
+/* One-click handoff: goal/done/pending/constraints all come from the
+ * session's own task_state() — nothing but `to` and a permission `level`
+ * (0 deny · 1 read-only · 2 allow, same mapping as chorus_run_turn's
+ * `allow`) is asked of the caller.
+ * JSON: {"ok":true,"to":"...","goal":"...","echo_back":"..."} */
+char *chorus_handoff_auto(ChorusEngine *e, const char *to, int level);
+
 #endif /* CHORUS_H */

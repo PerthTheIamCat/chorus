@@ -650,3 +650,315 @@ fn parse_reason(s: &str) -> HandoffReason {
         _ => HandoffReason::Manual,
     }
 }
+
+/// How many events still have no stored summary rungs. The shell polls this
+/// to decide whether a background compaction pass is worth running.
+/// JSON: {"ok":true,"pending":N}
+///
+/// # Safety
+/// `e` must be a live handle from `chorus_engine_open`/`_reopen`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_uncompacted(e: *const ChorusEngine) -> *mut c_char {
+    let Some(engine) = e.as_ref() else {
+        return err("null engine");
+    };
+    match catch_unwind(AssertUnwindSafe(|| engine.session.uncompacted_count())) {
+        Ok(Ok(n)) => out(serde_json::json!({ "ok": true, "pending": n }).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in uncompacted"),
+    }
+}
+
+/// Fill in up to `limit` missing summary rungs (the warm tier).
+///
+/// **Call this off the UI thread and off the turn path.** It is allowed to be
+/// slow — it may run a local model per event — which is exactly why context
+/// assembly never does this work itself.
+/// JSON: {"ok":true,"compacted":N,"remaining":N,"model":"…"}
+///
+/// # Safety
+/// `e` must be a live handle from `chorus_engine_open`/`_reopen`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_compact(e: *const ChorusEngine, limit: i32) -> *mut c_char {
+    let Some(engine) = e.as_ref() else {
+        return err("null engine");
+    };
+    let limit = if limit <= 0 { 200 } else { limit as usize };
+    match catch_unwind(AssertUnwindSafe(|| engine.session.compact(limit))) {
+        Ok(Ok(r)) => out(serde_json::json!({
+            "ok": true,
+            "compacted": r.compacted,
+            "remaining": r.remaining,
+            "model": r.model,
+            "took_ms": r.took_ms,
+            // True when the pass stopped on the clock rather than finishing.
+            // Not an error: it is how a slow summariser is meant to behave.
+            "hit_budget": r.hit_budget,
+        })
+        .to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in compact"),
+    }
+}
+
+/// The task-state tier for this session — goal, done, pending, constraints.
+/// JSON: {"ok":true,"goal":"…","done":[…],"pending":[…],"constraints":[…],"text":"…"}
+///
+/// # Safety
+/// `e` must be a live handle from `chorus_engine_open`/`_reopen`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_task_state(e: *const ChorusEngine) -> *mut c_char {
+    let Some(engine) = e.as_ref() else {
+        return err("null engine");
+    };
+    match catch_unwind(AssertUnwindSafe(|| engine.session.task_state())) {
+        Ok(Ok(t)) => out(serde_json::json!({
+            "ok": true,
+            "goal": t.goal,
+            "done": t.done,
+            "pending": t.pending,
+            "constraints": t.constraints,
+            "text": t.render(),
+        })
+        .to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in task_state"),
+    }
+}
+
+/// The context Chorus would hand an agent right now, assembled from the
+/// ledger exactly as a real turn would.
+///
+/// This is the app's honesty surface: it is not a description of what the
+/// agent sees, it *is* what the agent sees. JSON:
+/// {"ok":true,"text":"…","tokens":N,"budget":N}
+///
+/// # Safety
+/// `e` must be a live handle from `chorus_engine_open`/`_reopen`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_assembled_context(
+    e: *const ChorusEngine,
+    budget: i64,
+) -> *mut c_char {
+    let Some(engine) = e.as_ref() else {
+        return err("null engine");
+    };
+    let budget = if budget <= 0 { 120_000 } else { budget };
+    match catch_unwind(AssertUnwindSafe(|| engine.session.assemble_context(budget))) {
+        Ok(Ok(text)) => {
+            use chorus_core::tokens::{CachedCounter, HeuristicCounter, TokenCounter};
+            let tokens = CachedCounter::new(HeuristicCounter).count(&text);
+            out(serde_json::json!({
+                "ok": true, "text": text, "tokens": tokens, "budget": budget
+            })
+            .to_string())
+        }
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in assembled_context"),
+    }
+}
+
+// ---- session picker + agent inventory ---------------------------
+
+#[derive(Serialize)]
+struct SessionSummaryJson {
+    id: i64,
+    title: String,
+    cwd: String,
+    started_ms: i64,
+    last_ms: i64,
+    events: i64,
+    agents: Vec<String>,
+    goal: String,
+    forked_from: Option<i64>,
+}
+
+/// Every session in `db_path`, newest activity first — the shell's session
+/// picker. Does not need (or open) a `ChorusEngine`: this is a store-level
+/// query, one connection for however many sessions exist.
+/// JSON: {"ok":true,"sessions":[{"id":N,"title":"...","cwd":"...",
+///        "started_ms":N,"last_ms":N,"events":N,"agents":["..."],
+///        "goal":"...","forked_from":N|null}, ...]}
+///
+/// # Safety
+/// `db_path` must be a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_list_sessions(db_path: *const c_char) -> *mut c_char {
+    let Some(db_path) = borrow(db_path) else {
+        return err("db_path must be valid UTF-8");
+    };
+    let db = PathBuf::from(db_path);
+    let r = catch_unwind(AssertUnwindSafe(|| chorus_cli::session::list_sessions(&db)));
+    match r {
+        Ok(Ok(rows)) => {
+            let sessions: Vec<SessionSummaryJson> = rows
+                .into_iter()
+                .map(|s| SessionSummaryJson {
+                    id: s.id,
+                    title: s.title,
+                    cwd: s.cwd,
+                    started_ms: s.started_ms,
+                    last_ms: s.last_ms,
+                    events: s.events,
+                    agents: s.agents,
+                    goal: s.goal,
+                    forked_from: s.forked_from,
+                })
+                .collect();
+            out(serde_json::json!({ "ok": true, "sessions": sessions }).to_string())
+        }
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in list_sessions"),
+    }
+}
+
+#[derive(Serialize)]
+struct ModelChoiceJson {
+    id: String,
+    label: String,
+    is_default: bool,
+}
+
+#[derive(Serialize)]
+struct AgentInfoJson {
+    id: String,
+    label: String,
+    models: Vec<ModelChoiceJson>,
+    auth: &'static str,
+    model_source: &'static str,
+    hint: String,
+    detail: String,
+}
+
+fn agent_info_json(a: chorus_cli::agents::AgentInfo) -> AgentInfoJson {
+    AgentInfoJson {
+        id: a.id,
+        label: a.label,
+        models: a
+            .models
+            .into_iter()
+            .map(|m| ModelChoiceJson {
+                id: m.id,
+                label: m.label,
+                is_default: m.is_default,
+            })
+            .collect(),
+        auth: a.auth.as_str(),
+        model_source: a.model_source.as_str(),
+        hint: a.hint,
+        detail: a.detail,
+    }
+}
+
+/// Pin the model an agent should run, by the id it reports itself
+/// (`chorus_list_agents` → `models[].id`). Empty `model` clears the pin.
+///
+/// Session-scoped and applied when the next turn opens its ACP session, so
+/// calling it between turns is enough — and calling it *is* required: without
+/// it a model picker only changes a label.
+///
+/// # Safety
+/// `agent` and `model` must be valid NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_model(
+    e: *mut ChorusEngine,
+    agent: *const c_char,
+    model: *const c_char,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let (Some(agent), Some(model)) = (borrow(agent), borrow(model)) else {
+        return err("agent/model must be valid UTF-8");
+    };
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        engine.session.set_model(agent, model);
+    }));
+    match r {
+        Ok(()) => out(serde_json::json!({ "ok": true }).to_string()),
+        Err(_) => err("panic in set_model"),
+    }
+}
+
+/// Every agent Chorus knows how to bridge to, with whether it can run right
+/// now. Cheap and non-blocking — no login, no network (see `chorus_cli::agents`).
+/// JSON: {"ok":true,"agents":[{"id":"...","label":"...",
+///        "models":[{"id":"...","label":"...","is_default":true}, ...],
+///        "auth":"ok"|"needs_login"|"missing_cli",
+///        "model_source":"probed"|"env"|"fallback","hint":"...","detail":"..."}, ...]}
+#[no_mangle]
+pub extern "C" fn chorus_list_agents() -> *mut c_char {
+    let r = catch_unwind(AssertUnwindSafe(chorus_cli::agents::list_agents));
+    match r {
+        Ok(agents) => {
+            let agents: Vec<AgentInfoJson> = agents.into_iter().map(agent_info_json).collect();
+            out(serde_json::json!({ "ok": true, "agents": agents }).to_string())
+        }
+        Err(_) => err("panic in list_agents"),
+    }
+}
+
+/// One agent's current runnability, by id ("claude" | "codex"). Same shape
+/// as one entry of `chorus_list_agents`.
+///
+/// # Safety
+/// `agent_id` must be a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_auth_status(agent_id: *const c_char) -> *mut c_char {
+    let Some(agent_id) = borrow(agent_id) else {
+        return err("agent_id must be valid UTF-8");
+    };
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        chorus_cli::agents::auth_status(agent_id)
+    }));
+    match r {
+        Ok(a) => out(serde_json::to_string(&agent_info_json(a)).unwrap()),
+        Err(_) => err("panic in auth_status"),
+    }
+}
+
+#[derive(Serialize)]
+struct HandoffAutoJson {
+    ok: bool,
+    to: String,
+    goal: String,
+    echo_back: String,
+}
+
+/// One-click handoff: goal/done/pending/constraints all come from the
+/// session's own `task_state()` — the caller passes nothing but `to` and a
+/// permission `level`. `level` maps through `Policy::from_level`
+/// (0 deny · 1 read-only · 2 allow).
+/// JSON: {"ok":true,"to":"...","goal":"...","echo_back":"..."}
+///
+/// # Safety
+/// `e` must be a live engine handle; `to` a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_handoff_auto(
+    e: *mut ChorusEngine,
+    to: *const c_char,
+    level: c_int,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let Some(to) = borrow(to) else {
+        return err("to must be valid UTF-8");
+    };
+    let policy = Policy::from_level(level);
+
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        engine.session.handoff_auto(to, "openai", policy)
+    }));
+    match r {
+        Ok(Ok(h)) => out(serde_json::to_string(&HandoffAutoJson {
+            ok: true,
+            to: h.to,
+            goal: h.brief.goal.clone(),
+            echo_back: h.echo_back,
+        })
+        .unwrap()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in handoff_auto"),
+    }
+}
