@@ -103,6 +103,17 @@ pub fn reset_cancel() {
     CANCELLED.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// How long an agent may say nothing at all before a turn is treated as hung.
+/// Long builds that stream nothing are the reason this is generous; override
+/// with `CHORUS_IDLE_TIMEOUT_S` (0 = off, falls back to the hard timeout).
+fn idle_timeout() -> Duration {
+    match std::env::var("CHORUS_IDLE_TIMEOUT_S").ok().and_then(|v| v.parse::<u64>().ok()) {
+        Some(0) => Duration::from_secs(u64::MAX / 4),
+        Some(n) => Duration::from_secs(n),
+        None => Duration::from_secs(240),
+    }
+}
+
 /// A spawned agent process we speak ACP to.
 pub struct Agent {
     child: Child,
@@ -249,13 +260,24 @@ impl Agent {
         on_inbound: &mut dyn FnMut(&Agent, Inbound),
     ) -> Result<Value> {
         let deadline = Instant::now() + timeout;
+        let idle = idle_timeout();
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Err(anyhow!("timed out waiting for response to request {id}"));
             }
-            let v = match self.rx.recv_timeout(left) {
+            // Every frame (message chunk, tool update, even a heartbeat)
+            // resets this clock, so only a *silent* agent trips it. The hard
+            // `timeout` above still bounds the whole call.
+            let wait = left.min(idle);
+            let v = match self.rx.recv_timeout(wait) {
                 Ok(v) => v,
+                Err(RecvTimeoutError::Timeout) if wait < left => {
+                    return Err(anyhow!(
+                        "agent stalled: no output for {}s while waiting for request {id}",
+                        idle.as_secs()
+                    ))
+                }
                 Err(RecvTimeoutError::Timeout) => {
                     return Err(anyhow!("timed out waiting for response to request {id}"))
                 }

@@ -237,6 +237,29 @@ fn the_ledger_survives_when_the_agent_says_no() {
 }
 
 #[test]
+fn a_crashed_or_missing_agent_relays_to_the_next_in_the_chain() {
+    for (label, bridge) in [
+        ("missing", vec!["/nonexistent/chorus-bridge".to_string()]),
+        ("crash", vec!["sh".to_string(), "-c".to_string(), "exit 3".to_string()]),
+    ] {
+        let tmp = std::env::temp_dir().join(format!("chorus-crash-{label}-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db = tmp.join("store.db");
+        let _ = std::fs::remove_file(&db);
+        let mut s = Session::create(&db, &tmp, "relay").unwrap();
+        let chain = vec![
+            AgentSpec { name: "claude-opus".into(), provider: "anthropic".into(), bridge },
+            AgentSpec { name: "codex".into(), provider: "openai".into(), bridge: mock_bridge() },
+        ];
+        let r = s
+            .run_relay(&chain, "do the work", Policy::AllowAll)
+            .unwrap_or_else(|e| panic!("{label}: relay should resolve: {e:#}"));
+        assert_eq!(r.answered_by, "codex", "{label}");
+        assert_eq!(r.handoffs[0].2, HandoffReason::Failover, "{label}");
+    }
+}
+
+#[test]
 fn a_rate_limited_agent_relays_to_the_next_in_the_chain() {
     let tmp = std::env::temp_dir().join(format!("chorus-relay-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
