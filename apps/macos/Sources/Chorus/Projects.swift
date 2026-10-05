@@ -47,6 +47,12 @@ final class ProjectStore: ObservableObject {
         if let i = projects.firstIndex(where: { $0.id == p.id }) { projects[i] = p } else { projects.insert(p, at: 0) }
     }
 
+    /// The project's shared memory store, next to `projects.json`.
+    static func memoryPath(_ p: ChorusProject) -> String {
+        file.deletingLastPathComponent()
+            .appendingPathComponent("projects/\(p.id.uuidString)/memory.db").path
+    }
+
     func remove(_ p: ChorusProject) { projects.removeAll { $0.id == p.id } }
 
     static func pickFolders(message: String) -> [String] {

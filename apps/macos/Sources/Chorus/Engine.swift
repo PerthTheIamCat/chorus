@@ -122,6 +122,7 @@ final class Engine: ObservableObject {
     }
 
     func close() {
+        memoryScope = nil
         if let h = handle { chorus_engine_free(h.raw) }
         handle = nil
     }
@@ -637,6 +638,27 @@ final class Engine: ObservableObject {
     /// On `queue`, never the main thread: the handle's SQLite connection may
     /// be in use by a running turn, and a main-thread call both raced it and
     /// froze the window while it waited.
+    /// Which project's memory this session shares, for the Memory pane label.
+    @Published var memoryScope: String?
+
+    /// Share facts/approve queue with every folder in the project. Queued
+    /// right after open, so it lands before the first turn can.
+    func setMemoryDB(_ path: String, projectName: String) {
+        guard let h = handle else { return }
+        queue.async { [weak self] in
+            let json = path.withCString { Self.string(from: chorus_set_memory_db(h.raw, $0)) }
+            let r = Self.decode(SimpleResult.self, json)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if r?.ok == true { self.memoryScope = projectName } else {
+                    self.memoryScope = nil
+                    self.lastError = "ผูกความจำโปรเจกต์ไม่ได้: \(r?.error ?? "unknown")"
+                }
+                self.refreshMemory()
+            }
+        }
+    }
+
     func refreshMemory() {
         guard let h = handle else { return }
         queue.async { [weak self] in

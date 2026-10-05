@@ -82,6 +82,9 @@ char *chorus_cancel(void);
 /* Skills visible in a workspace (chorus/project/user). {"ok":true,"skills":[{name,description,path,source}]} */
 char *chorus_list_skills(const char *cwd);
 
+/* Share memory across a project: facts/approve queue/MCP go to `path`. {"ok":true} */
+char *chorus_set_memory_db(ChorusEngine *e, const char *path);
+
 /* Live updates of the running turn: kind = thought|message|tool|tool_done.
    Strings valid only during the call. NULL cb clears. Display only. */
 typedef void (*chorus_progress_cb)(void *ctx, const char *kind, const char *text);

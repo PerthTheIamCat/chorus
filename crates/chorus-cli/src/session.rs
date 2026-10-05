@@ -313,6 +313,10 @@ pub struct Session {
     /// The in-process MCP server handed to every agent (exposes
     /// `memory.propose`). `None` when it couldn't bind a port.
     mcp: Option<McpServer>,
+    /// Where facts and proposals live when this session belongs to a
+    /// project: one store shared by every folder in it. `None` = the
+    /// session's own store, as before projects existed.
+    memory: Option<Store>,
 }
 
 /// Open the shadow repo and pick the base sha a handoff diff is measured
@@ -353,6 +357,7 @@ impl Session {
             models: std::collections::HashMap::new(),
             base_ckpt,
             mcp,
+            memory: None,
         })
     }
 
@@ -383,6 +388,7 @@ impl Session {
             models: std::collections::HashMap::new(),
             base_ckpt,
             mcp,
+            memory: None,
         })
     }
 
@@ -456,10 +462,32 @@ impl Session {
         Ok(ck.snapshot(message)?)
     }
 
+    /// The connection facts and proposals are read from and written to.
+    fn mem_store(&self) -> &Store {
+        self.memory.as_ref().unwrap_or(&self.store)
+    }
+
+    /// Share memory with the rest of a project: facts and the approve queue
+    /// move to `path` (created on first use), and the MCP `memory_propose`
+    /// tool writes there too. This folder's existing facts are copied in once,
+    /// so attaching a folder to a project never loses what it remembered.
+    pub fn set_memory_db(&mut self, path: &Path) -> Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).context("create project memory dir")?;
+        }
+        let shared = Store::open(path).context("open project memory")?;
+        for f in memory::top(self.store.conn(), 1, 1000)? {
+            memory::add(shared.conn(), f.scope, &f.text)?;
+        }
+        self.mcp = McpServer::start(&path.to_string_lossy()).ok();
+        self.memory = Some(shared);
+        Ok(())
+    }
+
     /// The memory inspector's view: rendered project-scope facts, and the
     /// pending proposal queue as `(id, scope, text)`.
     pub fn memory_state(&self) -> Result<MemoryState> {
-        let c = self.store.conn();
+        let c = self.mem_store().conn();
         let facts = memory::top(c, 1, 100)?
             .iter()
             .map(|f| f.text.clone())
@@ -473,7 +501,7 @@ impl Session {
 
     /// Approve or reject a queued proposal.
     pub fn review_proposal(&self, id: i64, approve: bool) -> Result<()> {
-        let c = self.store.conn();
+        let c = self.mem_store().conn();
         if approve {
             memory::approve(c, id)?;
         } else {
@@ -1043,7 +1071,7 @@ impl Session {
             })
             .collect();
 
-        let facts = memory::top(c, 1, 12)?;
+        let facts = memory::top(self.mem_store().conn(), 1, 12)?;
         let memory_items: Vec<ContextItem> = memory::render(&facts)
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -1311,7 +1339,7 @@ impl Session {
 
         let project =
             std::fs::read_to_string(self.cwd.join(".chorus/project.md")).unwrap_or_default();
-        let facts = memory::top(self.store.conn(), 1, 24)
+        let facts = memory::top(self.mem_store().conn(), 1, 24)
             .map(|f| memory::render(&f))
             .unwrap_or_default();
         let task = self.task_state().map(|t| t.render()).unwrap_or_default();

@@ -659,6 +659,32 @@ pub extern "C" fn chorus_cancel() -> *mut c_char {
     out(serde_json::json!({ "ok": true, "was_running": chorus_cli::cancel_active() }).to_string())
 }
 
+/// Point this session's memory (facts + approve queue + MCP `memory_propose`)
+/// at a shared project store. The folder's own facts are copied in once.
+/// JSON: {"ok":true}
+///
+/// # Safety
+/// `e` must be a live handle; `path` a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_memory_db(
+    e: *mut ChorusEngine,
+    path: *const c_char,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let Some(path) = borrow(path) else {
+        return err("path must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        engine.session.set_memory_db(std::path::Path::new(path))
+    })) {
+        Ok(Ok(())) => out(serde_json::json!({ "ok": true }).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in set_memory_db"),
+    }
+}
+
 /// Live view of the running turn. `cb(ctx, kind, text)` is called from the
 /// turn's thread for each update: kind is `thought` | `message` | `tool` |
 /// `tool_done`. Both strings are only valid during the call. Pass a null `cb`

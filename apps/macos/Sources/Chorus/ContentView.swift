@@ -130,7 +130,13 @@ struct ContentView: View {
         }
         .onAppear { engine.loadAgents(); engine.registerProgress() }
         .onChange(of: workspace) { _, w in fileIndex.load(w); engine.loadSkills(cwd: w) }
-        .onChange(of: engine.sessionID) { _, _ in if !workspace.isEmpty { engine.loadSessions(db: dbPath) } }
+        .onChange(of: engine.sessionID) { _, id in
+            guard !workspace.isEmpty else { return }
+            engine.loadSessions(db: dbPath)
+            if id >= 0, let p = projects.project(containing: workspace) {
+                engine.setMemoryDB(ProjectStore.memoryPath(p), projectName: p.name)
+            }
+        }
         .onChange(of: engine.busy) { _, _ in flushQueue() }
         .onChange(of: engine.agents) { _, _ in syncModelSelection() }
         .onChange(of: model) { _, m in applyModel(m) }
@@ -681,6 +687,13 @@ struct ContentView: View {
 
     private var memoryPane: some View {
         VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: engine.memoryScope == nil ? "folder" : "square.stack.3d.up.fill")
+                    .foregroundStyle(Color.accentColor)
+                Text(engine.memoryScope.map { "ความจำร่วมของโปรเจกต์ \($0)" } ?? "ความจำของโฟลเดอร์นี้")
+                    .font(.caption.weight(.semibold))
+            }
+            .help("ทุกเซสชันและทุกเอเจนต์ในโปรเจกต์นี้อ่านความจำชุดเดียวกัน")
             if !engine.pending.isEmpty {
                 Text("Proposed (\(engine.pending.count))").font(.headline)
                 ForEach(engine.pending) { p in
