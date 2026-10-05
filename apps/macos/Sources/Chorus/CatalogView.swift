@@ -65,6 +65,28 @@ struct CatalogProgress: Decodable, Equatable {
     let id: String
     let current: String
     let done: [String]
+    var detail: String = ""
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        current = try c.decode(String.self, forKey: .current)
+        done = try c.decode([String].self, forKey: .done)
+        detail = (try? c.decode(String.self, forKey: .detail)) ?? ""
+    }
+    private enum CodingKeys: String, CodingKey { case id, current, done, detail }
+
+    /// One short word for the phase the card and sheet show while it runs.
+    var phaseLabel: String {
+        switch current {
+        case "fetch": "กำลังดาวน์โหลดและติดตั้ง"
+        case "verify": "กำลังตรวจสอบ"
+        case "enable": "กำลังเปิดใช้"
+        case "disable": "กำลังเลิกใช้"
+        case "remove": "กำลังลบ"
+        default: "กำลังเริ่ม"
+        }
+    }
 }
 
 struct CatalogActionResult: Equatable {
@@ -102,6 +124,7 @@ struct CatalogView: View {
 
     @State private var query = ""
     @State private var requestedAction: CatalogActionRequest?
+    @State private var dismissedResultID: String?
 
     private var filteredEntries: [CatalogIntegration] {
         let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -131,6 +154,11 @@ struct CatalogView: View {
                 .accessibilityElement(children: .combine)
             }
 
+            if requestedAction == nil, let result = actionResult, result.id != dismissedResultID {
+                ResultBanner(result: result, title: entries.first { $0.id == result.id }?.title ?? result.id,
+                             onDismiss: { dismissedResultID = result.id })
+            }
+
             SettingsGroup(title: "การอัปเดต") {
                 SettingsRow(title: "อัปเดตผ่าน Homebrew อัตโนมัติ",
                             detail: "เฉพาะเวอร์ชันที่ Chorus ตรวจแล้ว") {
@@ -156,6 +184,11 @@ struct CatalogView: View {
                     IntegrationCard(
                         entry: entry,
                         projectName: projectName,
+                        progress: progress?.id == entry.id ? progress : nil,
+                        onShowProgress: {
+                            requestedAction = .init(entryID: entry.id,
+                                                    kind: !entry.isInstalled ? .install : entry.updateAvailable ? .update : .remove)
+                        },
                         onInstall: { requestedAction = .init(entryID: entry.id, kind: .install) },
                         onUpdate: { requestedAction = .init(entryID: entry.id, kind: .update) },
                         onRemove: { requestedAction = .init(entryID: entry.id, kind: .remove) },
@@ -174,6 +207,7 @@ struct CatalogView: View {
                              loadPlan: onLoadPlan,
                              onDismiss: { requestedAction = nil },
                              onConfirm: {
+                                 dismissedResultID = nil
                                  switch request.kind {
                                  case .install: onInstall(entry.id)
                                  case .update: onUpdate(entry.id)
@@ -195,6 +229,8 @@ struct CatalogView: View {
 private struct IntegrationCard: View {
     let entry: CatalogIntegration
     let projectName: String
+    let progress: CatalogProgress?
+    let onShowProgress: () -> Void
     let onInstall: () -> Void
     let onUpdate: () -> Void
     let onRemove: () -> Void
@@ -213,7 +249,15 @@ private struct IntegrationCard: View {
                 Text(entry.title).font(.headline)
                 Text(entry.actions.first ?? entry.maintainer)
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                if entry.isInstalled {
+                if entry.isWorking {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ProgressView().progressViewStyle(.linear).controlSize(.small)
+                        Text([progress?.phaseLabel ?? "รอคิว", progress?.detail].compactMap { $0 }
+                            .filter { !$0.isEmpty }.joined(separator: " · "))
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    }
+                    .frame(maxWidth: 320, alignment: .leading)
+                } else if entry.isInstalled {
                     HStack(spacing: 6) {
                         Circle().fill(statusColor).frame(width: 6, height: 6)
                         Text(installStatus).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -249,7 +293,7 @@ private struct IntegrationCard: View {
     @ViewBuilder
     private var actionButton: some View {
         if entry.isWorking {
-            ProgressView().controlSize(.small).frame(width: 64)
+            Button("ดู", action: onShowProgress).buttonStyle(.bordered).controlSize(.small)
         } else if let missing = entry.missingInstaller, !entry.isInstalled,
                   let url = entry.installerURL {
             Link("วิธีติดตั้ง \(missing)", destination: url)
@@ -268,6 +312,37 @@ private struct IntegrationCard: View {
         if entry.updateAvailable { return "มีเวอร์ชันใหม่ · \(entry.installedVersion ?? "")" }
         if entry.isHealthy == false { return "ใช้งานไม่ได้ · \(entry.healthMessage ?? "ตรวจรายละเอียด")" }
         return "พร้อมใช้ · \(entry.installedVersion ?? entry.reviewedVersion)"
+    }
+}
+
+private struct ResultBanner: View {
+    let result: CatalogActionResult
+    let title: String
+    let onDismiss: () -> Void
+
+    private var verb: String {
+        switch result.action {
+        case "remove": "ลบ"
+        case "update": "อัปเดต"
+        case "enable": "เปิดใช้"
+        case "disable": "เลิกใช้"
+        default: "ติดตั้ง"
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 9) {
+            Image(systemName: result.succeeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(result.succeeded ? .green : .red)
+            Text(result.succeeded ? "\(verb) \(title) เรียบร้อย" : "\(verb) \(title) ไม่สำเร็จ: \(result.error ?? "")")
+                .font(.callout).textSelection(.enabled)
+            Spacer(minLength: 6)
+            Button(action: onDismiss) { Image(systemName: "xmark").font(.caption.weight(.semibold)) }
+                .buttonStyle(.plain).foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background((result.succeeded ? Color.green : Color.red).opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -312,6 +387,7 @@ private struct InstallSheet: View {
     @State private var plan: InstallPlan?
     @State private var planError: String?
     @State private var started = false
+    @State private var startedAt = Date()
 
     private var removing: Bool { kind == .remove }
     private var finished: CatalogActionResult? {
@@ -374,7 +450,17 @@ private struct InstallSheet: View {
             .frame(maxWidth: .infinity)
             .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 
-            if let message = finished?.error {
+            if started, entry.isWorking {
+                TimelineView(.periodic(from: startedAt, by: 1)) { context in
+                    HStack(spacing: 8) {
+                        Text([progress?.detail ?? ""].filter { !$0.isEmpty }.first ?? progress?.phaseLabel ?? "กำลังเริ่ม")
+                            .lineLimit(1).truncationMode(.middle)
+                        Spacer(minLength: 8)
+                        Text("\(Int(context.date.timeIntervalSince(startedAt))) วิ").monospacedDigit()
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
+                }
+            } else if let message = finished?.error {
                 Text(message).font(.caption).foregroundStyle(.red)
                     .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
             } else if !started && !removing && !entry.projectAccess.isEmpty {
@@ -388,11 +474,14 @@ private struct InstallSheet: View {
                 if finished != nil {
                     Button("เสร็จสิ้น", action: onDismiss).buttonStyle(.borderedProminent)
                         .keyboardShortcut(.defaultAction)
+                } else if entry.isWorking {
+                    Button("ทำต่อในพื้นหลัง", action: onDismiss)
                 } else {
-                    Button("ยกเลิก", action: onDismiss).disabled(entry.isWorking)
+                    Button("ยกเลิก", action: onDismiss)
                         .keyboardShortcut(.cancelAction)
                     Button(removing ? "ลบ" : kind == .update ? "อัปเดต" : "ติดตั้ง") {
                         started = true
+                        startedAt = Date()
                         onConfirm()
                     }
                     .buttonStyle(.borderedProminent)
@@ -405,6 +494,7 @@ private struct InstallSheet: View {
         .padding(24)
         .frame(width: 440)
         .onAppear {
+            if entry.isWorking { started = true }
             loadPlan(entry.id, planAction) { plan, error in
                 self.plan = plan
                 self.planError = error

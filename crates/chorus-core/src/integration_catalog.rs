@@ -360,6 +360,7 @@ fn install_uv_locked(entry: &Integration, root: &Path) -> Result<(PathBuf, Strin
         &input,
         format!("{}=={}\n", entry.recipe.package, entry.reviewed_version),
     )?;
+    note("กำลังคำนวณแพ็กเกจและ hash ที่ต้องใช้");
     let compiled = installer_command("uv")?
         .args([
             "--no-config",
@@ -387,6 +388,7 @@ fn install_uv_locked(entry: &Integration, root: &Path) -> Result<(PathBuf, Strin
             compiled.status
         )));
     }
+    note("กำลังสร้างสภาพแวดล้อม Python แยก");
     let created = installer_command("uv")?
         .args(["--no-config", "venv", "--python", "3.13"])
         .arg(&venv)
@@ -400,6 +402,7 @@ fn install_uv_locked(entry: &Integration, root: &Path) -> Result<(PathBuf, Strin
         ));
     }
     let python = venv.join("bin/python");
+    note("กำลังดาวน์โหลดและติดตั้งแพ็กเกจ");
     let installed = installer_command("uv")?
         .args([
             "--no-config",
@@ -475,16 +478,36 @@ fn approved_git_commit(entry: &Integration) -> Result<String, CatalogError> {
 }
 
 fn run_install(command: &mut Command) -> Result<(), CatalogError> {
-    let output = command.output()?;
-    if output.status.success() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    // Both streams feed the live detail line; stderr is drained on its own
+    // thread so neither pipe can fill up and stall the installer.
+    let stderr = child.stderr.take().map(|e| {
+        std::thread::spawn(move || {
+            for line in BufReader::new(e).lines().map_while(Result::ok) {
+                let line = line.trim();
+                if !line.is_empty() { note(line); }
+            }
+        })
+    });
+    if let Some(out) = child.stdout.take() {
+        for line in BufReader::new(out).lines().map_while(Result::ok) {
+            let line = line.trim();
+            if !line.is_empty() { note(line); }
+        }
+    }
+    if let Some(handle) = stderr { let _ = handle.join(); }
+    let status = child.wait()?;
+    if status.success() {
         Ok(())
     } else {
         let operation = command.get_args().map(|arg| arg.to_string_lossy())
             .collect::<Vec<_>>().join(" ");
         let message = if command.get_program().to_string_lossy().ends_with("/brew") {
-            format!("Homebrew ทำงานไม่สำเร็จ ({}): brew {operation}", output.status)
+            format!("Homebrew ทำงานไม่สำเร็จ ({status}): brew {operation}")
         } else {
-            format!("installer exited with {}", output.status)
+            format!("installer exited with {status}")
         };
         Err(CatalogError::Install(message))
     }
@@ -592,6 +615,7 @@ pub fn install(id: &str) -> Result<InstallRecord, CatalogError> {
         None
     };
     let npm_integrity = if entry.recipe.method == InstallMethod::Npm {
+        note("กำลังตรวจ integrity จาก npm registry");
         let metadata = match installer_command("npm").and_then(|mut command| {
             command
             .args([
@@ -635,6 +659,7 @@ pub fn install(id: &str) -> Result<InstallRecord, CatalogError> {
     } else {
         None
     };
+    if entry.recipe.method == InstallMethod::Npm { note("กำลังดาวน์โหลดจาก npm"); }
     let install_result = match entry.recipe.method {
         InstallMethod::Homebrew => unreachable!("handled before managed installs"),
         InstallMethod::Npm => run_install(
@@ -1109,6 +1134,9 @@ pub struct Progress {
     pub id: String,
     pub current: String,
     pub done: Vec<String>,
+    /// What the installer is doing right now, in its own words (last output
+    /// line) so a long download never looks frozen.
+    pub detail: String,
 }
 
 static PROGRESS: std::sync::Mutex<Option<Progress>> = std::sync::Mutex::new(None);
@@ -1122,7 +1150,16 @@ fn mark(phase: &str) {
                     p.done.push(finished);
                 }
                 p.current = phase.into();
+                p.detail.clear();
             }
+        }
+    }
+}
+
+fn note(detail: &str) {
+    if let Ok(mut guard) = PROGRESS.lock() {
+        if let Some(p) = guard.as_mut() {
+            p.detail = detail.chars().take(90).collect();
         }
     }
 }
