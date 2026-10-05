@@ -9,7 +9,7 @@ let target = "debug"
 
 let package = Package(
     name: "Chorus",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS(.v14)],
     targets: [
         .systemLibrary(name: "CChorus", path: "Sources/CChorus"),
         .executableTarget(

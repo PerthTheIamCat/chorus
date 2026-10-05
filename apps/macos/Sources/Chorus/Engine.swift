@@ -81,6 +81,14 @@ final class Engine: ObservableObject {
 
     private var handle: Handle?
     private let queue = DispatchQueue(label: "chorus.engine")
+    /// For FFI calls that take no engine handle (agent/session/skill lists).
+    /// They used to sit on `queue` behind a running turn, so the sidebar and
+    /// pickers stayed empty or stale until the agent finished — the main
+    /// reason the window felt like it wasn't responding.
+    private let ioQueue = DispatchQueue(label: "chorus.io", qos: .userInitiated, attributes: .concurrent)
+    /// Pending warm-tier pass; cancelled whenever the user sends something,
+    /// so compaction never makes a new message wait.
+    private var compactWork: DispatchWorkItem?
 
     /// Opening a session runs `git init` + a first snapshot of the whole
     /// workspace tree (checkpoint.rs) — on a large or slow-to-enumerate
@@ -155,6 +163,7 @@ final class Engine: ObservableObject {
     /// is replaced wholesale by the next `refresh()`.
     private var echoCounter: Int64 = 0
     private func echoUser(_ text: String) {
+        compactWork?.cancel()
         echoCounter += 1
         events.append(LedgerEvent(seq: Int64.min + echoCounter, kind: "msg", actor: "user", body: text))
         turnStartedAt = Date()
@@ -419,7 +428,7 @@ final class Engine: ObservableObject {
     @Published var skills: [SkillInfo] = []
 
     func loadSkills(cwd: String) {
-        queue.async { [weak self] in
+        ioQueue.async { [weak self] in
             let json = cwd.withCString { Self.string(from: chorus_list_skills($0)) }
             struct R: Codable { let skills: [SkillInfo]? }
             let r = Self.decode(R.self, json)
@@ -428,7 +437,7 @@ final class Engine: ObservableObject {
     }
 
     func loadAgents() {
-        queue.async { [weak self] in
+        ioQueue.async { [weak self] in
             let json = Self.string(from: chorus_list_agents())
             let r = Self.decode(AgentsResult.self, json)
             DispatchQueue.main.async { self?.agents = r?.agents ?? [] }
@@ -437,7 +446,7 @@ final class Engine: ObservableObject {
 
     /// Every past session in this project's store, newest activity first.
     func loadSessions(db: String) {
-        queue.async { [weak self] in
+        ioQueue.async { [weak self] in
             let json = db.withCString { Self.string(from: chorus_list_sessions($0)) }
             let r = Self.decode(SessionsResult.self, json)
             DispatchQueue.main.async {
@@ -531,6 +540,15 @@ final class Engine: ObservableObject {
     /// deliberately small — a long session catches up over several turns
     /// instead of making the next turn wait on one big pass.
     func compactIfIdle(limit: Int32 = 40) {
+        compactWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.compactNow(limit: limit) }
+        compactWork = work
+        // Wait for the user to go quiet first: a pass holds the engine queue
+        // for up to the compaction budget, and the next message would wait on it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: work)
+    }
+
+    func compactNow(limit: Int32) {
         guard let h = handle, !busy else { return }
         queue.async { [weak self] in
             let json = Self.string(from: chorus_compact(h.raw, limit))
@@ -559,18 +577,27 @@ final class Engine: ObservableObject {
         let pending: [Proposal]?
     }
 
+    /// On `queue`, never the main thread: the handle's SQLite connection may
+    /// be in use by a running turn, and a main-thread call both raced it and
+    /// froze the window while it waited.
     func refreshMemory() {
         guard let h = handle else { return }
-        let json = Self.string(from: chorus_memory_state(h.raw))
-        if let s = Self.decode(MemoryState.self, json) {
-            facts = s.facts ?? []
-            pending = s.pending ?? []
+        queue.async { [weak self] in
+            let json = Self.string(from: chorus_memory_state(h.raw))
+            let s = Self.decode(MemoryState.self, json)
+            DispatchQueue.main.async {
+                guard let self, let s else { return }
+                self.facts = s.facts ?? []
+                self.pending = s.pending ?? []
+            }
         }
     }
 
     func review(_ id: Int64, approve: Bool) {
         guard let h = handle else { return }
-        _ = Self.string(from: chorus_memory_review(h.raw, id, approve ? 1 : 0))
+        // Optimistic: drop the row now, the store catches up on `queue`.
+        pending.removeAll { $0.id == id }
+        queue.async { _ = Self.string(from: chorus_memory_review(h.raw, id, approve ? 1 : 0)) }
         refreshMemory()
     }
 

@@ -64,9 +64,13 @@ struct ContentView: View {
     @State private var rightTab = RightTab.context
     @State private var showPalette = false
     @State private var expanded: Set<String> = []
+    @StateObject private var projects = ProjectStore()
+    @StateObject private var fileIndex = FileIndex()
+    @State private var editing: ChorusProject?
+    @State private var editingIsNew = false
+    @State private var hoveredRow: String?
     @State private var queued: [(model: String, text: String)] = []
     @State private var hint: String?
-    @State private var showAgentSettings = false
     @State private var confirmRevert = false
     @State private var rejected: Set<UUID> = []
 
@@ -125,14 +129,33 @@ struct ContentView: View {
             }
         }
         .onAppear { engine.loadAgents() }
-        .onChange(of: engine.sessionID) { _ in if !workspace.isEmpty { engine.loadSessions(db: dbPath) } }
-        .onChange(of: engine.busy) { _ in flushQueue() }
-        .onChange(of: engine.agents) { _ in syncModelSelection() }
-        .onChange(of: model) { m in applyModel(m) }
+        .onChange(of: workspace) { _, w in fileIndex.load(w); engine.loadSkills(cwd: w) }
+        .onChange(of: engine.sessionID) { _, _ in if !workspace.isEmpty { engine.loadSessions(db: dbPath) } }
+        .onChange(of: engine.busy) { _, _ in flushQueue() }
+        .onChange(of: engine.agents) { _, _ in syncModelSelection() }
+        .onChange(of: model) { _, m in applyModel(m) }
         .sheet(isPresented: $showPalette) { palette }
+        .sheet(item: $editing) { p in
+            ProjectEditor(project: p, isNew: editingIsNew,
+                          onSave: { saved in
+                              projects.upsert(saved)
+                              expanded.insert(saved.id.uuidString)
+                              loadSessions(of: saved)
+                          },
+                          onDelete: editingIsNew ? nil : { projects.remove(p) })
+        }
         .background(
-            Button("") { showPalette = true }
-                .keyboardShortcut("k", modifiers: .command).opacity(0)
+            ZStack {
+                Button("") { showPalette = true }
+                    .keyboardShortcut("k", modifiers: .command)
+                Button("") {
+                    if workspace.isEmpty || engine.busy {
+                        editing = ChorusProject(name: "", folders: []); editingIsNew = true
+                    } else { startSession() }
+                }
+                .keyboardShortcut("n", modifiers: .command)
+            }
+            .opacity(0)
         )
         .sheet(isPresented: $showSettings) {
             SettingsSheet(workspace: workspace).environmentObject(engine)
@@ -177,73 +200,41 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 projectsSection
 
-                DisclosureGroup("เอเจนต์และสิทธิ์", isExpanded: $showAgentSettings) {
-                  VStack(alignment: .leading, spacing: 6) {
-                    if engine.agents.isEmpty {
-                        Text("กำลังดูว่ามีตัวไหนใช้ได้บ้าง…")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Picker("", selection: $model) {
-                        ForEach(engine.agents) { a in
-                            ForEach(a.models, id: \.id) { m in
-                                Text(a.ready ? m.label : "\(m.label) — ยังไม่ได้ login")
-                                    .tag(m.id)
-                            }
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(maxWidth: .infinity)
-
-                    if let a = agentFor(model), !a.ready {
-                        HStack(spacing: 6) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.orange)
-                            Text(a.detail).font(.caption2)
-                            Spacer(minLength: 0)
-                            Button("แก้") { showSettings = true }
-                                .buttonStyle(.link).font(.caption2)
-                        }
-                    }
-
-                    Text("ถ้าตัวนี้ชนลิมิต Chorus จะสลับไปตัวที่เหลือให้เองโดยไม่ต้องสั่ง")
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Text("สิทธิ์").font(.caption).foregroundStyle(.secondary)
-                    Picker("", selection: $permission) {
-                        ForEach(PermissionLevel.allCases, id: \.self) { Text($0.label).tag($0) }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    Text(permission.hint)
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                  }
-                  .padding(.top, 6)
-                }
-                .font(.subheadline.bold())
-
-                if engine.sessionID >= 0 {
-                    Button("ถามหลายตัวพร้อมกันแล้วเทียบ") {
-                        let others = engine.agents.filter(\.ready).map(\.defaultModel)
-                        guard others.count > 1 else { return }
-                        engine.compare(
-                            lastPrompt.isEmpty ? "ทบทวนงานที่ค้างอยู่แล้วเสนอขั้นต่อไป" : lastPrompt,
-                            agents: others.joined(separator: ","),
-                            level: max(permission.rawValue, 0)
-                        ) { compareOutput = $0 }
-                    }
-                    .disabled(engine.busy || engine.agents.filter(\.ready).count < 2)
-                    .frame(maxWidth: .infinity)
-                    .help("แยกสาขาให้แต่ละตัวทำโจทย์เดียวกัน แล้วเอา diff มาเทียบ")
-                }
-
                 Spacer(minLength: 0)
             }
             .padding(16)
         }
+        .safeAreaInset(edge: .bottom) { agentFooter }
         .navigationTitle("Chorus")
-        .frame(minWidth: 280, idealWidth: 300)
+        .frame(minWidth: 260, idealWidth: 290)
+    }
+
+    /// Which agents can answer right now — the relay depends on it, so it
+    /// stays visible instead of hiding in a settings form.
+    private var agentFooter: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack(spacing: 10) {
+                if engine.agents.isEmpty {
+                    ProgressView().controlSize(.mini)
+                    Text("กำลังตรวจเอเจนต์…").font(.caption2).foregroundStyle(.secondary)
+                }
+                ForEach(engine.agents) { a in
+                    HStack(spacing: 4) {
+                        Circle().fill(a.ready ? Color.green : .orange).frame(width: 6, height: 6)
+                        Text(a.label).font(.caption2)
+                    }
+                    .help(a.ready ? "\(a.label) พร้อมใช้" : a.detail)
+                }
+                Spacer()
+                Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                    .buttonStyle(.borderless)
+                    .keyboardShortcut(",", modifiers: .command)
+                    .help("ตั้งค่า (⌘,)")
+            }
+            .padding(.horizontal, 14).padding(.vertical, 9)
+        }
+        .background(.bar)
     }
 
     /// The agent whose model id is currently selected.
@@ -301,8 +292,11 @@ struct ContentView: View {
         panel.message = "เลือกโฟลเดอร์โปรเจกต์ให้ Chorus"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         addRecent(url.path)
-        expanded.insert(url.path)
-        engine.loadSessions(db: dbPath(for: url.path))
+        let p = projects.project(containing: url.path)
+            ?? ChorusProject(name: url.lastPathComponent, folders: [url.path])
+        projects.upsert(p)
+        expanded.insert(p.id.uuidString)
+        loadSessions(of: p)
     }
 
     private func addRecent(_ path: String) {
@@ -361,10 +355,10 @@ struct ContentView: View {
                         }
                         .padding(12)
                     }
-                    .onChange(of: engine.events.count) { _ in
+                    .onChange(of: engine.events.count) { _, _ in
                         if let last = engine.events.last { proxy.scrollTo(last.seq, anchor: .bottom) }
                     }
-                    .onChange(of: engine.busy) { b in
+                    .onChange(of: engine.busy) { _, b in
                         if b { withAnimation { proxy.scrollTo("working", anchor: .bottom) } }
                     }
                 }
@@ -430,25 +424,21 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             if let hint { Text(hint).font(.caption).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading) }
-            ComposerField(box: draftBox)
+            ComposerField(box: draftBox, suggestions: suggest, onSubmit: submit)
             HStack(spacing: 8) {
-                // Agent chip: who answers the next turn. `@codex …` at the start
-                // of a message overrides it for that turn only.
+                ModelPicker(model: $model, onNeedsLogin: { showSettings = true })
                 Menu {
-                    ForEach(engine.agents) { a in
-                        ForEach(a.models, id: \.id) { m in
-                            Button(a.ready ? m.label : "\(m.label) — ยังไม่ได้ login") { model = m.id }
-                                .disabled(!a.ready)
+                    ForEach(PermissionLevel.allCases, id: \.self) { p in
+                        Button { permission = p } label: {
+                            if p == permission { Label(p.label, systemImage: "checkmark") } else { Text(p.label) }
                         }
                     }
                 } label: {
-                    Label(agentFor(model)?.label ?? "เลือกเอเจนต์", systemImage: "person.crop.circle")
+                    Label(permission.label, systemImage: permission == .ask ? "hand.raised" : "bolt.fill")
                         .font(.caption)
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                Text("@agent ข้ามตัว · ⌘K คำสั่ง")
-                    .font(.caption2).foregroundStyle(.tertiary)
+                .menuStyle(.borderlessButton).fixedSize()
+                .help(permission.hint)
                 Spacer()
                 Button(action: submit) {
                     if engine.busy { Image(systemName: "text.badge.plus").font(.title2) }
@@ -457,7 +447,7 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(engine.sessionID < 0)
-                .help(engine.busy ? "เข้าคิว (⌘↩)" : "ส่ง (⌘↩)")
+                .help(engine.busy ? "เข้าคิว (↩)" : "ส่ง (↩ · ⇧↩ ขึ้นบรรทัดใหม่)")
             }
         }
         .padding(10)
@@ -512,6 +502,68 @@ struct ContentView: View {
         guard !engine.busy, !queued.isEmpty, engine.lastError == nil else { return }
         let next = queued.removeFirst()
         dispatch(next.model, next.text)
+    }
+
+    // MARK: `/` and `@` completion
+
+    private func suggest(_ trigger: Character, _ query: String) -> [Suggestion] {
+        let q = query.lowercased()
+        func hit(_ t: String) -> Bool { q.isEmpty || t.lowercased().contains(q) }
+        if trigger == "@" {
+            var out: [Suggestion] = engine.agents.filter { $0.ready && hit($0.id) }.map { a in
+                Suggestion(title: "@" + a.id, detail: "ส่งข้อความนี้ให้ \(a.label)", icon: "person.crop.circle",
+                           insert: "@\(a.id) ")
+            }
+            out += fileIndex.match(query, limit: 8 - min(out.count, 3)).map { f in
+                Suggestion(title: (f as NSString).lastPathComponent, detail: f, icon: "doc.text", insert: "@\(f) ")
+            }
+            return out
+        }
+        var out: [Suggestion] = []
+        for a in engine.agents where a.ready && a.id != currentAgentID && engine.sessionID >= 0 {
+            out.append(.init(title: "/handoff \(a.id)", detail: "ส่งงานต่อให้ \(a.label) พร้อม brief", icon: "arrow.left.arrow.right") {
+                engine.handoffAuto(to: a.defaultModel, level: max(permission.rawValue, 0))
+            })
+        }
+        for a in engine.agents where a.ready {
+            for m in a.baseModels {
+                out.append(.init(title: "/model \(m.id)", detail: "\(a.label) · \(m.label)", icon: "cpu") {
+                    let efforts = a.efforts(for: m.id)
+                    model = ModelID.compose(m.id, efforts.contains("high") ? "high" : efforts.first)
+                })
+            }
+        }
+        if let a = agentFor(model) {
+            for e in a.efforts(for: ModelID(model).base) {
+                out.append(.init(title: "/effort \(e)", detail: "ระดับการคิด", icon: "brain") {
+                    model = ModelID.compose(ModelID(model).base, e)
+                })
+            }
+        }
+        out.append(.init(title: "/new", detail: "เซสชันใหม่ในโฟลเดอร์นี้", icon: "square.and.pencil") {
+            if !workspace.isEmpty { startSession() }
+        })
+        out.append(.init(title: "/compare", detail: "ถามทุกเอเจนต์แล้วเทียบ", icon: "square.split.2x1") { runCompare() })
+        out.append(.init(title: "/snapshot", detail: "บันทึกจุดย้อนกลับตอนนี้", icon: "camera") { engine.snapshot() })
+        out.append(.init(title: "/ask", detail: "ถามก่อนเขียนไฟล์", icon: "hand.raised") { permission = .ask })
+        out.append(.init(title: "/auto", detail: "ให้ทำเลยไม่ต้องถาม", icon: "bolt.fill") { permission = .allowAll })
+        out.append(.init(title: "/settings", detail: "ตั้งค่าและ skills", icon: "gearshape") { showSettings = true })
+        // Skills go in as text: Claude loads them by name, the others are told
+        // where they live by the projected AGENTS.md index.
+        for sk in engine.skills {
+            out.append(.init(title: "/" + sk.name, detail: sk.description, icon: "sparkles", insert: "/\(sk.name) "))
+        }
+        return Array(out.filter { hit($0.title) || hit($0.detail) }.prefix(9))
+    }
+
+    private func runCompare() {
+        let others = engine.agents.filter(\.ready).map(\.defaultModel)
+        guard others.count > 1, engine.sessionID >= 0 else { return }
+        engine.compare(
+            lastPrompt.isEmpty ? "ทบทวนงานที่ค้างอยู่แล้วเสนอขั้นต่อไป" : lastPrompt,
+            agents: others.joined(separator: ","),
+            level: max(permission.rawValue, 0)
+        ) { compareOutput = $0 }
     }
 
     // MARK: command palette (⌘K)
@@ -665,25 +717,23 @@ struct ContentView: View {
     }
 
     private var projectsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text("โปรเจกต์").font(.subheadline.bold())
                 Spacer()
-                Menu {
-                    Button("เพิ่มโฟลเดอร์ที่มีอยู่…", action: pickFolder)
-                    Button("สร้างโฟลเดอร์ใหม่…", action: createFolder)
-                } label: {
+                Button { editing = ChorusProject(name: "", folders: []); editingIsNew = true } label: {
                     Image(systemName: "plus")
                 }
-                .menuStyle(.borderlessButton).fixedSize()
-                .help("เพิ่มหรือสร้างโปรเจกต์")
+                .buttonStyle(.borderless)
+                .help("สร้างโปรเจกต์ใหม่")
             }
-            if recents.isEmpty {
-                Button(action: pickFolder) {
+            if projects.projects.isEmpty {
+                Button { editing = ChorusProject(name: "", folders: []); editingIsNew = true } label: {
                     VStack(spacing: 8) {
-                        Image(systemName: "folder.badge.plus")
+                        Image(systemName: "square.stack.3d.up.badge.plus")
                             .font(.system(size: 26)).foregroundStyle(.secondary)
-                        Text("เลือกโฟลเดอร์โปรเจกต์").font(.callout.weight(.medium))
+                        Text("สร้างโปรเจกต์แรก").font(.callout.weight(.medium))
+                        Text("รวมหลายโฟลเดอร์ไว้ด้วยกันได้").font(.caption2).foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity).padding(.vertical, 18)
                     .contentShape(Rectangle())
@@ -694,105 +744,130 @@ struct ContentView: View {
                         .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [5]))
                         .foregroundStyle(.tertiary))
             }
-            ForEach(recents, id: \.self) { project in projectRow(project) }
-            Text("เทิร์นแรกของเซสชันใหม่จะ snapshot โฟลเดอร์ — อย่าเลือก home หรือโฟลเดอร์ที่ sync iCloud")
-                .font(.caption2).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            ForEach(projects.projects) { p in projectRow(p) }
         }
     }
 
-    private func projectRow(_ project: String) -> some View {
-        let open = expanded.contains(project)
-        let sessions = engine.sessionsByDB[dbPath(for: project)] ?? []
-        return VStack(alignment: .leading, spacing: 4) {
-            Button {
-                if open { expanded.remove(project) } else {
-                    expanded.insert(project)
-                    engine.loadSessions(db: dbPath(for: project))
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: open ? "chevron.down" : "chevron.right")
-                        .font(.caption2).foregroundStyle(.secondary).frame(width: 10)
-                    Image(systemName: "folder.fill").foregroundStyle(.blue)
-                    Text((project as NSString).lastPathComponent)
-                        .font(.callout.weight(.medium)).lineLimit(1)
-                    Spacer(minLength: 0)
-                    if project == workspace && engine.sessionID >= 0 {
-                        Circle().fill(.green).frame(width: 6, height: 6)
+    private func sessions(of p: ChorusProject) -> [(folder: String, s: Engine.SessionSummary)] {
+        p.folders.flatMap { f in (engine.sessionsByDB[dbPath(for: f)] ?? []).map { (f, $0) } }
+            .sorted { ($0.s.started_ms + $0.s.last_ms) > ($1.s.started_ms + $1.s.last_ms) }
+    }
+
+    private func loadSessions(of p: ChorusProject) {
+        for f in p.folders { engine.loadSessions(db: dbPath(for: f)) }
+    }
+
+    private func projectRow(_ p: ChorusProject) -> some View {
+        let open = expanded.contains(p.id.uuidString)
+        let isCurrent = p.folders.contains(workspace) && engine.sessionID >= 0
+        let rows = sessions(of: p)
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Image(systemName: open ? "chevron.down" : "chevron.right")
+                    .font(.caption2.weight(.semibold)).foregroundStyle(.secondary).frame(width: 10)
+                Image(systemName: "square.stack.3d.up.fill").foregroundStyle(Color.accentColor)
+                Text(p.name).font(.callout.weight(.medium)).lineLimit(1)
+                Spacer(minLength: 0)
+                if isCurrent { Circle().fill(.green).frame(width: 6, height: 6) }
+                Text("\(p.folders.count)").font(.caption2).foregroundStyle(.tertiary)
+                    .help("\(p.folders.count) โฟลเดอร์")
+            }
+            .padding(.vertical, 5).padding(.horizontal, 6)
+            .background(hoveredRow == p.id.uuidString ? Color.secondary.opacity(0.1) : .clear,
+                        in: RoundedRectangle(cornerRadius: 6))
+            .contentShape(Rectangle())
+            .onHover { hoveredRow = $0 ? p.id.uuidString : (hoveredRow == p.id.uuidString ? nil : hoveredRow) }
+            .onTapGesture {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    if open { expanded.remove(p.id.uuidString) } else {
+                        expanded.insert(p.id.uuidString)
+                        loadSessions(of: p)
                     }
                 }
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .help(project)
             .contextMenu {
-                Button("เปิดใน Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: project)]) }
-                Button("เอาออกจากรายการ") {
-                    recents.removeAll { $0 == project }
-                    persistRecents()
+                Button("แก้ไขโปรเจกต์…") { editing = p; editingIsNew = false }
+                Menu("เปิดใน Finder") {
+                    ForEach(p.folders, id: \.self) { f in
+                        Button((f as NSString).lastPathComponent) {
+                            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: f)])
+                        }
+                    }
                 }
+                Divider()
+                Button("ลบโปรเจกต์ (ไฟล์ไม่หาย)", role: .destructive) { projects.remove(p) }
             }
+
             if open {
-                Button {
-                    workspace = project
-                    startSession()
-                } label: {
-                    Label(engine.busy && workspace == project ? "กำลัง snapshot…" : "เซสชันใหม่", systemImage: "plus")
-                        .font(.caption)
-                }
-                .buttonStyle(.borderless)
-                .disabled(engine.busy)
-                .padding(.leading, 22)
-                if sessions.isEmpty {
+                newSessionButton(p).padding(.leading, 22)
+                if p.folders.isEmpty {
+                    Button("เพิ่มโฟลเดอร์ให้โปรเจกต์นี้…") { editing = p; editingIsNew = false }
+                        .buttonStyle(.link).font(.caption).padding(.leading, 22)
+                } else if rows.isEmpty {
                     Text("ยังไม่มีเซสชัน").font(.caption2).foregroundStyle(.tertiary).padding(.leading, 22)
                 }
-                ForEach(sessions) { s in
-                    Button {
-                        workspace = project
-                        engine.reopen(db: dbPath(for: project), sessionID: s.id)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(s.goal.isEmpty ? s.title : s.goal)
-                                .font(.caption.weight(.medium)).lineLimit(2)
-                                .multilineTextAlignment(.leading)
-                            HStack(spacing: 4) {
-                                ForEach(s.agents, id: \.self) { a in
-                                    Text(a).font(.caption2)
-                                        .padding(.horizontal, 4).padding(.vertical, 1)
-                                        .background(.quaternary, in: Capsule())
-                                }
-                                if s.forked_from != nil {
-                                    Image(systemName: "arrow.triangle.branch").font(.caption2).foregroundStyle(.tertiary)
-                                }
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(6)
-                        .background(
-                            (project == workspace && s.id == engine.sessionID) ? Color.accentColor.opacity(0.15) : .clear,
-                            in: RoundedRectangle(cornerRadius: 6))
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(engine.busy)
-                    .padding(.leading, 16)
-                }
+                ForEach(rows, id: \.s.id) { r in sessionRow(r.s, folder: r.folder, showFolder: p.folders.count > 1) }
             }
         }
-        .onAppear { if open { engine.loadSessions(db: dbPath(for: project)) } }
+        .onAppear { if open { loadSessions(of: p) } }
     }
 
-    private func createFolder() {
-        let panel = NSSavePanel()
-        panel.nameFieldLabel = "ชื่อโปรเจกต์"
-        panel.prompt = "สร้าง"
-        panel.message = "สร้างโฟลเดอร์ใหม่สำหรับโปรเจกต์"
-        panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        addRecent(url.path)
-        expanded.insert(url.path)
+    @ViewBuilder
+    private func newSessionButton(_ p: ChorusProject) -> some View {
+        let label = Label(engine.busy && p.folders.contains(workspace) ? "กำลังเตรียมโฟลเดอร์…" : "เซสชันใหม่",
+                          systemImage: "square.and.pencil").font(.caption)
+        if p.folders.count > 1 {
+            Menu {
+                ForEach(p.folders, id: \.self) { f in
+                    Button((f as NSString).lastPathComponent) { workspace = f; startSession() }
+                }
+            } label: { label }
+            .menuStyle(.borderlessButton).fixedSize()
+            .disabled(engine.busy)
+        } else if let f = p.folders.first {
+            Button { workspace = f; startSession() } label: { label }
+                .buttonStyle(.borderless)
+                .disabled(engine.busy)
+        }
+    }
+
+    private func sessionRow(_ s: Engine.SessionSummary, folder: String, showFolder: Bool) -> some View {
+        let selected = folder == workspace && s.id == engine.sessionID
+        let key = folder + "#\(s.id)"
+        return Button {
+            guard !selected else { return }
+            workspace = folder
+            engine.reopen(db: dbPath(for: folder), sessionID: s.id)
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(s.goal.isEmpty ? s.title : s.goal)
+                    .font(.caption.weight(selected ? .semibold : .regular)).lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                HStack(spacing: 4) {
+                    if showFolder {
+                        Text((folder as NSString).lastPathComponent).font(.caption2).foregroundStyle(.secondary)
+                    }
+                    ForEach(s.agents, id: \.self) { a in
+                        Text(a).font(.caption2)
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(.quaternary, in: Capsule())
+                    }
+                    if s.forked_from != nil {
+                        Image(systemName: "arrow.triangle.branch").font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(6)
+            .background(selected ? Color.accentColor.opacity(0.18)
+                        : (hoveredRow == key ? Color.secondary.opacity(0.1) : .clear),
+                        in: RoundedRectangle(cornerRadius: 6))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hoveredRow = $0 ? key : (hoveredRow == key ? nil : hoveredRow) }
+        .disabled(engine.busy)
+        .padding(.leading, 16)
     }
 
     /// Delegated work, read back from the ledger: every tool call that looks
@@ -907,7 +982,7 @@ struct ContentView: View {
                 if engine.uncompacted > 0 {
                     Text("·")
                     Text("\(engine.uncompacted) to summarise")
-                    Button("Now") { engine.compactIfIdle(limit: 500) }
+                    Button("Now") { engine.compactNow(limit: 500) }
                         .buttonStyle(.link)
                         .disabled(engine.busy)
                 }
@@ -1417,17 +1492,3 @@ struct MarkdownText: View {
     }
 }
 
-
-final class DraftBox: ObservableObject {
-    @Published var text = ""
-}
-
-struct ComposerField: View {
-    @ObservedObject var box: DraftBox
-    var body: some View {
-        TextEditor(text: $box.text)
-            .font(.body)
-            .frame(minHeight: 44, maxHeight: 140)
-            .scrollContentBackground(.hidden)
-    }
-}
