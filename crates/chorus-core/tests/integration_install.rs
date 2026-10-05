@@ -3,9 +3,14 @@
 
 use chorus_core::integration_catalog as cat;
 use std::path::Path;
+use std::sync::Mutex;
+
+/// HOME is process-global; tests that repoint it must not overlap.
+static HOME_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn bundled_skill_plan_install_remove_round_trip() {
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("HOME", home.path());
     let project = home.path().join("demo");
@@ -47,6 +52,7 @@ fn unknown_action_is_rejected_by_plan() {
 #[test]
 #[ignore]
 fn npm_install_remove_leaves_nothing() {
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     let real_path = std::env::var_os("PATH");
     std::env::set_var("HOME", home.path());
@@ -66,6 +72,7 @@ fn npm_install_remove_leaves_nothing() {
 #[test]
 #[ignore]
 fn uv_install_remove_leaves_nothing() {
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("HOME", home.path());
     let project = home.path().join("demo");
