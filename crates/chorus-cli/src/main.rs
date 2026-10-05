@@ -15,7 +15,7 @@ use chorus_core::handoff::HandoffReason;
 use chorus_core::render::{self, ContextItem, FileChange};
 use chorus_core::tokens::{CachedCounter, HeuristicCounter, TokenCounter};
 use chorus_core::{actor, ledger, memory, EventKind, NewEvent, Store};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A believable tool result: an agent reading a 40 KB source file.
 fn fake_file(path: &str, lines: usize) -> String {
@@ -49,9 +49,16 @@ fn main() -> Result<()> {
         "handoff" => handoff(&args[1..]),
         "memory" => memory_cmd(&args[1..]),
         "compare" => compare_cmd(&args[1..]),
+        "compact" => compact_cmd(&args[1..]),
+        "context" => context_cmd(&args[1..]),
+        "skills" => skills_cmd(&args[1..]),
+        "mcp" => mcp_cmd(&args[1..]),
+        "models" => models_cmd(&args[1..]),
+        "doctor" => doctor_cmd(),
+        "demo" => demo_cmd(&args[1..]),
         other => {
             eprintln!(
-                "unknown command {other:?}; try: chorus bench | run | handoff | memory | compare"
+                "unknown command {other:?}; try: chorus demo | doctor | bench | run | handoff | memory | compare | compact | context | skills | mcp | models"
             );
             std::process::exit(2);
         }
@@ -157,7 +164,8 @@ fn compare_cmd(args: &[String]) -> Result<()> {
         .iter()
         .map(|n| AgentSpec::new(n, provider_of(n)))
         .collect();
-    let mut s = Session::open(&db, session_id).context("open session")?;
+    let mut s = Session::open(&db, session_id).context("open session")?
+        .log_permissions(true);
     let branches = s.compare(&specs, prompt, policy)?;
 
     for b in branches {
@@ -213,7 +221,8 @@ fn handoff(args: &[String]) -> Result<()> {
         None => String::new(),
     };
 
-    let mut s = Session::open(&db, session_id).context("open session")?;
+    let mut s = Session::open(&db, session_id).context("open session")?
+        .log_permissions(true);
     // Constraints come from project-scope memory facts.
     let constraints: Vec<String> = Vec::new();
 
@@ -278,6 +287,7 @@ fn run(args: &[String]) -> Result<()> {
     let mut continue_session: Option<i64> = None;
 
     let mut chain: Vec<String> = Vec::new();
+    let mut model: Option<String> = None;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -297,6 +307,7 @@ fn run(args: &[String]) -> Result<()> {
                         .collect();
                 }
             }
+            "--model" => model = it.next().cloned(),
             "--session" => continue_session = it.next().and_then(|v| v.parse().ok()),
             "--yes" => policy = Policy::AllowAll,
             "--read-only" => policy = Policy::ReadOnly,
@@ -312,25 +323,38 @@ fn run(args: &[String]) -> Result<()> {
                 );
             };
             let db = db.context("--db is required with --session")?;
-            let s = Session::open(&db, id).context("open session")?;
+            let s = Session::open(&db, id).context("open session")?
+        .log_permissions(true);
             eprintln!("continuing session {id} · store {}", db.display());
             (s, (*prompt).clone())
         }
         None => {
             let [cwd, prompt] = positional.as_slice() else {
                 anyhow::bail!(
-                    "usage: chorus run <cwd> <prompt> [--db PATH] [--agent NAME] [--yes]\n   \
+                    "usage: chorus run <cwd> <prompt> [--db PATH] [--agent NAME] [--model ID] [--yes]\n   \
                      or: chorus run <prompt> --session N --db PATH"
                 );
             };
             let db = db.unwrap_or_else(|| {
                 std::env::temp_dir().join(format!("chorus-run-{}.db", std::process::id()))
             });
-            let s = Session::create(&db, &PathBuf::from(cwd), prompt).context("create session")?;
+            let s = Session::create(&db, &PathBuf::from(cwd), prompt).context("create session")?
+                .log_permissions(true);
             eprintln!("session {} · store {}", s.session_id(), db.display());
             (s, (*prompt).clone())
         }
     };
+
+    if let Some(m) = &model {
+        // Pinned for whoever answers, including anyone the relay hands to:
+        // "use the cheap model" is a statement about the task, not about one
+        // provider, and a failover that silently upgrades is a surprise on the
+        // bill.
+        s.set_model(&agent, m);
+        for name in &chain {
+            s.set_model(name, m);
+        }
+    }
 
     let report = if chain.is_empty() {
         s.run_turn(&agent, "openai", &prompt, policy)?
@@ -569,5 +593,732 @@ fn bench() -> Result<()> {
         db_size as f64 / event_rows as f64
     );
     println!("\n  {}", db_path.display());
+
+    bench_real_path(&dir)?;
+    Ok(())
+}
+
+/// The part of the bench that runs the **real** `Session::assemble_context`,
+/// not a hand-fed `AssembleInput`.
+///
+/// This exists because of a regression that the synthetic bench above could
+/// never have caught: `assemble_context` passed `task_state: String::new()`
+/// for months while this file fed the tier a fixture and reported it working.
+/// A measurement harness that supplies its own inputs measures the harness.
+/// Everything below asserts against the code path the product actually runs.
+fn bench_real_path(dir: &Path) -> Result<()> {
+    let db_path = dir.join("real.db");
+    let _ = std::fs::remove_file(&db_path);
+    let cwd = dir.join("workspace");
+    std::fs::create_dir_all(&cwd)?;
+
+    let mut s = Session::create(&db_path, &cwd, "bench real path")?;
+    let sess = s.session_id();
+
+    // A session that has said something: the human's goal, then agent turns.
+    {
+        let store = Store::open(&db_path)?;
+        let c = store.conn();
+        let user = actor::intern(c, "user", "human")?;
+        let agent = actor::intern(c, "codex", "openai")?;
+        ledger::append(
+            c,
+            &NewEvent::new(
+                sess,
+                EventKind::Msg,
+                user,
+                "ทำหน้า order list ให้ต่ำกว่า 200ms",
+            ),
+        )?;
+        for i in 0..30 {
+            ledger::append(
+                c,
+                &NewEvent::new(
+                    sess,
+                    EventKind::Msg,
+                    agent,
+                    format!("เทิร์นที่ {i}: ไล่ดู OrderRepo.findAll แล้วเจอว่าโหลด relation ทีละแถว"),
+                ),
+            )?;
+        }
+        ledger::append(
+            c,
+            &NewEvent::new(sess, EventKind::Decision, agent, "ใช้ eager loading ไม่ใช่ N+1"),
+        )?;
+    }
+    s = Session::open(&db_path, sess)?;
+
+    println!("\n── real path (Session::assemble_context) ─────────────");
+
+    // 1. The never-trimmed tier must not be empty.
+    let ts = s.task_state()?;
+    let assembled = s.assemble_context(6_000)?;
+    println!("  task state            {} chars", ts.render().len());
+    println!("  goal                  {}", ts.goal);
+    println!("  done items            {}", ts.done.len());
+    assert!(
+        !ts.is_empty(),
+        "task state is empty on a session that has said something — \
+         the tier the design says is never trimmed is carrying nothing"
+    );
+    assert!(
+        assembled.contains(ts.goal.trim()),
+        "the goal never reached the assembled context"
+    );
+
+    // 2. Reads come from the stored warm tier, not from a summariser.
+    let pending_before = s.uncompacted_count()?;
+    let r = s.compact(500)?;
+    println!("  compact               {} rows via {}", r.compacted, r.model);
+    assert!(pending_before > 0 && r.compacted as i64 == pending_before);
+    assert_eq!(s.uncompacted_count()?, 0, "compact left rows behind");
+
+    // Overwrite one stored rung with a sentinel: if it shows up in the
+    // assembled text, the read path is genuinely reading the table.
+    {
+        let store = Store::open(&db_path)?;
+        let c = store.conn();
+        let seq: i64 = c.query_row(
+            "SELECT max(seq) FROM event WHERE sess = ?1",
+            [sess],
+            |r| r.get(0),
+        )?;
+        chorus_core::compaction::save_rungs(
+            c,
+            seq,
+            &chorus_core::compaction::Rungs {
+                l1: "SENTINEL-L1".into(),
+                l2: "SENTINEL-L2".into(),
+            },
+            "bench",
+        )?;
+    }
+    let s = Session::open(&db_path, sess)?;
+    let tight = s.assemble_context(900)?;
+    assert!(
+        tight.contains("SENTINEL"),
+        "a tight budget did not fall back to the stored rung — \
+         assemble_context is not reading the warm tier"
+    );
+    println!("  stored rung reused    yes");
+
+    // 3. The read path must not consult `compaction::best()`. If it ever does
+    // again, this env var turns every event into a network round trip; the
+    // assertion is on wall-clock so the regression is loud rather than subtle.
+    std::env::set_var("CHORUS_SUMMARY_MODEL", "chorus-bench-nonexistent-model");
+    let t0 = std::time::Instant::now();
+    let _ = s.assemble_context(6_000)?;
+    let took = t0.elapsed();
+    std::env::remove_var("CHORUS_SUMMARY_MODEL");
+    println!("  assemble w/ model set {:.0} ms", took.as_secs_f64() * 1000.0);
+    assert!(
+        took < std::time::Duration::from_secs(2),
+        "assemble_context took {took:?} with CHORUS_SUMMARY_MODEL set — \
+         it is summarising on the read path again"
+    );
+
+    println!("\n  invariants ผ่านครบ");
+    Ok(())
+}
+
+/// `chorus models [agent...]`
+///
+/// Ask each agent what it can actually run, and cache the answer.
+///
+/// This spawns a real bridge per agent, so it is slow and deliberately manual
+/// — the picker reads the cache. Worth the wait once: before this existed the
+/// app offered `gpt-5.1-codex`, a model Codex does not have, because the list
+/// was a guess written by hand.
+fn models_cmd(args: &[String]) -> Result<()> {
+    let wanted: Vec<String> = if args.is_empty() {
+        vec!["claude".into(), "codex".into()]
+    } else {
+        args.to_vec()
+    };
+    let cwd = std::env::current_dir()?;
+
+    for id in &wanted {
+        rule(id);
+        match chorus_cli::agents::refresh_models(id, &cwd) {
+            Ok(models) => {
+                for m in &models {
+                    let mark = if m.is_default { "*" } else { " " };
+                    println!("  {mark} {:<24} {}", m.id, m.label);
+                }
+                println!("\n  {} โมเดล · เก็บไว้แล้ว ครั้งหน้าไม่ต้องถามใหม่", models.len());
+            }
+            Err(e) => println!("  ถามไม่ได้: {e:#}"),
+        }
+        println!();
+    }
+    Ok(())
+}
+
+/// `chorus mcp [list|import] [DIR]`
+///
+/// The tool list every agent in this workspace gets, and where it came from.
+///
+/// Prints names, transports and command lines — and the *names* of the env
+/// vars and headers each server carries, never their values. A config is
+/// debugged by knowing that `GITHUB_TOKEN` is set; printing what it is set to
+/// would put a live credential in a terminal, a scrollback, and every bug
+/// report that follows.
+fn mcp_cmd(args: &[String]) -> Result<()> {
+    use chorus_core::mcp_config;
+
+    let sub = args.first().map(String::as_str).unwrap_or("list");
+    let cwd = args
+        .get(if sub == "list" || sub == "import" { 1 } else { 0 })
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?);
+
+    if sub == "import" {
+        let added = mcp_config::import_claude_project(&cwd)?;
+        rule("import");
+        if added.is_empty() {
+            println!(
+                "  ไม่มีอะไรให้ import — {}/{} ไม่มีเซิร์ฟเวอร์ใหม่",
+                cwd.display(),
+                mcp_config::CLAUDE_PROJECT_CONFIG
+            );
+        } else {
+            println!("  เพิ่ม {} เซิร์ฟเวอร์เข้า {}:", added.len(), mcp_config::CONFIG);
+            for n in &added {
+                println!("    + {n}");
+            }
+            println!("\n  (ของเดิมในไฟล์ไม่ถูกทับ — รันซ้ำได้ปลอดภัย)");
+        }
+        return Ok(());
+    }
+
+    let servers = mcp_config::load(&cwd);
+    rule("MCP — ทุก agent ได้ชุดเดียวกันนี้");
+    if servers.is_empty() {
+        println!("  ยังไม่มีเซิร์ฟเวอร์ใน {}\n", mcp_config::config_path(&cwd).display());
+        println!("  ถ้ามี .mcp.json อยู่แล้ว:  chorus mcp import {}", cwd.display());
+        return Ok(());
+    }
+    for r in mcp_config::redact(&servers) {
+        println!("  ● {}  [{}]", r.name, r.transport);
+        println!("      {}", r.target);
+        if !r.secret_keys.is_empty() {
+            println!("      ตัวแปรลับ: {} (ไม่แสดงค่า)", r.secret_keys.join(", "));
+        }
+    }
+    println!(
+        "\n  {} เซิร์ฟเวอร์ · ส่งเข้า session/new ของทั้ง Claude และ Codex",
+        servers.len()
+    );
+    println!("  + chorus เองอีกหนึ่งตัว (memory_propose) ตอนเปิด session จริง");
+    Ok(())
+}
+
+/// `chorus skills [DIR]`
+///
+/// What every agent in this workspace will see, and where each one will see
+/// it. The registry is only worth having if you can check it without starting
+/// a turn — "the skill was there but Codex never mentioned it" is otherwise
+/// impossible to tell apart from "the skill was never found".
+fn skills_cmd(args: &[String]) -> Result<()> {
+    let cwd = args
+        .first()
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?);
+    let found = chorus_core::skills::discover(&cwd);
+
+    rule("skills");
+    if found.is_empty() {
+        println!(
+            "  ยังไม่มี skill ใน {}/{}\n",
+            cwd.display(),
+            chorus_core::skills::SKILLS_DIR
+        );
+        println!("  สร้างอันแรก:");
+        println!("    mkdir -p {}/review", chorus_core::skills::SKILLS_DIR);
+        println!("    $EDITOR {}/review/SKILL.md", chorus_core::skills::SKILLS_DIR);
+        return Ok(());
+    }
+    for k in &found {
+        println!("  ● {}", k.name);
+        println!("      {}", k.description);
+        println!("      ต้นฉบับ  {}", k.source_path().display());
+        println!("      Claude   {}", k.claude_path().display());
+        println!("      Codex    AGENTS.md § Skills (หนึ่งบรรทัด)");
+    }
+
+    rule("หน้าตาที่ agent ที่ไม่มี skill loader จะเห็น");
+    for line in chorus_core::skills::index(&found).lines() {
+        println!("  │ {line}");
+    }
+    println!(
+        "\n  ({} skill · เขียนที่เดียว ใช้ได้ทุกเจ้า)",
+        found.len()
+    );
+    Ok(())
+}
+
+/// `chorus context --db PATH --session N [--budget N] [--raw]`
+///
+/// Print exactly what the next agent would be handed — the whole product
+/// claim in one command. Everything else in this CLI reports what *happened*;
+/// this shows what the receiving agent *sees*, which is the only way to tell a
+/// working handoff from one that merely did not crash.
+///
+/// Read-only and summariser-free: it calls the same `task_state()` and
+/// `assemble_context()` the relay calls, so what it prints is not a
+/// reconstruction — it is the artefact itself.
+fn context_cmd(args: &[String]) -> Result<()> {
+    let mut db: Option<PathBuf> = None;
+    let mut session_id: i64 = 1;
+    let mut budget: i64 = 8_000;
+    let mut raw = false;
+
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--db" => db = it.next().map(PathBuf::from),
+            "--session" => session_id = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
+            "--budget" => budget = it.next().and_then(|v| v.parse().ok()).unwrap_or(8_000),
+            "--raw" => raw = true,
+            other => anyhow::bail!("unknown flag {other:?}"),
+        }
+    }
+    let db = db.context("--db is required")?;
+    let s = Session::open(&db, session_id).context("open session")?;
+
+    let ctx = s.assemble_context(budget)?;
+    if raw {
+        print!("{ctx}");
+        return Ok(());
+    }
+
+    rule("task state — ชั้นที่ไม่ถูกตัดทิ้ง");
+    let ts = s.task_state()?;
+    if ts.is_empty() {
+        println!("  (ว่าง — session นี้ยังไม่มีอะไรเลย)");
+    } else {
+        for line in ts.render().lines() {
+            println!("  {line}");
+        }
+    }
+
+    rule("context ที่จะส่งจริง");
+    println!(
+        "  {} ตัวอักษร · ประมาณ {} token · เพดาน {budget}\n",
+        ctx.chars().count(),
+        {
+            use chorus_core::tokens::TokenCounter;
+            chorus_core::tokens::HeuristicCounter.count(&ctx)
+        },
+    );
+    for line in ctx.lines() {
+        println!("  │ {line}");
+    }
+    println!("\n  (--raw เพื่อเอาเฉพาะตัว context ดิบ ไม่มีหัวข้อ)");
+    Ok(())
+}
+
+/// `chorus compact --db PATH --session N [--limit N]`
+///
+/// Fill in the warm tier — the stored L1/L2 rungs (storage spec). This is the
+/// only place a summariser is allowed to be slow, which is precisely why it
+/// lives here and not in `run`: `assemble_context` reads these rows and must
+/// never generate them, or every turn would pay a model call per event.
+///
+/// Set `CHORUS_SUMMARY_MODEL` to use Ollama; otherwise the model-free
+/// extractive summariser writes the rows.
+fn compact_cmd(args: &[String]) -> Result<()> {
+    let mut db: Option<PathBuf> = None;
+    let mut session: Option<i64> = None;
+    let mut limit: usize = 500;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--db" => db = it.next().map(PathBuf::from),
+            "--session" => session = it.next().and_then(|v| v.parse().ok()),
+            "--limit" => limit = it.next().and_then(|v| v.parse().ok()).unwrap_or(500),
+            other => anyhow::bail!("unknown flag {other:?}"),
+        }
+    }
+    let db = db.context("--db is required")?;
+    let session = session.context("--session is required")?;
+    let s = Session::open(&db, session)?.log_permissions(true);
+
+    let before = s.uncompacted_count()?;
+    let t0 = std::time::Instant::now();
+    let r = s.compact(limit)?;
+    println!("summariser   {}", r.model);
+    println!("compacted    {} of {before} pending", r.compacted);
+    println!("remaining    {}", r.remaining);
+    println!("took         {:.1}s", t0.elapsed().as_secs_f64());
+    if r.remaining > 0 {
+        println!("\nยังเหลืออยู่ — รัน compact ซ้ำได้เลย (ทำทีละ {limit})");
+    }
+    Ok(())
+}
+
+// ---- demo -----------------------------------------------------------------
+
+fn rule(title: &str) {
+    println!("\n\u{2501}\u{2501} {title} \u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}");
+}
+
+/// The in-repo mock agent, so the demo needs no API key and no network.
+///
+/// Looked up in the order a person would expect it to be found: next to this
+/// binary (the `cargo install` and `target/debug` cases), then on `PATH`, then
+/// the workspace build directory for someone running from a checkout. The
+/// error names the exact command that fixes it rather than saying "not found" —
+/// `chorus` and `acp-probe` live in different crates, which is not obvious.
+fn mock_bridge() -> Result<Vec<String>> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("acp-probe"));
+        }
+    }
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path) {
+            candidates.push(dir.join("acp-probe"));
+        }
+    }
+    for rel in ["target/debug/acp-probe", "target/release/acp-probe"] {
+        candidates.push(PathBuf::from(rel));
+    }
+
+    for c in &candidates {
+        if c.is_file() {
+            warn_if_stale(c);
+            return Ok(vec![c.to_string_lossy().into_owned(), "--serve-mock".into()]);
+        }
+    }
+    anyhow::bail!(
+        "หา acp-probe ไม่เจอ — มันอยู่คนละ crate กับ chorus\n  \
+         ในโฟลเดอร์โปรเจกต์:  cargo run -p chorus-cli -- demo\n  \
+         หรือติดตั้งให้ครบ:    cargo install --path crates/chorus-acp"
+    )
+}
+
+/// `cargo run -p chorus-cli` builds the chorus-acp *library*, not its
+/// `acp-probe` **binary** — so a stale probe from before the last change keeps
+/// being spawned, silently, and the demo shows yesterday's behaviour with no
+/// hint that anything is wrong. (That is not hypothetical: it is how a fixed
+/// mock kept reporting the old hardcoded path.)
+///
+/// Staleness is measured against chorus-acp's *sources*, not against this
+/// binary: a single `cargo build --workspace` compiles chorus-acp before
+/// chorus-cli, so "probe older than me" is true by milliseconds on every
+/// healthy build — and it stays false when neither crate was rebuilt but the
+/// mock was edited, which is exactly the case worth catching. The source path
+/// is baked in at build time, so an installed binary simply skips the check.
+fn warn_if_stale(probe: &Path) {
+    fn mtime(p: &Path) -> Option<std::time::SystemTime> {
+        std::fs::metadata(p).and_then(|m| m.modified()).ok()
+    }
+    fn newest_rs(dir: &Path) -> Option<std::time::SystemTime> {
+        let mut newest = None;
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            let t = if path.is_dir() {
+                newest_rs(&path)
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                mtime(&path)
+            } else {
+                None
+            };
+            if let Some(t) = t {
+                if newest.is_none_or(|n| t > n) {
+                    newest = Some(t);
+                }
+            }
+        }
+        newest
+    }
+
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|crates| crates.join("chorus-acp").join("src"));
+    let (Some(probe_t), Some(src_t)) = (mtime(probe), src.as_deref().and_then(newest_rs)) else {
+        return;
+    };
+    if src_t > probe_t {
+        eprintln!(
+            "\u{26a0}  acp-probe ({}) เก่ากว่าโค้ดของ chorus-acp\n   \
+             `cargo run -p chorus-cli` ไม่ได้ build binary ของ crate อื่นให้ \u{2014} \
+             เดโมจะใช้ของเก่าเงียบ ๆ\n   \
+             แก้: cargo build --workspace แล้วรันใหม่\n",
+            probe.display()
+        );
+    }
+}
+
+/// `chorus demo [--keep]`
+///
+/// The whole product in thirty seconds, against mock agents: two agents in one
+/// session, one of them hits a rate limit mid-task, and the other picks up
+/// *knowing what happened* — which is the entire reason this app exists.
+///
+/// It runs on the in-repo mock bridge, so it needs no API key, no login and no
+/// network. Nothing here is staged output: every number printed is read back
+/// out of the ledger the run just wrote.
+fn demo_cmd(args: &[String]) -> Result<()> {
+    let keep = args.iter().any(|a| a == "--keep");
+    let dir = std::env::temp_dir().join(format!("chorus-demo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let db = dir.join("store.db");
+    std::fs::write(
+        dir.join("repo.ts"),
+        "export async function findAll(ids: string[]) {\n  // …\n}\n",
+    )?;
+
+    let bridge = mock_bridge()?;
+    let goal = "ทำหน้า order list ให้ต่ำกว่า 200ms";
+
+    println!("\u{2501}\u{2501} Chorus demo \u{2501}\u{2501} agent ปลอมล้วน ไม่ต้องมี API key \u{2501}\u{2501}");
+    println!("workspace: {}", dir.display());
+
+    let mut s = Session::create(&db, &dir, "demo")?.with_bridge(bridge.clone());
+    let sess = s.session_id();
+
+    // ---- 1. Claude works -------------------------------------------------
+    rule("1. Claude เริ่มงาน");
+    s.run_turn("claude-opus", "anthropic", goal, Policy::AllowAll)?;
+    s.run_turn(
+        "claude-opus",
+        "anthropic",
+        "เจออะไรบ้าง ทำต่อได้เลย",
+        Policy::AllowAll,
+    )?;
+    let n_before = s.transcript()?.len();
+    println!("  เทิร์นที่ 1–2 ตอบโดย claude-opus · ledger มี {n_before} event");
+
+    // A decision worth carrying across the handoff.
+    {
+        let store = Store::open(&db)?;
+        let c = store.conn();
+        let a = actor::intern(c, "claude-opus", "anthropic")?;
+        ledger::append(
+            c,
+            &NewEvent::new(
+                sess,
+                EventKind::Decision,
+                a,
+                "ใช้ eager loading ไม่ใช่ N+1 — ห้ามแก้ schema เพิ่ม",
+            ),
+        )?;
+    }
+    let s = Session::open(&db, sess)?.with_bridge(bridge.clone());
+
+    // ---- 2. warm tier ----------------------------------------------------
+    rule("2. ย่อความจำไว้ล่วงหน้า (warm tier)");
+    let r = s.compact(500)?;
+    println!("  สรุปเก็บไว้ {} รายการ ด้วย {}", r.compacted, r.model);
+    println!("  (ทำตอนนี้ เพื่อที่ตอนประกอบ context จะไม่ต้องสร้างใหม่)");
+
+    // ---- 3. the rate limit ----------------------------------------------
+    rule("3. Claude ชนลิมิตกลางงาน");
+    let mut s = Session::open(&db, sess)?.with_bridge(bridge.clone());
+    let chain = vec![
+        AgentSpec {
+            name: "claude-opus".into(),
+            provider: "anthropic".into(),
+            bridge: {
+                let mut b = bridge.clone();
+                b.push("--fail".into());
+                b.push("Error: 429 rate limit exceeded".into());
+                b
+            },
+        },
+        AgentSpec {
+            name: "codex".into(),
+            provider: "openai".into(),
+            bridge: bridge.clone(),
+        },
+    ];
+    let relay = s.run_relay(&chain, "เขียน eager-load ใน findAll แล้วรัน test", Policy::AllowAll)?;
+    for (from, to, why) in &relay.handoffs {
+        println!("  {from} ตอบไม่ได้ ({})", why.as_phrase());
+        println!("  Chorus ส่งไม้ต่อให้ {to} เองโดยไม่ถาม");
+    }
+    println!("  เทิร์นนี้ตอบโดย: {}", relay.answered_by);
+
+    // ---- 4. what the second agent actually received ----------------------
+    rule("4. สิ่งที่ codex ได้รับตอนรับช่วง  \u{2190} หัวใจของแอปนี้");
+    let brief_json = {
+        let store = Store::open(&db)?;
+        let c = store.conn();
+        let evs = ledger::history(c, sess, 400)?;
+        let ho = evs
+            .iter()
+            .rev()
+            .find(|e| e.kind == EventKind::Handoff)
+            .context("no handoff recorded")?;
+        ledger::body(c, ho)?
+    };
+    let brief: serde_json::Value = serde_json::from_str(&brief_json).unwrap_or_default();
+    let list = |k: &str| -> Vec<String> {
+        brief[k]
+            .as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_str()).map(str::to_string).collect())
+            .unwrap_or_default()
+    };
+    println!("  goal      {}", brief["goal"].as_str().unwrap_or("—"));
+    for d in list("done") {
+        println!("  done      {d}");
+    }
+    for p in list("pending") {
+        println!("  pending   {p}");
+    }
+    for f in list("files") {
+        println!("  files     {f}");
+    }
+    let diff_len = brief["diff"].as_str().unwrap_or("").len();
+    println!("  diff      {diff_len} bytes จาก checkpoint");
+
+    // ---- 5. the comparison ----------------------------------------------
+    rule("5. เทียบกับการทำมือ");
+    let ctx = s.assemble_context(120_000)?;
+    let counter = CachedCounter::new(HeuristicCounter);
+    let ctx_tokens = counter.count(&ctx);
+    let ts = s.task_state()?;
+    println!("  ไม่มี Chorus   codex เริ่มจากศูนย์ — ไม่รู้ goal, ไม่รู้ว่าอะไรทำไปแล้ว,");
+    println!("                 ไม่รู้ข้อห้าม, ไม่เห็น diff · เพื่อนต้องเล่าใหม่เองทุกครั้ง");
+    println!("  มี Chorus      {ctx_tokens} token ประกอบจาก ledger อัตโนมัติ");
+    println!("                 goal ✓ · done {} ข้อ · ไฟล์ที่แตะ {} · diff ✓",
+        ts.done.len(),
+        list("files").len());
+
+    // ---- 6. one memory, many files ---------------------------------------
+    rule("6. ความจำก้อนเดียว ฉายออกไปหลายไฟล์");
+    let mut seen = Vec::new();
+    for f in ["CLAUDE.md", "AGENTS.md", "GEMINI.md"] {
+        if let Ok(t) = std::fs::read_to_string(dir.join(f)) {
+            seen.push((f, t.len()));
+        }
+    }
+    if seen.is_empty() {
+        println!("  (ยังไม่มี fact ให้ฉาย — projector เขียนเมื่อมีความจำหรือ task state)");
+    } else {
+        for (f, n) in &seen {
+            println!("  {f:<12} {n} bytes");
+        }
+        println!("  เนื้อเดียวกันทั้งหมด ต่างแค่ชื่อไฟล์ที่แต่ละเจ้าไปอ่าน");
+        println!("  แก้ที่เดียว ไม่ต้องไล่แก้สามที่");
+    }
+
+    // ---- 7. the ledger ---------------------------------------------------
+    rule("7. ledger เป็นของแอป ไม่ใช่ของ provider");
+    let store = Store::open(&db)?;
+    let c = store.conn();
+    for e in ledger::history(c, sess, 400)? {
+        let who = actor::name(c, e.actor).unwrap_or_else(|_| "?".into());
+        let body = ledger::body(c, &e).unwrap_or_default();
+        let kind = match e.kind {
+            EventKind::Msg => "msg",
+            EventKind::ToolCall => "tool",
+            EventKind::ToolResult => "result",
+            EventKind::Diff => "diff",
+            EventKind::Decision => "decision",
+            EventKind::Handoff => "handoff",
+            EventKind::Summary => "summary",
+        };
+        let line = if e.kind == EventKind::Handoff {
+            let b: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            format!(
+                "{} \u{2192} {} ({})",
+                b["handoff"]["from"].as_str().unwrap_or("?"),
+                b["handoff"]["to"].as_str().unwrap_or("?"),
+                b["handoff"]["reason"].as_str().unwrap_or("handoff"),
+            )
+        } else {
+            body.lines().next().unwrap_or("").chars().take(52).collect()
+        };
+        println!("  #{:<3} {:<12} {:<9} {}", e.seq, who, kind, line);
+    }
+    println!("\n  สองเจ้าคนละบริษัท อยู่ในเทรดเดียวกัน เรียงต่อกันจริง ๆ");
+    println!("  ถ้าปิดแอปตอนนี้แล้วเปิดใหม่ ทุกอย่างยังอยู่ — ไม่ได้ฝากไว้กับ provider ไหนเลย");
+
+    rule("จบ");
+    println!("  ลองเองต่อได้:");
+    println!("    chorus run {} \"<โจทย์>\" --db {} --yes", dir.display(), db.display());
+    println!("    chorus compact --db {} --session {sess}", db.display());
+    println!("    chorus context --db {} --session {sess}   # ดูว่าเจ้าต่อไปได้อะไรไปจริง ๆ", db.display());
+    if keep {
+        println!("\n  เก็บไว้ที่ {}", dir.display());
+    } else {
+        let _ = std::fs::remove_dir_all(&dir);
+        println!("\n  (ลบ workspace ชั่วคราวแล้ว — ใส่ --keep ถ้าอยากเก็บไว้ดู)");
+    }
+    Ok(())
+}
+
+/// `chorus doctor`
+///
+/// Why a turn will or will not run, before you try it. Every check here is the
+/// same one the macOS Settings pane makes — the two must never disagree, so
+/// they call the same code (`chorus_cli::agents`).
+///
+/// Nothing here logs in, reads a credential file, or touches the network.
+fn doctor_cmd() -> Result<()> {
+    use chorus_cli::agents::{list_agents, AuthState};
+
+    println!("\u{2501}\u{2501} agents \u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}");
+    let agents = list_agents();
+    let mut ready = 0;
+    for a in &agents {
+        let (mark, state) = match a.auth {
+            AuthState::Ok => ("\u{25cf}", "พร้อมใช้"),
+            AuthState::NeedsLogin => ("\u{25cf}", "ยังไม่ได้ login"),
+            AuthState::MissingCli => ("\u{25cb}", "ยังไม่ได้ติดตั้ง CLI"),
+        };
+        if matches!(a.auth, AuthState::Ok) {
+            ready += 1;
+        }
+        println!("  {mark} {:<8} {:<22} {}", a.label, state, a.detail);
+        if !matches!(a.auth, AuthState::Ok) {
+            println!("      แก้ด้วย: {}", a.hint);
+        }
+        println!("      bridge:  {}", a.bridge.join(" "));
+        let models: Vec<String> = a
+            .models
+            .iter()
+            .map(|m| if m.is_default { format!("{}*", m.id) } else { m.id.clone() })
+            .collect();
+        let src = match a.model_source {
+            chorus_cli::agents::ModelSource::Probed => "ถามจาก agent แล้ว",
+            chorus_cli::agents::ModelSource::Env => "จาก env",
+            chorus_cli::agents::ModelSource::Fallback => "ยังไม่เคยถาม — เป็นค่าเดา รัน `chorus models` เพื่อดึงของจริง",
+        };
+        println!("      models:  {}  (* = ดีฟอลต์)", models.join(", "));
+        println!("               {src}");
+        println!();
+    }
+
+    println!("\u{2501}\u{2501} สรุป \u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}");
+    match ready {
+        0 => println!("  ยังรันไม่ได้เลย — ต้อง login อย่างน้อยหนึ่งเจ้าก่อน"),
+        1 => println!(
+            "  รันได้ 1 เจ้า — พอทำงานได้ แต่ยังสลับตอนชนลิมิตไม่ได้\n  \
+             (ต้องมีอย่างน้อย 2 เจ้าถึงจะได้ failover กับ compare)"
+        ),
+        n => println!("  รันได้ {n} เจ้า — สลับตอนชนลิมิตและเทียบหลายตัวได้ครบ"),
+    }
+
+    println!("\n\u{2501}\u{2501} env ที่ override ได้ \u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}");
+    for (key, what) in [
+        ("CHORUS_CLAUDE_BRIDGE", "คำสั่ง bridge ของ Claude"),
+        ("CHORUS_CODEX_BRIDGE", "คำสั่ง bridge ของ Codex"),
+        ("CHORUS_CLAUDE_MODELS", "รายการโมเดล Claude (id=ชื่อ, คั่นจุลภาค)"),
+        ("CHORUS_CODEX_MODELS", "รายการโมเดล Codex"),
+        ("CHORUS_SUMMARY_MODEL", "โมเดล Ollama สำหรับย่อ (ว่าง = ใช้ extractive)"),
+        ("CHORUS_COMPACT_BUDGET_MS", "เพดานเวลาต่อรอบ compact (ดีฟอลต์ 3000)"),
+    ] {
+        match std::env::var(key) {
+            Ok(v) if !v.trim().is_empty() => println!("  {key:<26} = {v}"),
+            _ => println!("  {key:<26}   (ไม่ได้ตั้ง — {what})"),
+        }
+    }
     Ok(())
 }

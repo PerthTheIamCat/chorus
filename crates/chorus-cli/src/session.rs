@@ -16,6 +16,9 @@ use chorus_core::context::{AssembleInput, Assembler, Budget, TurnItem};
 use chorus_core::handoff::{Brief, BriefInput, HandoffMeta, HandoffReason};
 use chorus_core::mcp::McpServer;
 use chorus_core::projector::{self, AgentFile, Drift, Projection};
+use chorus_acp::sandbox;
+use chorus_core::mcp_config;
+use chorus_core::skills;
 use chorus_core::render::ContextItem;
 use chorus_core::tokens::{CachedCounter, HeuristicCounter};
 use chorus_core::{actor, ledger, memory, Event, EventKind, NewEvent, Store};
@@ -44,6 +47,28 @@ impl Policy {
         }
     }
 
+    /// Does this policy promise the user that nothing gets written?
+    pub fn restrictive(self) -> bool {
+        matches!(self, Policy::DenyAll | Policy::ReadOnly)
+    }
+
+    /// The ACP session mode this policy needs the agent to be in.
+    ///
+    /// Answering `session/request_permission` is not enforcement: an agent
+    /// that never asks is never stopped, and Codex does not ask before running
+    /// shell commands. The restriction has to live in the agent's own sandbox,
+    /// and the mode is how ACP asks for it. `read-only` is Codex's
+    /// "ask for approval" preset — it routes actions back to us, which is what
+    /// both `DenyAll` and `ReadOnly` need; `agent` is "approve for me".
+    /// `agent-full-access` is deliberately never requested: it grants reach to
+    /// any file on the machine, which nothing in this CLI promises.
+    pub fn mode_id(self) -> &'static str {
+        match self {
+            Policy::DenyAll | Policy::ReadOnly => "read-only",
+            Policy::AllowAll => "agent",
+        }
+    }
+
     fn decide(self, ask: &PermissionAsk) -> Permission {
         let allow = match self {
             Policy::DenyAll => false,
@@ -53,12 +78,6 @@ impl Policy {
                 k == "read" || k.contains("read") || k == "fetch" || k == "search"
             }
         };
-        eprintln!(
-            "  permission: {} ({}) — {}",
-            ask.tool,
-            ask.kind,
-            if allow { "ALLOW" } else { "DENY" }
-        );
         if allow {
             Permission::Allow
         } else {
@@ -126,6 +145,150 @@ pub struct HandoffResult {
     pub agent_seqs: Vec<i64>,
     pub stop_reason: String,
 }
+/// The never-trimmed tier of the context window.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskState {
+    pub goal: String,
+    pub done: Vec<String>,
+    pub pending: Vec<String>,
+    pub constraints: Vec<String>,
+}
+
+impl TaskState {
+    /// Compact plain text — the model reads this, so it carries no ids, no
+    /// timestamps and no field it would not act on.
+    pub fn render(&self) -> String {
+        let mut s = String::new();
+        if !self.goal.trim().is_empty() {
+            s.push_str("goal: ");
+            s.push_str(self.goal.trim());
+            s.push('\n');
+        }
+        for (label, items) in [
+            ("done", &self.done),
+            ("pending", &self.pending),
+            ("constraints", &self.constraints),
+        ] {
+            if items.is_empty() {
+                continue;
+            }
+            s.push_str(label);
+            s.push_str(":\n");
+            for i in items {
+                s.push_str("  - ");
+                s.push_str(i.trim());
+                s.push('\n');
+            }
+        }
+        s
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.goal.trim().is_empty() && self.done.is_empty() && self.pending.is_empty()
+    }
+}
+
+/// What one compaction pass did.
+#[derive(Debug, Clone)]
+pub struct CompactReport {
+    pub compacted: usize,
+    pub remaining: usize,
+    /// Which summariser produced these rows, e.g. `ollama:qwen2.5:3b`.
+    pub model: String,
+    pub took_ms: u64,
+    /// True when the pass stopped on the clock rather than finishing its
+    /// batch — the signal that the summariser is slow, not that anything failed.
+    pub hit_budget: bool,
+}
+
+fn clip(text: &str, max_chars: usize) -> String {
+    let line = text.trim();
+    let first = line.lines().next().unwrap_or("").trim();
+    if first.chars().count() <= max_chars {
+        return first.to_string();
+    }
+    let mut out: String = first.chars().take(max_chars).collect();
+    out.push('\u{2026}');
+    out
+}
+
+fn str_list(v: &serde_json::Value, key: &str) -> Vec<String> {
+    v.get(key)
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Is this tool-result body nothing but "<title> → completed"?
+///
+/// Deliberately narrow: only the statuses that mean "it worked and there is
+/// nothing to report". Anything else — failed, rejected, a status we have not
+/// seen — reaches the next agent unchanged, because the cost of dropping a
+/// line that mattered is much higher than the tokens it saves.
+fn is_bare_success(body: &str) -> bool {
+    let Some((_, status)) = body.rsplit_once(" → ") else {
+        return false;
+    };
+    matches!(status.trim(), "completed" | "success" | "ok")
+}
+
+/// `CHORUS_ACP_LOG=<path>` writes every JSON-RPC frame, both directions, to a
+/// file.
+///
+/// Off by default and not a flag: it records whatever the config puts in
+/// `session/new`, which includes MCP `env` values — that is to say, API keys.
+/// It is the only way to answer "did the agent actually receive that server",
+/// so it exists; making it an env var the user has to type is the point.
+fn acp_log() -> Option<chorus_acp::Log> {
+    let path = std::env::var("CHORUS_ACP_LOG").ok()?;
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()?;
+    Some(std::sync::Arc::new(std::sync::Mutex::new(
+        Box::new(f) as Box<dyn std::io::Write + Send>
+    )))
+}
+
+/// Note, without stopping, that the agent would not confirm the restricted
+/// mode we asked for.
+///
+/// This used to refuse the turn, on the principle that a safety flag we cannot
+/// honour should fail closed. Running it against the real bridges showed that
+/// was the wrong lever: `claude-agent-acp` answers neither
+/// `session/set_config_option` nor `session/set_mode`, so the rule blocked
+/// every Claude turn in the app — while Codex, which *does* answer and reports
+/// `read-only` back, writes files anyway. Confirmation turned out to predict
+/// nothing at all.
+///
+/// What actually keeps the promise is the snapshot-and-revert guard around the
+/// turn, which needs no cooperation from the agent. So the mode request stays
+/// (free, and correct the day a bridge honours it), the outcome is reported,
+/// and the guard does the work.
+fn note_mode(agent_name: &str, outcome: &chorus_acp::codex::ModeOutcome, log: bool) {
+    if !log || outcome.requested.is_empty() || outcome.confirmed() {
+        return;
+    }
+    eprintln!(
+        "  ⚠  {agent_name}: ไม่ยืนยันโหมด {} (ช่องทาง {}) — Chorus จะเช็คไฟล์หลังจบเทิร์นแทน",
+        outcome.requested, outcome.via
+    );
+}
+
+fn push_unique(v: &mut Vec<String>, item: &str) {
+    let item = item.trim();
+    if item.is_empty() || v.iter().any(|x| x == item) {
+        return;
+    }
+    v.push(item.to_string());
+}
 
 pub struct Session {
     store: Store,
@@ -136,10 +299,14 @@ pub struct Session {
     /// point it at the in-repo mock). `None` means resolve per agent name
     /// via `chorus_acp::codex::bridge_for`.
     forced_bridge: Option<Vec<String>>,
+    /// Echo permission decisions to stderr (CLI only — see `log_permissions`).
+    log_permissions: bool,
     /// Shadow git repo for the workspace. `None` when `git` is unavailable
     /// or the workspace can't host one — the session still runs, handoffs
     /// just carry no auto-diff.
     checkpoint: Option<Checkpoint>,
+    /// agent name → the model id the user picked for it, if any.
+    models: std::collections::HashMap<String, String>,
     /// Sha the handoff brief's diff is measured from — the shadow repo's
     /// HEAD when the session opened. Immutable for the life of the `Session`.
     base_ckpt: String,
@@ -181,7 +348,9 @@ impl Session {
             cwd,
             user,
             forced_bridge: None,
+            log_permissions: false,
             checkpoint,
+            models: std::collections::HashMap::new(),
             base_ckpt,
             mcp,
         })
@@ -209,7 +378,9 @@ impl Session {
             cwd,
             user,
             forced_bridge: None,
+            log_permissions: false,
             checkpoint,
+            models: std::collections::HashMap::new(),
             base_ckpt,
             mcp,
         })
@@ -244,6 +415,36 @@ impl Session {
             .as_ref()
             .and_then(|ck| ck.diff_since(&self.base_ckpt).ok())
             .unwrap_or_default()
+    }
+
+    /// Undo anything the agent changed in the workspace during a restrictive
+    /// turn, and say so. Called only when the policy promised read-only.
+    ///
+    /// This catches writes *inside* the workspace. It cannot catch writes
+    /// outside it, or anything else a shell command did — an agent that
+    /// ignores the mode can still reach the rest of the machine, and no part of
+    /// Chorus can stop it today. That gap is the reason the design calls for a
+    /// real Seatbelt profile; until then the flag's help says what it covers.
+    fn revert_if_touched(&self, agent_name: &str, base: &str) -> Result<()> {
+        let Some(ck) = self.checkpoint.as_ref() else {
+            return Ok(());
+        };
+        let diff = ck.diff_since(base).unwrap_or_default();
+        if diff.trim().is_empty() {
+            return Ok(());
+        }
+        let files: Vec<String> = diff
+            .lines()
+            .filter_map(|l| l.strip_prefix("+++ b/"))
+            .map(str::to_string)
+            .collect();
+        ck.restore(base)?;
+        anyhow::bail!(
+            "{agent_name} แก้ไฟล์ทั้งที่สั่ง --read-only — ย้อนกลับให้แล้ว ({} ไฟล์: {})
+               bridge ของ agent ตัวนี้ไม่เคารพโหมด — ไฟล์นอก workspace เราย้อนกลับให้ไม่ได้",
+            files.len(),
+            files.join(", "),
+        )
     }
 
     /// Take a manual checkpoint of the current tree. Returns the new sha.
@@ -565,14 +766,33 @@ impl Session {
             });
             handoffs.push((from.clone(), spec.name.clone(), reason));
 
+            // The incoming agent must inherit the *session's* objective, not
+            // the sentence that happened to be in flight when the outgoing one
+            // fell over. Getting this wrong is subtle and expensive: the relay
+            // still "works", but the new agent optimises for the wrong thing.
+            let ts = self.task_state().unwrap_or_default();
+            let goal = if ts.goal.trim().is_empty() {
+                user_text.to_string()
+            } else {
+                ts.goal.clone()
+            };
+            let mut pending = ts.pending.clone();
+            // On the first turn the instruction *is* the goal, and repeating it
+            // under `pending` spends the never-trimmed tier saying the same
+            // sentence twice — which also reads, to the receiving agent, as two
+            // separate things to do.
+            if user_text.trim() != goal.trim() {
+                push_unique(&mut pending, user_text);
+            }
+
             let h = self.handoff(
                 &spec.name,
                 &spec.provider,
                 reason,
-                user_text,
-                Vec::new(),
-                vec!["carry out the instruction above".into()],
-                Vec::new(),
+                &goal,
+                ts.done.clone(),
+                pending,
+                ts.constraints.clone(),
                 String::new(),
                 policy,
             );
@@ -609,6 +829,155 @@ impl Session {
     /// Rebuild the hot context from the ledger, sized to `budget` tokens.
     /// This is the "session is the app's" invariant in practice: history for
     /// the next turn comes from here, never from a provider's session state.
+    /// What the session is for, what is already settled, and what is still
+    /// open. This is the `TaskState` tier — 5% of the window and never
+    /// trimmed — so it must not be empty on a session that has said anything.
+    ///
+    /// Nothing here is invented: the goal is the first thing the human asked
+    /// for, `pending`/`constraints` come from the most recent handoff brief,
+    /// and `done` is decisions plus the *stored* L2 gists of recent agent
+    /// turns. No summariser runs on this path.
+    pub fn task_state(&self) -> Result<TaskState> {
+        let c = self.store.conn();
+        let events = ledger::history(c, self.sess, 400)?;
+        let mut ts = TaskState::default();
+
+        for e in &events {
+            if e.kind == EventKind::Msg && e.actor == self.user {
+                ts.goal = clip(&ledger::body(c, e)?, 240);
+                break;
+            }
+        }
+
+        // The last handoff brief is the only place a human states what is
+        // still pending, so it wins over anything we could infer.
+        if let Some(e) = events.iter().rev().find(|e| e.kind == EventKind::Handoff) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&ledger::body(c, e)?) {
+                if ts.goal.trim().is_empty() {
+                    ts.goal = v["goal"].as_str().unwrap_or_default().to_string();
+                }
+                ts.pending = str_list(&v, "pending");
+                ts.constraints = str_list(&v, "constraints");
+            }
+        }
+
+        for e in &events {
+            if e.kind == EventKind::Decision {
+                push_unique(&mut ts.done, ledger::body(c, e)?.trim());
+            }
+        }
+        // `done` carries only what actually happened: decisions someone
+        // recorded, and the files that changed. Agent chatter ("looking at
+        // that file for you") is not an accomplishment — summarising prose
+        // into this field is how a brief quietly fills with noise, and the
+        // receiving agent then treats filler as settled fact.
+        //
+        // The file list comes from the workspace, not from `Diff` events.
+        // Diff events only exist when the *client* performed the write, and
+        // the agents that matter here do not write that way: Codex shells out.
+        // Measured on a real two-provider session — Codex created a file and
+        // the ledger recorded zero Diff events, so a brief built from them
+        // told the next agent nothing had been touched. The shadow repo sees
+        // the file either way.
+        let touched: Vec<String> = self
+            .checkpoint
+            .as_ref()
+            .and_then(|ck| ck.files_since(&self.base_ckpt).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|f| !projector::AgentFile::is_projected(f))
+            .collect();
+        if !touched.is_empty() {
+            let shown: Vec<&str> = touched.iter().take(6).map(String::as_str).collect();
+            let more = touched.len().saturating_sub(shown.len());
+            let line = if more > 0 {
+                format!("edited {}: {} (+{more} more)", touched.len(), shown.join(", "))
+            } else {
+                format!("edited {}: {}", touched.len(), shown.join(", "))
+            };
+            push_unique(&mut ts.done, &line);
+        }
+        Ok(ts)
+    }
+
+    /// Fill in the rungs this session is missing (storage spec: the warm
+    /// tier). Deliberately *not* called from `run_turn` — this is where the
+    /// summariser is allowed to be slow, so `assemble_context` never is.
+    /// `limit` bounds one pass; call it again to catch up a long session.
+    /// How long one background compaction pass may take before it stops and
+    /// leaves the rest for the next one. Three seconds is chosen from the
+    /// other side of the problem: this pass shares the engine's serial queue
+    /// with turns, so it is also the longest a user's next message can be made
+    /// to wait. With the extractive summariser a pass never gets close; with a
+    /// local model 40 events could otherwise run for minutes.
+    fn compact_budget() -> std::time::Duration {
+        let ms = std::env::var("CHORUS_COMPACT_BUDGET_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(3_000);
+        std::time::Duration::from_millis(ms)
+    }
+
+    pub fn compact(&self, limit: usize) -> Result<CompactReport> {
+        let summarizer = compaction::best();
+        self.compact_with(summarizer.as_ref(), limit, Self::compact_budget())
+    }
+
+    /// The testable half of [`compact`]: summariser and time budget injected.
+    ///
+    /// Stops at whichever comes first — `max_events` or `budget` — and always
+    /// reports what is left, so the caller can simply run it again. Bounding by
+    /// wall clock rather than only by count is what makes this safe to call
+    /// after every turn no matter how slow the summariser is.
+    pub fn compact_with(
+        &self,
+        summarizer: &dyn compaction::Summarizer,
+        max_events: usize,
+        budget: std::time::Duration,
+    ) -> Result<CompactReport> {
+        let c = self.store.conn();
+        let todo = compaction::uncompacted(c, self.sess, max_events)?;
+        if todo.is_empty() {
+            return Ok(CompactReport {
+                compacted: 0,
+                remaining: 0,
+                model: "nothing to do".into(),
+                took_ms: 0,
+                hit_budget: false,
+            });
+        }
+        let model = summarizer.label();
+        let started = std::time::Instant::now();
+        let mut compacted = 0usize;
+        let mut hit_budget = false;
+        for seq in todo {
+            let e = ledger::get(c, seq)?;
+            let body = ledger::body(c, &e)?;
+            let r = compaction::rungs_for(summarizer, &body);
+            compaction::save_rungs(c, seq, &r, &model)?;
+            compacted += 1;
+            // Checked *after* the write, so a pass always makes progress even
+            // when one event alone costs more than the whole budget.
+            if started.elapsed() >= budget {
+                hit_budget = true;
+                break;
+            }
+        }
+        Ok(CompactReport {
+            compacted,
+            remaining: compaction::uncompacted_count(c, self.sess)? as usize,
+            model,
+            took_ms: started.elapsed().as_millis() as u64,
+            hit_budget,
+        })
+    }
+
+    /// How many events still have no stored rungs — what the shell shows to
+    /// decide whether a background compaction pass is worth running.
+    pub fn uncompacted_count(&self) -> Result<i64> {
+        Ok(compaction::uncompacted_count(self.store.conn(), self.sess)?)
+    }
+
     pub fn assemble_context(&self, budget: i64) -> Result<String> {
         let c = self.store.conn();
         let events = ledger::history(c, self.sess, 400)?;
@@ -620,14 +989,34 @@ impl Session {
             })
             .collect::<Result<_>>()?;
 
+        // The warm tier, read in one query. Anything not compacted yet falls
+        // back to the model-free `Extractive` — never to `compaction::best()`,
+        // which may reach for Ollama and would put a network round trip per
+        // event on the critical path of every turn.
+        let rungs = compaction::load_session_rungs(c, self.sess)?;
+
+        // A tool result that only says the call finished carries no
+        // information the tool call above it did not already carry, and it
+        // costs a full line every time. On a real two-provider session that
+        // was ~30% of the conversation tier spent on "X → completed".
+        // Failures stay: those change what the next agent should do.
+        let bodies: Vec<(Event, String)> = bodies
+            .into_iter()
+            .filter(|(e, body)| {
+                e.kind != EventKind::ToolResult || !is_bare_success(body)
+            })
+            .collect();
+
         let n = bodies.len();
-        let summarizer = compaction::best();
         let turns: Vec<TurnItem> = bodies
             .iter()
             .enumerate()
             .map(|(i, (e, body))| {
                 let who = actor::name(c, e.actor).unwrap_or_else(|_| "?".into());
-                let r = compaction::rungs_for(summarizer.as_ref(), body);
+                let r = match rungs.get(&e.seq) {
+                    Some(r) => r.clone(),
+                    None => compaction::rungs_for(&compaction::Extractive, body),
+                };
                 TurnItem {
                     text_l1: Some(format!("{who}: {}", r.l1)),
                     text_l2: Some(format!("{who}: {}", r.l2)),
@@ -663,7 +1052,7 @@ impl Session {
             system: "You are one of several agents sharing this session. The context below \
                      was assembled by Chorus from the shared ledger."
                 .into(),
-            task_state: String::new(),
+            task_state: self.task_state()?.render(),
             memory: memory_items,
             turns,
             code,
@@ -681,8 +1070,68 @@ impl Session {
         text: &str,
         policy: Policy,
     ) -> Result<TurnOutcome> {
-        let mut decide = |ask: &PermissionAsk| policy.decide(ask);
-        self.one_turn_decide(agent_name, bridge, text, &mut decide)
+        let log = self.log_permissions;
+        let mut decide = |ask: &PermissionAsk| {
+            let d = policy.decide(ask);
+            if log {
+                eprintln!(
+                    "  permission: {} ({}) — {}",
+                    ask.tool,
+                    ask.kind,
+                    if d == Permission::Allow {
+                        "ALLOW"
+                    } else {
+                        "DENY"
+                    }
+                );
+            }
+            d
+        };
+        // Asking for the mode is not the same as getting it. Measured against
+        // @agentclientprotocol/codex-acp on 12 Sep 2026: it accepts
+        // `set_config_option`, reports `read-only` back as current, then writes
+        // files — inside *and* outside the workspace — without one
+        // `session/request_permission`. So for a restrictive policy we take our
+        // own snapshot first and check the workspace afterwards: not prevention,
+        // but the difference between a promise we keep and one we only print.
+        // Project memory *before* snapshotting. The projection writes AGENTS.md
+        // itself, and a guard taken earlier would blame the agent for our own
+        // file. (It did, the first time this ran.)
+        self.project_memory(agent_name);
+        let guard = policy
+            .restrictive()
+            .then(|| self.snapshot("read-only guard").ok())
+            .flatten();
+        let out = self.one_turn_decide(agent_name, bridge, text, policy.mode_id(), &mut decide);
+        if let Some(base) = guard {
+            self.revert_if_touched(agent_name, &base)?;
+        }
+        out
+    }
+
+    /// Echo every permission decision to stderr. Off by default: a library
+    /// that prints is a library the GUI cannot use quietly. The CLI turns it
+    /// on because there a human is watching the stream.
+    /// Pin which model an agent should use, by the id the agent itself
+    /// reports (`chorus models`). Without this the agent runs whatever its own
+    /// config defaults to — which is what the app's model picker did for its
+    /// whole life before this existed: it changed a label and nothing else.
+    pub fn set_model(&mut self, agent_name: &str, model_id: &str) {
+        if model_id.trim().is_empty() {
+            self.models.remove(agent_name);
+        } else {
+            self.models.insert(agent_name.to_string(), model_id.to_string());
+        }
+    }
+
+    /// What model is pinned for `agent_name`, if any.
+    pub fn model_for(&self, agent_name: &str) -> Option<&str> {
+        self.models.get(agent_name).map(String::as_str)
+    }
+
+    pub fn log_permissions(mut self, on: bool) -> Self {
+        self.log_permissions = on;
+        self
     }
 
     fn one_turn_decide(
@@ -690,20 +1139,68 @@ impl Session {
         agent_name: &str,
         bridge: &[String],
         text: &str,
+        mode: &str,
         decide: &mut dyn FnMut(&PermissionAsk) -> Permission,
     ) -> Result<TurnOutcome> {
         self.project_memory(agent_name);
-        let mcp_servers = match &self.mcp {
-            Some(m) => serde_json::json!([m.mcp_server_entry()]),
-            None => serde_json::json!([]),
+        // One MCP list for whoever is answering this turn. ACP lets the client
+        // decide what an agent can reach, so the servers come from
+        // `.chorus/mcp.json` rather than from each CLI's own config — that is
+        // the whole point: declare a server once, and Claude and Codex both
+        // have it, with no per-agent file to keep in step.
+        let mut servers: Vec<serde_json::Value> = mcp_config::load(&self.cwd)
+            .into_iter()
+            .map(|s| s.entry)
+            .collect();
+        if let Some(m) = &self.mcp {
+            servers.push(m.mcp_server_entry());
+        }
+        let mcp_servers = serde_json::Value::Array(servers);
+        // Confine the agent's writes with the OS before the turn, not just
+        // revert them after it. `mode` already told us how much this policy
+        // promised; the sandbox is what makes that promise true for files the
+        // shadow repo cannot reach.
+        let profile = if mode == "read-only" {
+            sandbox::Profile::ReadOnly
+        } else {
+            sandbox::Profile::Workspace
         };
+        let command = match sandbox::wrap(bridge, &self.cwd, profile) {
+            Ok(c) => c,
+            Err(why) => {
+                if self.log_permissions {
+                    eprintln!("  ⚠  ไม่ได้เปิด sandbox ({why}) — เหลือแค่ย้อนไฟล์หลังเทิร์น");
+                }
+                bridge.to_vec()
+            }
+        };
+
         let cfg = CodexConfig {
-            command: bridge.to_vec(),
+            command,
             mcp_servers,
-            ..Default::default()
+            mode: Some(mode.to_string()),
+            model: self.models.get(agent_name).cloned(),
+            log: acp_log(),
         };
         let mut agent =
             CodexAgent::start(&self.cwd, cfg).with_context(|| format!("start {agent_name}"))?;
+        note_mode(agent_name, agent.mode(), self.log_permissions);
+        if self.log_permissions {
+            match (self.models.get(agent_name), agent.model()) {
+                // Asked for one and the agent confirmed a different one: the
+                // pick did not take. Say so — the alternative is a user who
+                // thinks they switched models and is reading output from the
+                // old one.
+                (Some(want), Some(got)) if want != got => {
+                    eprintln!("  ⚠  {agent_name}: ขอ {want} แต่ได้ {got}")
+                }
+                (_, Some(got)) => eprintln!("  model: {got}"),
+                (Some(want), None) => {
+                    eprintln!("  ⚠  {agent_name}: ไม่ยืนยันโมเดล {want}")
+                }
+                (None, None) => {}
+            }
+        }
         agent.prompt(text, decide).context("agent turn")
     }
 
@@ -733,7 +1230,50 @@ impl Session {
             &NewEvent::new(self.sess, EventKind::Msg, self.user, user_text),
         )?;
         let bridge = self.resolve_bridge(agent_name, &[]);
-        let outcome = self.one_turn_decide(agent_name, &bridge, &prompt, decide)?;
+
+        // A dialog the agent never opens protects nothing. Codex writes files
+        // without sending a single `session/request_permission`, so "the user
+        // pressed Deny" has to mean something on this side too: watch for a
+        // deny, and if the workspace changed anyway, put it back.
+        //
+        // The revert is all-or-nothing for the turn. Undoing an edit the user
+        // allowed is the lesser wrong: keeping one they refused is the failure
+        // that makes the dialog a lie, and the ledger still has every event.
+        let denied = std::cell::Cell::new(false);
+        let asked = std::cell::Cell::new(false);
+        let mut watch = |ask: &PermissionAsk| {
+            asked.set(true);
+            let d = decide(ask);
+            if d == Permission::Deny {
+                denied.set(true);
+            }
+            d
+        };
+        self.project_memory(agent_name);
+        let guard = self.snapshot("turn guard").ok();
+        // An interactive caller shows the user a dialog per action, so it wants
+        // the agent to ask about everything — the same mode the restrictive
+        // policies use.
+        let outcome = self.one_turn_decide(
+            agent_name,
+            &bridge,
+            &prompt,
+            Policy::ReadOnly.mode_id(),
+            &mut watch,
+        )?;
+        // Two ways this turn breaks the promise the dialog makes. The user said
+        // no and it went ahead — or it never asked at all and wrote anyway,
+        // which is what Codex does: the person sat in front of "ask me first"
+        // and was never asked. Claude does send requests, so a turn with asks
+        // and no denials is left alone.
+        //
+        // What this cannot catch: an agent that asks about one file and quietly
+        // writes another. Closing that needs a real sandbox, not a ledger.
+        if denied.get() || !asked.get() {
+            if let Some(base) = guard.as_deref() {
+                self.revert_if_touched(agent_name, base)?;
+            }
+        }
         let agent_seqs = self.persist_outcome(&outcome, agent_actor, user_seq)?;
         Ok(TurnReport {
             user_seq,
@@ -768,7 +1308,24 @@ impl Session {
         let facts = memory::top(self.store.conn(), 1, 24)
             .map(|f| memory::render(&f))
             .unwrap_or_default();
-        if project.trim().is_empty() && facts.trim().is_empty() {
+        let task = self.task_state().map(|t| t.render()).unwrap_or_default();
+
+        // Skills are projected whichever way this agent can read them: real
+        // `.claude/skills/` files for Claude, a one-line-each index in the
+        // instruction file for everyone else.
+        let found = skills::discover(&self.cwd);
+        let skill_index = if target == AgentFile::Claude {
+            self.project_claude_skills(&found);
+            String::new()
+        } else {
+            skills::index(&found)
+        };
+
+        if project.trim().is_empty()
+            && facts.trim().is_empty()
+            && task.trim().is_empty()
+            && skill_index.trim().is_empty()
+        {
             return; // nothing to project yet
         }
 
@@ -777,10 +1334,35 @@ impl Session {
             &Projection {
                 project,
                 facts,
-                task_state: String::new(),
+                task_state: task,
+                skills: skill_index,
             },
         );
         let _ = std::fs::write(&path, out);
+    }
+
+    /// Write each skill where Claude Code's loader will find it.
+    ///
+    /// Same contract as the instruction files: our copies carry the generated
+    /// marker, and a skill the user wrote (or edited) by hand under
+    /// `.claude/skills/` is left exactly as it is. Overwriting someone's own
+    /// skill because a file of ours happens to share its name would be the
+    /// worst kind of "one set of skills".
+    fn project_claude_skills(&self, found: &[skills::Skill]) {
+        for k in found {
+            let path = self.cwd.join(k.claude_path());
+            let existing = std::fs::read_to_string(&path).ok();
+            match projector::drift_raw(existing.as_deref()) {
+                Drift::Foreign | Drift::Edited => continue,
+                Drift::Missing | Drift::Untouched => {}
+            }
+            if let Some(dir) = path.parent() {
+                if std::fs::create_dir_all(dir).is_err() {
+                    continue;
+                }
+            }
+            let _ = std::fs::write(&path, projector::render_raw(&k.body));
+        }
     }
 
     fn persist_outcome(
@@ -857,6 +1439,34 @@ impl Session {
             })
             .collect()
     }
+
+    /// Hand over with no human input at all: goal, done, pending and constraints
+    /// come from `task_state()`, the diff from the checkpoint. This is the whole
+    /// point of keeping task state in the ledger — the user should never have to
+    /// retype what the app already knows.
+    ///
+    /// Reason is `HandoffReason::Manual` — a deliberate switch with no forced
+    /// cause, which is exactly what a one-click handoff is: nobody hit a limit,
+    /// the user just wants a different agent on it.
+    pub fn handoff_auto(
+        &mut self,
+        to: &str,
+        provider: &str,
+        policy: Policy,
+    ) -> Result<HandoffResult> {
+        let ts = self.task_state()?;
+        self.handoff(
+            to,
+            provider,
+            HandoffReason::Manual,
+            &ts.goal,
+            ts.done,
+            ts.pending,
+            ts.constraints,
+            String::new(),
+            policy,
+        )
+    }
 }
 
 /// Stop reasons that mean the agent hit its own limit mid-answer — relay
@@ -893,4 +1503,131 @@ fn render_diff(path: &str, old: &str, new: &str) -> String {
     }
     s.truncate(s.trim_end().len());
     s
+}
+
+/// One row of the session picker. Deliberately not `Session::list` — it
+/// carries no shadow-git handle, no MCP server, nothing that costs anything
+/// to open, because `list_sessions` opens the store *once* for however many
+/// rows it returns, not a `Session` per row.
+pub struct SessionSummary {
+    pub id: i64,
+    pub title: String,
+    pub cwd: String,
+    pub started_ms: i64,
+    /// `t` of the newest event (an offset in ms from `started_ms`), or 0
+    /// when the session has no events yet.
+    pub last_ms: i64,
+    pub events: i64,
+    /// Distinct actor names that are not "user", in first-seen order —
+    /// which agents actually spoke in this session, not which ones a UI
+    /// might let the user pick.
+    pub agents: Vec<String>,
+    /// The first user message, clipped to ~90 chars — enough to tell
+    /// sessions apart at a glance in a list. Empty if nobody has said
+    /// anything yet.
+    pub goal: String,
+    pub forked_from: Option<i64>,
+}
+
+/// List every session in `db`, newest activity first. Two SQL statements
+/// total, regardless of how many sessions or events exist: one aggregate
+/// (event count + newest `t` per session) and one ordered scan of `event`
+/// joined to `actor` that builds every session's agent list and goal in a
+/// single pass. Opening a `Session` — and its shadow-git checkpoint, MCP
+/// listener — per row would make a picker screen the slowest thing in the
+/// app; this function exists so it never has to.
+pub fn list_sessions(db: &Path) -> Result<Vec<SessionSummary>> {
+    let store = Store::open(db).context("open store")?;
+    let c = store.conn();
+
+    struct Base {
+        id: i64,
+        title: String,
+        cwd: String,
+        started_ms: i64,
+        forked_from: Option<i64>,
+        events: i64,
+        last_ms: i64,
+    }
+
+    let mut bases = Vec::new();
+    {
+        // `event.t` is an offset in ms from *that session's own*
+        // `started_ms` (see ledger::append) — comparing it raw across
+        // sessions started at different times would rank an old session
+        // with a large offset above a genuinely more recent one. Sort by
+        // absolute activity time (`started_ms + last_ms`) instead; the
+        // `last_ms` column returned to callers stays the session-relative
+        // offset the rest of the codebase expects.
+        let mut stmt = c.prepare(
+            "SELECT s.id, s.title, s.cwd, s.started_ms, s.forked_from, \
+             COUNT(e.seq) AS events, COALESCE(MAX(e.t), 0) AS last_ms \
+             FROM session s LEFT JOIN event e ON e.sess = s.id \
+             GROUP BY s.id \
+             ORDER BY (s.started_ms + COALESCE(MAX(e.t), 0)) DESC, s.started_ms DESC",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(r) = rows.next()? {
+            bases.push(Base {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                cwd: r.get(2)?,
+                started_ms: r.get(3)?,
+                forked_from: r.get(4)?,
+                events: r.get(5)?,
+                last_ms: r.get(6)?,
+            });
+        }
+    }
+
+    // One pass over every event, ordered so "first-seen" and "first user
+    // message" both fall out for free without a second per-session query.
+    let mut per_sess: std::collections::HashMap<i64, (Vec<String>, Option<String>)> =
+        std::collections::HashMap::new();
+    {
+        let mut stmt = c.prepare(
+            "SELECT e.sess, e.kind, a.name, e.body, e.blob \
+             FROM event e JOIN actor a ON a.id = e.actor \
+             ORDER BY e.sess, e.seq",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let sess: i64 = row.get(0)?;
+            let kind: i64 = row.get(1)?;
+            let actor_name: String = row.get(2)?;
+            let body: Option<String> = row.get(3)?;
+            let blob: Option<String> = row.get(4)?;
+            let entry = per_sess.entry(sess).or_default();
+            if actor_name != "user" {
+                push_unique(&mut entry.0, &actor_name);
+            } else if entry.1.is_none() && EventKind::from_i64(kind) == Some(EventKind::Msg) {
+                let text = match body {
+                    Some(b) => b,
+                    None => match blob {
+                        Some(id) => chorus_core::blob::get_text(c, &chorus_core::BlobId(id))?,
+                        None => String::new(),
+                    },
+                };
+                entry.1 = Some(clip(&text, 90));
+            }
+        }
+    }
+
+    Ok(bases
+        .into_iter()
+        .map(|b| {
+            let (agents, goal) = per_sess.remove(&b.id).unwrap_or_default();
+            SessionSummary {
+                id: b.id,
+                title: b.title,
+                cwd: b.cwd,
+                started_ms: b.started_ms,
+                last_ms: b.last_ms,
+                events: b.events,
+                agents,
+                goal: goal.unwrap_or_default(),
+                forked_from: b.forked_from,
+            }
+        })
+        .collect())
 }

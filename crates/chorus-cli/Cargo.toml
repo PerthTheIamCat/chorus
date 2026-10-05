@@ -18,3 +18,6 @@ chorus-core = { path = "../chorus-core" }
 chorus-acp = { path = "../chorus-acp" }
 anyhow.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
