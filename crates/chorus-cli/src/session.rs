@@ -1379,6 +1379,16 @@ impl Session {
                 prompt_text.push('\n');
             }
         }
+        // Agents skip a tool they were only told about at connect time and
+        // answer "remembered" from their own head, so the rule rides with
+        // every turn. Costs one line; the fact then reaches the Memory pane.
+        if self.mcp.is_some() {
+            prompt_text.push_str(
+                "\n\n(Chorus: if the user asks you to remember something, or states a durable \
+                 project fact, call the `memory_propose` tool with it. Do not just say you \
+                 remembered it.)\n",
+            );
+        }
         let available: Vec<_> = attachments::list(self.store.conn(), self.sess)?
             .into_iter()
             .filter(|a| a.status == "sent")
