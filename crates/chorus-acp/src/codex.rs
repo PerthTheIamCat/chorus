@@ -209,6 +209,8 @@ pub struct CodexAgent {
     mode: ModeOutcome,
     models: Vec<ModelInfo>,
     model: Option<String>,
+    image_prompt: bool,
+    embedded_context_prompt: bool,
 }
 
 impl CodexAgent {
@@ -269,6 +271,15 @@ impl CodexAgent {
         &self.models
     }
 
+    /// Capabilities advertised by the active bridge during `initialize`.
+    pub fn supports_image_prompt(&self) -> bool {
+        self.image_prompt
+    }
+
+    pub fn supports_embedded_context(&self) -> bool {
+        self.embedded_context_prompt
+    }
+
     /// The model the agent says this session is running, after any selection.
     /// `None` when it would not say.
     pub fn model(&self) -> Option<&str> {
@@ -324,6 +335,24 @@ impl CodexAgent {
         text: &str,
         decide: &mut dyn FnMut(&PermissionAsk) -> Permission,
     ) -> Result<TurnOutcome> {
+        self.prompt_blocks(vec![json!({ "type": "text", "text": text })], decide)
+    }
+
+    /// Send ordered ACP content blocks after checking the bridge's live prompt capabilities.
+    pub fn prompt_blocks(
+        &mut self,
+        prompt: Vec<Value>,
+        decide: &mut dyn FnMut(&PermissionAsk) -> Permission,
+    ) -> Result<TurnOutcome> {
+        for block in &prompt {
+            match block.get("type").and_then(Value::as_str) {
+                Some("text" | "resource_link") => {}
+                Some("image") if self.image_prompt => {}
+                Some("resource") if self.embedded_context_prompt => {}
+                Some(kind) => return Err(anyhow!("bridge does not accept {kind} prompt content")),
+                None => return Err(anyhow!("prompt content is missing its type")),
+            }
+        }
         let mut acc = Accumulator::default();
         let cwd = self.cwd.clone();
 
@@ -331,7 +360,7 @@ impl CodexAgent {
             "session/prompt",
             json!({
                 "sessionId": self.session_id,
-                "prompt": [{ "type": "text", "text": text }],
+                "prompt": prompt,
             }),
         )?;
 
@@ -375,13 +404,15 @@ impl CodexAgent {
             .unwrap_or_else(|| Arc::new(Mutex::new(Box::new(sink()))));
         let agent = Agent::spawn_env(&cfg.command, &cfg.env, log)
             .with_context(|| format!("spawn codex bridge: {}", cfg.command.join(" ")))?;
-        let this = Self {
+        let mut this = Self {
             agent,
             session_id: String::new(),
             cwd,
             mode: ModeOutcome::default(),
             models: Vec::new(),
             model: None,
+            image_prompt: false,
+            embedded_context_prompt: false,
         };
 
         let init = this.agent.request(
@@ -402,6 +433,9 @@ impl CodexAgent {
         if pv != Some(1) {
             return Err(anyhow!("bridge spoke protocolVersion {pv:?}, expected 1"));
         }
+        let prompt_caps = &res["agentCapabilities"]["promptCapabilities"];
+        this.image_prompt = prompt_caps["image"].as_bool().unwrap_or(false);
+        this.embedded_context_prompt = prompt_caps["embeddedContext"].as_bool().unwrap_or(false);
         Ok(this)
     }
 

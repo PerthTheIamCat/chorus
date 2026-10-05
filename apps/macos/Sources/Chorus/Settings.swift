@@ -8,12 +8,14 @@ struct SettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     let workspace: String
     @State var section: Section = .accounts
+    @AppStorage("chorus.autoCatalogUpdates") private var autoCatalogUpdates = true
 
     enum Section: String, CaseIterable, Identifiable {
         case general = "ทั่วไป"
         case accounts = "บัญชีและการใช้งาน"
         case agents = "เอเจนต์และโมเดล"
         case skills = "Skills"
+        case integrations = "เครื่องมือเสริม"
         var id: String { rawValue }
         var icon: String {
             switch self {
@@ -21,8 +23,14 @@ struct SettingsSheet: View {
             case .accounts: "person.2.badge.gearshape"
             case .agents: "cpu"
             case .skills: "sparkles"
+            case .integrations: "puzzlepiece.extension"
             }
         }
+    }
+
+    init(workspace: String, section: Section = .accounts) {
+        self.workspace = workspace
+        _section = State(initialValue: section)
     }
 
     var body: some View {
@@ -55,6 +63,27 @@ struct SettingsSheet: View {
                     case .accounts: AccountsSettings()
                     case .agents: AgentsSettings()
                     case .skills: SkillsSettings(workspace: workspace)
+                    case .integrations:
+                        CatalogView(projectName: workspace.isEmpty ? "" : URL(fileURLWithPath: workspace).lastPathComponent,
+                                    entries: engine.catalog,
+                                    automaticUpdates: autoCatalogUpdates,
+                                    backgroundStatus: engine.catalogBackgroundStatus,
+                                    actionResult: engine.catalogActionResult,
+                                    onAutomaticUpdatesChanged: { value in
+                                        autoCatalogUpdates = value
+                                        if value { engine.loadCatalog(project: workspace, automaticUpdates: true) }
+                                    },
+                                    onInstall: { engine.catalogAction(project: workspace, id: $0,
+                                                                      action: workspace.isEmpty ? "install" : "installAndEnable") },
+                                    onUpdate: { engine.catalogAction(project: workspace, id: $0, action: "update") },
+                                    onRemove: { engine.catalogAction(project: workspace, id: $0, action: "remove") },
+                                    onProjectEnableChanged: { id, enabled in
+                                        engine.catalogAction(project: workspace, id: id,
+                                                             action: enabled ? "enable" : "disable")
+                                    })
+                        if let error = engine.catalogActionError ?? engine.catalogError {
+                            Text(error).font(.caption).foregroundStyle(.red)
+                        }
                     }
                 }
                 .padding(22)
@@ -66,6 +95,7 @@ struct SettingsSheet: View {
             engine.loadAgents()
             engine.loadUsage()
             engine.loadSkills(cwd: workspace)
+            engine.loadCatalog(project: workspace, automaticUpdates: autoCatalogUpdates)
         }
     }
 }
@@ -148,6 +178,9 @@ struct GeneralSettings: View {
     @AppStorage("chorus.thinkingOpen") private var thinkingOpen = true
     @AppStorage("chorus.failoverAccounts") private var failoverAccounts = true
     @AppStorage("chorus.failoverProviders") private var failoverProviders = true
+    @AppStorage("chorus.autoRoute") private var autoRoute = true
+    @AppStorage("chorus.routerModel") private var routerModel = "qwen2.5:3b"
+    @AppStorage("chorus.dismissedSetupCards") private var dismissedSetupCards = ""
 
     var body: some View {
         SettingsGroup(title: "การทำงาน") {
@@ -174,6 +207,22 @@ struct GeneralSettings: View {
             Divider().padding(.leading, 12)
             SettingsRow(title: "แล้วค่อยสลับไปเอเจนต์เจ้าอื่น", detail: "เช่น Claude → Codex") {
                 Toggle("", isOn: $failoverProviders).labelsHidden().toggleStyle(.switch)
+            }
+        }
+        SettingsGroup(title: "เลือกโมเดลให้อัตโนมัติ",
+                      footer: "Router ส่งเฉพาะข้อความงานใหม่และชนิดไฟล์แนบไปยัง Ollama ในเครื่อง แล้วแสดงผลให้แก้ก่อนส่ง ถ้า Ollama ยังไม่พร้อม Chorus จะรอให้เลือกเอง") {
+            SettingsRow(title: "ใช้ router ก่อนส่งงานใหม่") {
+                Toggle("", isOn: $autoRoute).labelsHidden().toggleStyle(.switch)
+            }
+            Divider().padding(.leading, 12)
+            SettingsRow(title: "โมเดล router ใน Ollama", detail: "ต้องติดตั้งโมเดลนี้ใน Ollama บนเครื่องก่อน") {
+                TextField("เช่น qwen2.5:3b", text: $routerModel)
+                    .textFieldStyle(.roundedBorder).frame(width: 180)
+            }
+            Divider().padding(.leading, 12)
+            SettingsRow(title: "คำแนะนำการตั้งค่าที่ปิดไว้", detail: "แสดงการ์ดสำหรับ agent, Auto และเครื่องมือเสริมอีกครั้ง") {
+                Button("แสดงอีกครั้ง") { dismissedSetupCards = "" }
+                    .disabled(dismissedSetupCards.isEmpty)
             }
         }
         SettingsGroup(title: "ข้อมูล") {
@@ -320,7 +369,10 @@ struct AgentsSettings: View {
                 SettingsRow(title: a.ready ? "พร้อมใช้" : (a.auth == "needs_login" ? "ยังไม่ได้ login" : "ยังไม่ได้ติดตั้ง CLI"),
                             detail: a.detail) {
                     if !a.ready {
-                        Button("แก้ให้ใน Terminal") { engine.runLoginCommand(a.hint) }
+                        Button(a.auth == "needs_login" ? "เริ่มเข้าสู่ระบบ" : "เริ่มติดตั้ง") {
+                            engine.runLoginCommand(a.hint)
+                        }
+                        .help("เปิด Terminal พร้อมคำสั่งที่ต้องใช้ — ขั้นตอนเข้าสู่ระบบยังต้องทำด้วยตัวเอง")
                     }
                 }
                 Divider().padding(.leading, 12)

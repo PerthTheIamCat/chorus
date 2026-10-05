@@ -14,7 +14,7 @@
 use crate::Result;
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Create (or upgrade) the schema. Safe to call on every open.
 pub fn migrate(conn: &Connection) -> Result<()> {
@@ -113,6 +113,35 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             l2         TEXT NOT NULL,
             model      TEXT NOT NULL,
             created_ms INTEGER NOT NULL
+        );
+
+        -- v4: session-owned attachments are separate from event.blob, whose
+        -- established meaning remains oversized message body text.
+        CREATE TABLE IF NOT EXISTS attachment (
+            id INTEGER PRIMARY KEY,
+            sess INTEGER NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            media_type TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            -- Hashes remain in tombstones after bytes are reclaimed.
+            hash TEXT NOT NULL,
+            prepared_hash TEXT,
+            prepared_media_type TEXT,
+            status TEXT NOT NULL CHECK(status IN ('staged','sent','deleted')),
+            created_ms INTEGER NOT NULL,
+            deleted_ms INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_attachment_sess ON attachment(sess, id);
+        CREATE TABLE IF NOT EXISTS attachment_event (
+            attachment_id INTEGER PRIMARY KEY REFERENCES attachment(id),
+            event_seq INTEGER NOT NULL REFERENCES event(seq)
+        );
+        CREATE INDEX IF NOT EXISTS idx_attachment_event_seq ON attachment_event(event_seq);
+        CREATE TABLE IF NOT EXISTS attachment_access (
+            id INTEGER PRIMARY KEY,
+            attachment_id INTEGER NOT NULL,
+            sess INTEGER NOT NULL,
+            accessed_ms INTEGER NOT NULL
         );
 
         -- TODO(phase-1): vec0 table for embeddings

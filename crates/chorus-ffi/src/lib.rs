@@ -13,11 +13,85 @@
 //!   - Every call is blocking. The shell calls off its main thread.
 
 use chorus_cli::session::{Policy, Session};
+use chorus_core::attachments::{Attachment, MAX_FILE_BYTES};
 use chorus_core::handoff::HandoffReason;
+use chorus_core::integration_catalog;
+use chorus_core::router::{CandidateSet, Router, RouterConfig, TaskSummary};
 use serde::Serialize;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Curated catalog and user/project state, without reading any secret values.
+/// A project path is used only to scope enabled integrations.
+///
+/// # Safety
+/// `project` must point to a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_catalog_list_json(project: *const c_char) -> *mut c_char {
+    let Some(project) = borrow(project) else { return err("project must be valid UTF-8") };
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
+        let state = integration_catalog::load_state().map_err(|e| e.to_string())?;
+        let enabled = integration_catalog::enabled_for(Path::new(project)).map_err(|e| e.to_string())?;
+        let enabled: std::collections::BTreeSet<&str> = enabled.iter().map(|entry| entry.id).collect();
+        let entries: Vec<_> = integration_catalog::catalog().iter().map(|entry| {
+            let observed = integration_catalog::homebrew_installed(entry).ok().flatten();
+            let installed = if entry.recipe.method == integration_catalog::InstallMethod::Homebrew {
+                observed.as_ref()
+            } else {
+                state.installed.get(entry.id)
+            };
+            serde_json::json!({
+                "id": entry.id, "title": entry.title, "source": entry.source,
+                "maintainer": entry.maintainer, "license": entry.license,
+                "reviewed_version": entry.reviewed_version, "modes": entry.modes,
+                "required_runtimes": entry.required_runtimes, "actions": entry.actions,
+                "project_access": entry.project_access, "network": entry.network,
+                "secret_names": entry.secret_names, "installed": installed,
+                "installed_method": installed.map(|record| record.method),
+                "brew_formula": (entry.recipe.method == integration_catalog::InstallMethod::Homebrew).then_some(entry.recipe.package),
+                "missing_installer": integration_catalog::missing_installer(entry),
+                "enabled": enabled.contains(entry.id),
+                "can_remove": true,
+            })
+        }).collect();
+        Ok(serde_json::json!({"ok":true,"entries":entries}))
+    }));
+    match result {
+        Ok(Ok(value)) => out(value.to_string()),
+        Ok(Err(error)) => err(error),
+        Err(_) => err("panic in catalog list"),
+    }
+}
+
+/// `action`: install, update, remove, enable, or disable. Install/update use
+/// Chorus-owned paths and the catalog's approved recipe.
+///
+/// # Safety
+/// All pointers must point to valid NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_catalog_action_json(
+    project: *const c_char, id: *const c_char, action: *const c_char,
+) -> *mut c_char {
+    let (Some(project), Some(id), Some(action)) = (borrow(project), borrow(id), borrow(action)) else {
+        return err("catalog action arguments must be valid UTF-8");
+    };
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
+        match action {
+            "install" => integration_catalog::install(id).map(|_| ()).map_err(|e| e.to_string()),
+            "update" => integration_catalog::update(id).map(|_| ()).map_err(|e| e.to_string()),
+            "remove" => integration_catalog::uninstall(id).map_err(|e| e.to_string()),
+            "enable" => integration_catalog::set_enabled(Path::new(project), id, true).map_err(|e| e.to_string()),
+            "disable" => integration_catalog::set_enabled(Path::new(project), id, false).map_err(|e| e.to_string()),
+            _ => Err(format!("unknown catalog action: {action}")),
+        }
+    }));
+    match result {
+        Ok(Ok(())) => out("{\"ok\":true}".to_string()),
+        Ok(Err(error)) => err(error),
+        Err(_) => err("panic in catalog action"),
+    }
+}
 
 /// Opaque handle. One per open session.
 pub struct ChorusEngine {
@@ -31,6 +105,110 @@ unsafe fn borrow<'a>(p: *const c_char) -> Option<&'a str> {
         return None;
     }
     CStr::from_ptr(p).to_str().ok()
+}
+
+unsafe fn borrow_optional<'a>(p: *const c_char) -> Result<Option<&'a str>, &'static str> {
+    if p.is_null() {
+        return Ok(None);
+    }
+    CStr::from_ptr(p)
+        .to_str()
+        .map(Some)
+        .map_err(|_| "string must be valid UTF-8")
+}
+
+unsafe fn borrow_bytes<'a>(p: *const u8, len: usize) -> Option<&'a [u8]> {
+    if len == 0 {
+        return Some(&[]);
+    }
+    if p.is_null() || len > isize::MAX as usize {
+        return None;
+    }
+    Some(std::slice::from_raw_parts(p, len))
+}
+
+unsafe fn borrow_attachment_ids(p: *const c_char) -> Result<Vec<i64>, &'static str> {
+    let json = borrow(p).ok_or("attachment_ids must be a non-null UTF-8 JSON array")?;
+    if json.len() > 1024 {
+        return Err("attachment_ids JSON exceeds 1024 bytes");
+    }
+    let ids: Vec<i64> = serde_json::from_str(json)
+        .map_err(|_| "attachment_ids must be a JSON array of integers")?;
+    if ids.len() > 5 {
+        return Err("at most five attachments may be sent in one message");
+    }
+    Ok(ids)
+}
+
+/// Run the local-only router against JSON task/candidate inputs.
+///
+/// # Safety
+/// All three arguments must be valid NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_route_json(
+    task_json: *const c_char,
+    candidates_json: *const c_char,
+    model: *const c_char,
+) -> *mut c_char {
+    let (Some(task_json), Some(candidates_json), Some(model)) =
+        (borrow(task_json), borrow(candidates_json), borrow(model))
+    else {
+        return err("task_json, candidates_json, and model must be valid UTF-8");
+    };
+    if task_json.len() > 512 * 1024 || candidates_json.len() > 512 * 1024 {
+        return err("router JSON inputs must each be at most 512 KiB");
+    }
+    match catch_unwind(AssertUnwindSafe(|| {
+        let task: TaskSummary =
+            serde_json::from_str(task_json).map_err(|e| format!("invalid task_json: {e}"))?;
+        let candidates: CandidateSet = serde_json::from_str(candidates_json)
+            .map_err(|e| format!("invalid candidates_json: {e}"))?;
+        let router = Router::new(RouterConfig::local(model))
+            .map_err(|e| format!("invalid router configuration: {e}"))?;
+        Ok::<_, String>(router.route(&task, &candidates))
+    })) {
+        Ok(Ok(route)) => out(serde_json::json!({"ok":true,"route":route}).to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in route_json"),
+    }
+}
+
+/// Discover locally installed Ollama models for router setup.
+///
+/// # Safety
+/// `model` must point to a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_router_models_json(model: *const c_char) -> *mut c_char {
+    let Some(model) = borrow(model) else {
+        return err("model must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        let router = Router::new(RouterConfig::local(model)).map_err(|error| error.to_string())?;
+        router.discover_models().map_err(|error| error.message)
+    })) {
+        Ok(Ok(models)) => out(serde_json::json!({"ok":true,"models":models}).to_string()),
+        Ok(Err(error)) => err(error),
+        Err(_) => err("panic in router model discovery"),
+    }
+}
+
+/// Pull one named model from local Ollama for router setup.
+///
+/// # Safety
+/// `model` must point to a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_router_pull_json(model: *const c_char) -> *mut c_char {
+    let Some(model) = borrow(model) else {
+        return err("model must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        let router = Router::new(RouterConfig::local(model)).map_err(|error| error.to_string())?;
+        router.pull_model(model)
+    })) {
+        Ok(Ok(())) => out("{\"ok\":true}".to_owned()),
+        Ok(Err(error)) => err(error),
+        Err(_) => err("panic in router model pull"),
+    }
 }
 
 fn out(s: String) -> *mut c_char {
@@ -132,6 +310,129 @@ pub unsafe extern "C" fn chorus_engine_session_id(e: *const ChorusEngine) -> i64
     }
 }
 
+// ---- attachments -----------------------------------------------------
+
+/// Import original bytes and optional locally prepared text or image data.
+/// The prepared values are mutually exclusive. `normalized_image_mime == NULL`
+/// means there is no normalized image; `derived_text == NULL` means no text.
+///
+/// # Safety
+/// `e` must be live; `name` valid UTF-8; each non-empty byte range must be
+/// readable for its stated length; optional strings must be valid UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_import_attachment(
+    e: *mut ChorusEngine,
+    name: *const c_char,
+    media_type: *const c_char,
+    bytes: *const u8,
+    bytes_len: usize,
+    derived_text: *const c_char,
+    normalized_image: *const u8,
+    normalized_image_len: usize,
+    normalized_image_mime: *const c_char,
+) -> *mut c_char {
+    let Some(engine) = e.as_ref() else {
+        return err("null engine");
+    };
+    let Some(name) = borrow(name) else {
+        return err("name must be valid UTF-8");
+    };
+    let media_type = match borrow_optional(media_type) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    let derived_text = match borrow_optional(derived_text) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    let normalized_image_mime = match borrow_optional(normalized_image_mime) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    if bytes_len > MAX_FILE_BYTES {
+        return err("attachment exceeds 20 MiB");
+    }
+    if normalized_image_len > MAX_FILE_BYTES {
+        return err("normalized image exceeds 20 MiB");
+    }
+    if derived_text.is_some_and(|s| s.len() > MAX_FILE_BYTES) {
+        return err("prepared text exceeds 20 MiB");
+    }
+    if (normalized_image_mime.is_some()) != (normalized_image_len > 0)
+        || (normalized_image_len > 0 && normalized_image.is_null())
+        || (normalized_image_mime.is_none() && !normalized_image.is_null())
+    {
+        return err("normalized image MIME type and bytes must be provided together");
+    }
+    let Some(bytes) = borrow_bytes(bytes, bytes_len) else {
+        return err("invalid attachment byte pointer or length");
+    };
+    let normalized_image_bytes = if normalized_image_mime.is_some() {
+        let Some(data) = borrow_bytes(normalized_image, normalized_image_len) else {
+            return err("invalid normalized image byte pointer or length");
+        };
+        Some(data)
+    } else {
+        None
+    };
+
+    match catch_unwind(AssertUnwindSafe(|| {
+        engine.session.import_attachment(
+            name,
+            media_type,
+            bytes,
+            derived_text,
+            normalized_image_mime.zip(normalized_image_bytes),
+        )
+    })) {
+        Ok(Ok(a)) => {
+            out(serde_json::json!({"ok":true,"attachment":attachment_json(&a)}).to_string())
+        }
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in import_attachment"),
+    }
+}
+
+/// List this session's staged, sent, and deleted attachment metadata.
+///
+/// # Safety
+/// `e` must be a live engine handle.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_list_attachments(e: *const ChorusEngine) -> *mut c_char {
+    let Some(engine) = e.as_ref() else {
+        return err("null engine");
+    };
+    match catch_unwind(AssertUnwindSafe(|| engine.session.list_attachments())) {
+        Ok(Ok(rows)) => {
+            let attachments: Vec<_> = rows.iter().map(attachment_json).collect();
+            out(serde_json::json!({"ok":true,"attachments":attachments}).to_string())
+        }
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in list_attachments"),
+    }
+}
+
+/// Tombstone an attachment owned by this session.
+///
+/// # Safety
+/// `e` must be a live engine handle.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_delete_attachment(
+    e: *const ChorusEngine,
+    attachment_id: i64,
+) -> *mut c_char {
+    let Some(engine) = e.as_ref() else {
+        return err("null engine");
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        engine.session.delete_attachment(attachment_id)
+    })) {
+        Ok(Ok(())) => out(serde_json::json!({"ok":true}).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in delete_attachment"),
+    }
+}
+
 // ---- turns ---------------------------------------------------------
 
 #[derive(Serialize)]
@@ -143,6 +444,48 @@ struct TurnJson {
     context_used: Option<i64>,
     context_window: Option<i64>,
     stop_reason: String,
+}
+
+#[derive(Serialize)]
+struct AttachmentJson<'a> {
+    id: i64,
+    name: &'a str,
+    media_type: &'a str,
+    size: i64,
+    status: &'a str,
+    readable: bool,
+    event_seq: Option<i64>,
+}
+
+fn attachment_json(a: &Attachment) -> AttachmentJson<'_> {
+    let readable = a.status != "deleted"
+        && (a.prepared_hash.is_some()
+            || a.media_type.starts_with("image/")
+            || a.media_type.starts_with("text/")
+            || a.media_type == "application/json"
+            || a.media_type.ends_with("+json")
+            || a.media_type.ends_with("+xml"));
+    AttachmentJson {
+        id: a.id,
+        name: &a.name,
+        media_type: &a.media_type,
+        size: a.size,
+        status: &a.status,
+        readable,
+        event_seq: a.event_seq,
+    }
+}
+
+fn turn_json(t: chorus_cli::session::TurnReport) -> TurnJson {
+    TurnJson {
+        ok: true,
+        user_seq: t.user_seq,
+        agent_event_count: t.agent_seqs.len(),
+        message: t.message,
+        context_used: t.context_used,
+        context_window: t.context_window,
+        stop_reason: t.stop_reason,
+    }
 }
 
 /// Run one turn. `allow` != 0 approves the agent's permission requests.
@@ -181,6 +524,42 @@ pub unsafe extern "C" fn chorus_run_turn(
         .unwrap()),
         Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in run_turn"),
+    }
+}
+
+/// Run one turn with a JSON array of session attachment IDs. Existing text-only
+/// callers should continue using `chorus_run_turn`.
+///
+/// # Safety
+/// `e` must be live; `agent`, `prompt`, and `attachment_ids_json` must be
+/// valid NUL-terminated UTF-8 strings. The IDs argument must encode an array.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_run_turn_with_attachments(
+    e: *mut ChorusEngine,
+    agent: *const c_char,
+    prompt: *const c_char,
+    attachment_ids_json: *const c_char,
+    allow: c_int,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let (Some(agent), Some(prompt)) = (borrow(agent), borrow(prompt)) else {
+        return err("agent/prompt must be valid UTF-8");
+    };
+    let attachment_ids = match borrow_attachment_ids(attachment_ids_json) {
+        Ok(ids) => ids,
+        Err(e) => return err(e),
+    };
+    let policy = Policy::from_level(allow);
+    match catch_unwind(AssertUnwindSafe(|| {
+        engine
+            .session
+            .run_turn_with_attachments(agent, "openai", prompt, policy, &attachment_ids)
+    })) {
+        Ok(Ok(t)) => out(serde_json::to_string(&turn_json(t)).unwrap()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in run_turn_with_attachments"),
     }
 }
 
@@ -245,6 +624,62 @@ pub unsafe extern "C" fn chorus_run_turn_interactive(
         .unwrap()),
         Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in run_turn_interactive"),
+    }
+}
+
+/// Interactive turn with a JSON array of session attachment IDs.
+///
+/// # Safety
+/// `e` must be live; strings must be valid NUL-terminated UTF-8; `callback`
+/// must be non-null and valid for the duration of this call; `ctx` is owned
+/// by the caller.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_run_turn_interactive_with_attachments(
+    e: *mut ChorusEngine,
+    agent: *const c_char,
+    prompt: *const c_char,
+    attachment_ids_json: *const c_char,
+    callback: Option<PermissionCallback>,
+    ctx: *mut std::ffi::c_void,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let (Some(agent), Some(prompt)) = (borrow(agent), borrow(prompt)) else {
+        return err("agent/prompt must be valid UTF-8");
+    };
+    let attachment_ids = match borrow_attachment_ids(attachment_ids_json) {
+        Ok(ids) => ids,
+        Err(e) => return err(e),
+    };
+    let Some(callback) = callback else {
+        return err("null permission callback");
+    };
+    let ctx_usize = ctx as usize;
+    let mut decide = |ask: &chorus_cli::session::PermissionAsk| {
+        let payload = serde_json::json!({
+            "tool": ask.tool, "kind": ask.kind, "detail": ask.detail
+        })
+        .to_string();
+        let c = CString::new(payload).unwrap_or_default();
+        if callback(ctx_usize as *mut std::ffi::c_void, c.as_ptr()) != 0 {
+            chorus_cli::session::Permission::Allow
+        } else {
+            chorus_cli::session::Permission::Deny
+        }
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        engine.session.run_turn_decide_with_attachments(
+            agent,
+            "openai",
+            prompt,
+            &attachment_ids,
+            &mut decide,
+        )
+    })) {
+        Ok(Ok(t)) => out(serde_json::to_string(&turn_json(t)).unwrap()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in run_turn_interactive_with_attachments"),
     }
 }
 
@@ -563,6 +998,56 @@ pub unsafe extern "C" fn chorus_run_relay(
         .unwrap()),
         Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in run_relay"),
+    }
+}
+
+/// Run a relay chain with session attachment IDs encoded as a JSON array.
+///
+/// # Safety
+/// `e` must be live; `agents`, `prompt`, and `attachment_ids_json` must be
+/// valid NUL-terminated UTF-8 strings; IDs must be a JSON integer array.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_run_relay_with_attachments(
+    e: *mut ChorusEngine,
+    agents: *const c_char,
+    prompt: *const c_char,
+    attachment_ids_json: *const c_char,
+    allow: c_int,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let (Some(agents), Some(prompt)) = (borrow(agents), borrow(prompt)) else {
+        return err("agents/prompt must be valid UTF-8");
+    };
+    let attachment_ids = match borrow_attachment_ids(attachment_ids_json) {
+        Ok(ids) => ids,
+        Err(e) => return err(e),
+    };
+    let specs = specs_from_csv(agents);
+    if specs.len() < 2 {
+        return err("relay needs at least two agents");
+    }
+    let policy = Policy::from_level(allow);
+    match catch_unwind(AssertUnwindSafe(|| {
+        engine
+            .session
+            .run_relay_with_attachments(&specs, prompt, policy, &attachment_ids)
+    })) {
+        Ok(Ok(rr)) => out(serde_json::to_string(&RelayJson {
+            ok: true,
+            answered_by: rr.answered_by,
+            message: rr.turn.message,
+            stop_reason: rr.turn.stop_reason,
+            handoffs: rr
+                .handoffs
+                .into_iter()
+                .map(|(f, t, why)| [f, t, why.as_phrase().to_string()])
+                .collect(),
+        })
+        .unwrap()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in run_relay_with_attachments"),
     }
 }
 

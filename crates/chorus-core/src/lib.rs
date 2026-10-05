@@ -6,18 +6,21 @@
 //! assembled fresh on every call and never written back.
 
 pub mod actor;
+pub mod attachments;
 pub mod blob;
 pub mod checkpoint;
 pub mod compaction;
 pub mod context;
 pub mod error;
 pub mod handoff;
+pub mod integration_catalog;
 pub mod ledger;
 pub mod mcp;
 pub mod mcp_config;
 pub mod memory;
 pub mod projector;
 pub mod render;
+pub mod router;
 pub mod schema;
 pub mod skills;
 pub mod store;
