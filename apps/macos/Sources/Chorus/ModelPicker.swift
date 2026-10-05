@@ -80,10 +80,9 @@ struct ModelPicker: View {
                     Image(systemName: "chevron.up.chevron.down").font(.system(size: 8))
                 }
                 .font(.caption)
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(.quaternary.opacity(0.5), in: Capsule())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(InteractiveStyle(cornerRadius: 99, selected: open,
+                                          padding: .init(top: 4, leading: 9, bottom: 4, trailing: 9)))
             .keyboardShortcut("i", modifiers: [.command, .shift])
             .help("เลือกเอเจนต์และโมเดล (⌘⇧I)")
             .popover(isPresented: $open, arrowEdge: .top) { popover }
@@ -91,20 +90,11 @@ struct ModelPicker: View {
             if let a = agent {
                 let efforts = a.efforts(for: current.base)
                 if !efforts.isEmpty {
-                    Menu {
-                        ForEach(efforts, id: \.self) { e in
-                            Button { model = ModelID.compose(current.base, e) } label: {
-                                if e == current.effort { Label(e, systemImage: "checkmark") } else { Text(e) }
-                            }
-                        }
-                    } label: {
-                        Label(current.effort ?? "effort", systemImage: "brain")
-                            .font(.caption)
-                    }
-                    .menuStyle(.borderlessButton).fixedSize()
-                    .help("ระดับการคิด (⌘⇧E สลับไประดับถัดไป)")
-                    // Menus can't be opened from a shortcut, so ⌘⇧E steps
-                    // through the levels instead.
+                    ChipPicker(icon: "brain", value: current.effort ?? "effort", options: efforts,
+                               selected: current.effort) { model = ModelID.compose(current.base, $0) }
+                        .help("ระดับการคิด (⌘⇧E สลับไประดับถัดไป)")
+                    // Popovers can't be opened from a shortcut here, so ⌘⇧E
+                    // steps through the levels instead.
                     Button("") { cycleEffort(efforts) }
                         .keyboardShortcut("e", modifiers: [.command, .shift])
                         .frame(width: 0, height: 0).opacity(0).allowsHitTesting(false)
@@ -121,82 +111,101 @@ struct ModelPicker: View {
 
     private var popover: some View {
         VStack(alignment: .leading, spacing: 0) {
-          ScrollView {
-           VStack(alignment: .leading, spacing: 0) {
-            ForEach(engine.agents) { a in
+            ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Circle().fill(a.ready ? Color.green : .orange).frame(width: 7, height: 7)
-                        Text(a.label).font(.caption.bold())
-                        Spacer()
-                        if !a.ready {
-                            Button("login") { open = false; onNeedsLogin() }
-                                .buttonStyle(.link).font(.caption2)
-                        }
-                    }
-                    .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 2)
-                    ForEach(a.baseModels, id: \.id) { m in
-                        let selected = agent?.id == a.id && current.base == m.id
-                        Button {
-                            // Keep the effort the user had if the new model
-                            // offers it, else the agent's default for that model.
-                            let efforts = a.efforts(for: m.id)
-                            let keep = efforts.contains(current.effort ?? "") ? current.effort : nil
-                            let def = a.models.first { ModelID($0.id).base == m.id && $0.is_default }
-                                .flatMap { ModelID($0.id).effort }
-                            model = ModelID.compose(m.id, keep ?? def ?? efforts.first)
-                            open = false
-                        } label: {
-                            let efforts = a.efforts(for: m.id)
-                            let isDefault = a.models.contains { ModelID($0.id).base == m.id && $0.is_default }
-                            HStack(alignment: .firstTextBaseline) {
-                                VStack(alignment: .leading, spacing: 1) {
-                                    HStack(spacing: 6) {
-                                        Text(m.label).font(.callout.weight(selected ? .semibold : .regular))
-                                        if isDefault {
-                                            Text("ค่าเริ่มต้น").font(.caption2)
-                                                .padding(.horizontal, 5).padding(.vertical, 1)
-                                                .background(.quaternary, in: Capsule())
-                                        }
-                                    }
-                                    Text(efforts.isEmpty ? m.id : "\(m.id) · effort \(efforts.joined(separator: "/"))")
-                                        .font(.caption2.monospaced()).foregroundStyle(.tertiary)
-                                        .lineLimit(1)
-                                }
-                                Spacer()
-                                if selected { Image(systemName: "checkmark").font(.caption) }
+                    ForEach(engine.agents) { a in
+                        HStack(spacing: 6) {
+                            Circle().fill(a.ready ? Color.green : .orange).frame(width: 7, height: 7)
+                            Text(a.label).font(.caption.bold()).foregroundStyle(.secondary)
+                            Spacer()
+                            if !a.ready {
+                                Button("login") { open = false; onNeedsLogin() }
+                                    .buttonStyle(.link).font(.caption2)
                             }
-                            .padding(.horizontal, 10).padding(.vertical, 5)
-                            .background(selected ? Color.accentColor.opacity(0.15) : .clear,
-                                        in: RoundedRectangle(cornerRadius: 5))
-                            .contentShape(Rectangle())
                         }
-                        .buttonStyle(.plain)
-                        .disabled(!a.ready)
-                        .padding(.horizontal, 4)
+                        .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 2)
+                        ForEach(a.baseModels, id: \.id) { m in
+                            let selected = agent?.id == a.id && current.base == m.id
+                            Button {
+                                // Keep the effort the user had if the new model
+                                // offers it, else the agent's default for that model.
+                                let efforts = a.efforts(for: m.id)
+                                let keep = efforts.contains(current.effort ?? "") ? current.effort : nil
+                                let def = a.models.first { ModelID($0.id).base == m.id && $0.is_default }
+                                    .flatMap { ModelID($0.id).effort }
+                                model = ModelID.compose(m.id, keep ?? def ?? efforts.first)
+                                open = false
+                            } label: {
+                                HStack {
+                                    Text(m.label).font(.callout.weight(selected ? .semibold : .regular))
+                                    Spacer()
+                                    if selected { Image(systemName: "checkmark").font(.caption.bold()) }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(InteractiveStyle(cornerRadius: 7, selected: selected))
+                            .disabled(!a.ready)
+                        }
                     }
                 }
-                Divider().padding(.top, 6)
+                .padding(6)
             }
-           }
-          }
-          .frame(maxHeight: 460)
+            .frame(maxHeight: 460)
+            Divider()
             HStack {
-                Text("ถ้าตัวนี้ชนลิมิต Chorus ส่งงานต่อให้ตัวที่พร้อมเอง")
-                    .font(.caption2).foregroundStyle(.secondary)
                 Spacer()
-                Button {
-                    engine.refreshModels(force: true)
-                } label: {
+                Button { engine.refreshModels(force: true) } label: {
                     if engine.refreshingModels { ProgressView().controlSize(.mini) }
                     else { Image(systemName: "arrow.clockwise") }
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(InteractiveStyle(cornerRadius: 6, padding: .init(top: 3, leading: 6, bottom: 3, trailing: 6)))
                 .help("ถามรายการโมเดลล่าสุดจากแต่ละเอเจนต์")
             }
-            .padding(10)
+            .padding(6)
         }
-        .frame(width: 340)
-        .padding(.vertical, 4)
+        .frame(width: 240)
+    }
+}
+
+/// A capsule chip that opens a small list of options — the effort and
+/// permission choices. A popover (not a `Menu`) so it gets the same
+/// hover/press/selected treatment as everything else.
+struct ChipPicker: View {
+    let icon: String
+    let value: String
+    let options: [String]
+    var labels: [String: String] = [:]
+    let selected: String?
+    let pick: (String) -> Void
+    @State private var open = false
+
+    var body: some View {
+        Button { open.toggle() } label: {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                Text(labels[value] ?? value)
+                Image(systemName: "chevron.down").font(.system(size: 7, weight: .semibold))
+            }
+            .font(.caption)
+        }
+        .buttonStyle(InteractiveStyle(cornerRadius: 99, selected: open,
+                                      padding: .init(top: 4, leading: 9, bottom: 4, trailing: 9)))
+        .popover(isPresented: $open, arrowEdge: .top) {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(options, id: \.self) { o in
+                    Button { pick(o); open = false } label: {
+                        HStack {
+                            Text(labels[o] ?? o)
+                            Spacer()
+                            if o == selected { Image(systemName: "checkmark").font(.caption.bold()) }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(InteractiveStyle(cornerRadius: 7, selected: o == selected))
+                }
+            }
+            .padding(6)
+            .frame(width: 180)
+        }
     }
 }

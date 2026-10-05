@@ -64,6 +64,7 @@ struct ContentView: View {
     @State private var rightTab = RightTab.context
     @State private var showPalette = false
     @State private var showInspector = true
+    @State private var showSidebar = true
     @State private var expanded: Set<String> = []
     @StateObject private var projects = ProjectStore()
     @StateObject private var fileIndex = FileIndex()
@@ -84,30 +85,40 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-        } detail: {
+        // Three floating glass cards — sidebar, thread, inspector — over a
+        // soft backdrop, instead of edge-to-edge columns split by dividers.
+        HStack(spacing: 10) {
+            if showSidebar {
+                sidebar
+                    .frame(width: 272)
+                    .floatingPanel(cornerRadius: 20)
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+            }
             thread
-                // The right panel is a system inspector: on macOS 26+ it
-                // floats as its own glass panel, like the sidebar, and folds away.
-                .inspector(isPresented: $showInspector) {
-                    VStack(spacing: 0) {
-                        Picker("", selection: $rightTab) {
-                            ForEach(RightTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .padding(10)
-                        switch rightTab {
-                        case .context: contextPane
-                        case .subagents: subagentsPane
-                        case .changes: changesPane
-                        case .memory: memoryPane
-                        }
+            if showInspector {
+                VStack(spacing: 0) {
+                    Picker("", selection: $rightTab) {
+                        ForEach(RightTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }
-                    .inspectorColumnWidth(min: 260, ideal: 310, max: 460)
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .padding(10)
+                    switch rightTab {
+                    case .context: contextPane
+                    case .subagents: subagentsPane
+                    case .changes: changesPane
+                    case .memory: memoryPane
+                    }
                 }
+                .frame(width: 312)
+                .floatingPanel(cornerRadius: 20)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
         }
+        .padding(10)
+        .background(Backdrop())
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: showSidebar)
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: showInspector)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 Text(engine.sessionID < 0 ? "ยังไม่ได้เปิดเซสชัน"
@@ -116,8 +127,15 @@ struct ContentView: View {
                     .lineLimit(1)
                     .font(.headline)
             }
+            ToolbarItem(placement: .navigation) {
+                Button { showSidebar.toggle() } label: {
+                    Label("แถบโปรเจกต์", systemImage: "sidebar.left")
+                }
+                .keyboardShortcut("s", modifiers: [.command, .control])
+                .help("เปิด/ปิดแถบโปรเจกต์ (⌃⌘S)")
+            }
             ToolbarItem(placement: .primaryAction) {
-                Button { withAnimation { showInspector.toggle() } } label: {
+                Button { showInspector.toggle() } label: {
                     Label("แผงข้อมูล", systemImage: "sidebar.right")
                 }
                 .keyboardShortcut("i", modifiers: [.command, .option])
@@ -272,13 +290,12 @@ struct ContentView: View {
             }
         }
         .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
         .onChange(of: sidebarSel) { _, sel in select(sel) }
         .onChange(of: engine.sessionID) { _, id in
             sidebarSel = id >= 0 && !workspace.isEmpty ? .session(workspace, id) : nil
         }
         .safeAreaInset(edge: .bottom) { agentFooter }
-        .navigationTitle("Chorus")
-        .frame(minWidth: 240, idealWidth: 280)
     }
 
     enum SidebarSel: Hashable { case session(String, Int64) }
@@ -472,6 +489,7 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 420)
+        .clipShape(RoundedRectangle(cornerRadius: 20))
     }
 
     /// The running turn, live: reasoning (collapsible, like the thinking
@@ -555,24 +573,23 @@ struct ContentView: View {
             ComposerField(box: draftBox, suggestions: suggest, onSubmit: submit)
             HStack(spacing: 8) {
                 ModelPicker(model: $model, onNeedsLogin: { showSettings = true })
-                Menu {
-                    ForEach(PermissionLevel.allCases, id: \.self) { p in
-                        Button { permission = p } label: {
-                            if p == permission { Label(p.label, systemImage: "checkmark") } else { Text(p.label) }
-                        }
-                    }
-                } label: {
-                    Label(permission.label, systemImage: permission == .ask ? "hand.raised" : "bolt.fill")
-                        .font(.caption)
-                }
-                .menuStyle(.borderlessButton).fixedSize()
+                ChipPicker(
+                    icon: permission == .ask ? "hand.raised" : "bolt.fill",
+                    value: "\(permission.rawValue)",
+                    options: PermissionLevel.allCases.map { "\($0.rawValue)" },
+                    labels: Dictionary(uniqueKeysWithValues: PermissionLevel.allCases.map { ("\($0.rawValue)", $0.label) }),
+                    selected: "\(permission.rawValue)"
+                ) { v in if let p = PermissionLevel(rawValue: Int32(v) ?? 0) { permission = p } }
                 .help(permission.hint)
                 Spacer()
                 Button(action: submit) {
-                    if engine.busy { Image(systemName: "text.badge.plus").font(.title2) }
-                    else { Image(systemName: "arrow.up.circle.fill").font(.title2) }
+                    Image(systemName: engine.busy ? "text.badge.plus" : "arrow.up")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 30, height: 30)
+                        .background(Color.accentColor, in: Circle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(InteractiveStyle(cornerRadius: 99, padding: .init()))
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(engine.sessionID < 0)
                 .help(engine.busy ? "เข้าคิว (↩)" : "ส่ง (↩ · ⇧↩ ขึ้นบรรทัดใหม่)")
@@ -899,6 +916,8 @@ struct ContentView: View {
                     Circle().fill(.green).frame(width: 6, height: 6)
                 }
             }
+            .padding(.vertical, 2)
+            .hoverHighlight()
             .contextMenu {
                 Button("แก้ไขโปรเจกต์…") { editing = p; editingIsNew = false }
                 Menu("เปิดใน Finder") {
@@ -961,7 +980,9 @@ struct ContentView: View {
             }
             .font(.caption2)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 3).padding(.horizontal, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .hoverHighlight()
     }
 
     /// Delegated work, read back from the ledger: every tool call that looks
@@ -1146,6 +1167,7 @@ struct EventRow: View {
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
         .background(.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+        .hoverHighlight(cornerRadius: 8)
     }
 
     private var firstLine: String {
@@ -1530,10 +1552,8 @@ struct PaletteSheet: View {
                         Button { dismiss(); item.run() } label: {
                             Label(item.title, systemImage: item.icon)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 12).padding(.vertical, 7)
-                                .contentShape(Rectangle())
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(InteractiveStyle(cornerRadius: 7, padding: .init(top: 7, leading: 12, bottom: 7, trailing: 12)))
                     }
                 }.padding(6)
             }
@@ -1643,5 +1663,19 @@ extension View {
                 .overlay(RoundedRectangle(cornerRadius: cornerRadius).stroke(.quaternary))
                 .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
         }
+    }
+}
+
+
+/// What the glass panels float over: the window colour with a faint wash of
+/// the accent, so the panels read as separate layers.
+struct Backdrop: View {
+    var body: some View {
+        ZStack {
+            Color(nsColor: .windowBackgroundColor)
+            LinearGradient(colors: [Color.accentColor.opacity(0.10), .clear, Color.purple.opacity(0.06)],
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+        }
+        .ignoresSafeArea()
     }
 }
