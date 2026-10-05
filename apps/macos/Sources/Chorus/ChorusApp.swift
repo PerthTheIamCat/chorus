@@ -1,8 +1,18 @@
 import AppKit
+import CChorus
 import SwiftUI
+
+/// Closing the last window quits the app, and quitting reaps the agent tree.
+/// Without this the app lingers windowless and the bridges it spawned
+/// (claude-agent-acp, serena, graft) outlive it.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationWillTerminate(_ notification: Notification) { chorus_shutdown() }
+}
 
 @main
 struct ChorusApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var engine = Engine()
 
     var body: some Scene {

@@ -87,10 +87,32 @@ pub fn cancel_active() -> bool {
         return false;
     }
     CANCELLED.store(true, SeqCst);
-    // Children first (the bridge's node/codex), then the bridge itself.
-    let _ = Command::new("pkill").args(["-TERM", "-P", &pid.to_string()]).status();
-    let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    // The bridge leads its own process group (see `spawn_env`), so one signal
+    // reaches the bridge and everything it spawned.
+    kill_group(pid, 15);
     true
+}
+
+extern "C" {
+    fn killpg(pgrp: i32, sig: i32) -> i32;
+}
+
+/// Signal the process group led by `pid`. Agents are spawned as group leaders,
+/// so this takes out grandchildren (cli.js, MCP servers, language servers) that
+/// killing the direct child alone would orphan to launchd.
+fn kill_group(pid: u32, sig: i32) {
+    unsafe {
+        killpg(pid as i32, sig);
+    }
+}
+
+/// Kill the running agent and its whole process tree. Call when the app quits:
+/// `Drop` never runs when the host process exits without unwinding.
+pub fn shutdown() {
+    let pid = ACTIVE_PID.swap(0, std::sync::atomic::Ordering::SeqCst);
+    if pid != 0 {
+        kill_group(pid, 9);
+    }
 }
 
 /// True if the last turn ended because [`cancel_active`] killed it.
@@ -157,6 +179,11 @@ impl Agent {
         // doesn't refuse to run "inside another Claude Code session".
         for var in ["CLAUDECODE", "CLAUDE_CODE_SSE_PORT", "CLAUDE_CODE_ENTRYPOINT"] {
             command.env_remove(var);
+        }
+        // Own process group, so teardown can signal the whole tree.
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
         }
         let mut child = command.spawn().with_context(|| format!("spawn {cmd:?}"))?;
         ACTIVE_PID.store(child.id(), std::sync::atomic::Ordering::SeqCst);
@@ -379,6 +406,7 @@ impl Drop for Agent {
         let _ = ACTIVE_PID.compare_exchange(
             self.child.id(), 0,
             std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
+        kill_group(self.child.id(), 9);
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
