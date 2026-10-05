@@ -26,18 +26,36 @@ use std::time::Duration;
 /// a local checkout via `CodexConfig::command`.
 pub const DEFAULT_BRIDGE: &[&str] = &["npx", "-y", "@agentclientprotocol/codex-acp"];
 
+/// The Claude bridge. Renamed upstream from `claude-code-acp`, which is
+/// deprecated — kept as the documented fallback because a machine that
+/// hasn't updated still has only the old one on disk.
+pub const CLAUDE_BRIDGE: &[&str] = &["npx", "-y", "@zed-industries/claude-agent-acp"];
+pub const CLAUDE_BRIDGE_LEGACY: &[&str] = &["npx", "-y", "@zed-industries/claude-code-acp"];
+
 /// The ACP command for a given agent name. Every one of these speaks the
 /// same protocol (`Agent` + this module handle it); they differ only in
 /// which process to spawn. An unknown name falls back to the Codex bridge.
+///
+/// Each can be overridden by environment variable — `CHORUS_CLAUDE_BRIDGE`,
+/// `CHORUS_CODEX_BRIDGE`, `CHORUS_GEMINI_BRIDGE` — so a package rename (which
+/// has already happened once for Claude) or a locally installed binary needs
+/// no rebuild. The value is a whitespace-separated command line, e.g.
+/// `CHORUS_CLAUDE_BRIDGE="npx -y @zed-industries/claude-code-acp"`.
 pub fn bridge_for(agent_name: &str) -> Vec<String> {
     let n = agent_name.to_lowercase();
-    let cmd: &[&str] = if n.contains("claude") {
-        &["npx", "-y", "@zed-industries/claude-code-acp"]
+    let (env_key, cmd): (&str, &[&str]) = if n.contains("claude") {
+        ("CHORUS_CLAUDE_BRIDGE", CLAUDE_BRIDGE)
     } else if n.contains("gemini") {
-        &["gemini", "--experimental-acp"]
+        ("CHORUS_GEMINI_BRIDGE", &["gemini", "--experimental-acp"])
     } else {
-        DEFAULT_BRIDGE
+        ("CHORUS_CODEX_BRIDGE", DEFAULT_BRIDGE)
     };
+    if let Ok(v) = std::env::var(env_key) {
+        let parts: Vec<String> = v.split_whitespace().map(|s| s.to_string()).collect();
+        if !parts.is_empty() {
+            return parts;
+        }
+    }
     cmd.iter().map(|s| s.to_string()).collect()
 }
 
@@ -99,6 +117,9 @@ pub struct CodexConfig {
     pub mcp_servers: Value,
     /// The mode id to pin. `read-only` routes approvals to us.
     pub mode: Option<String>,
+    /// The model id to select, as the agent itself reports it (see
+    /// [`ModelInfo`]). `None` leaves the agent on its own default.
+    pub model: Option<String>,
     /// Transcript sink. `None` discards every frame.
     pub log: Option<Log>,
 }
@@ -109,8 +130,71 @@ impl Default for CodexConfig {
             command: DEFAULT_BRIDGE.iter().map(|s| s.to_string()).collect(),
             mcp_servers: json!([]),
             mode: Some("read-only".into()),
+            model: None,
             log: None,
         }
+    }
+}
+
+/// A model the agent says it can run, as reported by `session/new`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelInfo {
+    pub id: String,
+    pub name: String,
+    pub is_current: bool,
+}
+
+/// Pull `models.availableModels` out of a `session/new` / `session/load` reply.
+///
+/// The old comment in `agents.rs` said ACP has no way to ask an agent what
+/// models it offers. That was true of the *methods* and false of the replies:
+/// codex-acp answers `session/new` with the whole list plus `currentModelId`,
+/// and a probe against the real bridge showed the hardcoded guesses
+/// (`gpt-5.1-codex`) matching nothing it actually runs. Ask, do not guess.
+pub fn models_from(res: &Value) -> Vec<ModelInfo> {
+    let Some(m) = res.get("models") else {
+        return Vec::new();
+    };
+    let current = m.get("currentModelId").and_then(Value::as_str).unwrap_or("");
+    m.get("availableModels")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| {
+                    let id = v.get("modelId").or_else(|| v.get("id"))?.as_str()?;
+                    let name = v.get("name").and_then(Value::as_str).unwrap_or(id);
+                    Some(ModelInfo {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        is_current: id == current,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What actually happened when we tried to pin the session's mode.
+///
+/// This is a *report*, not a courtesy: `--read-only` is a safety promise, and
+/// the only honest way to keep it is to know whether the agent accepted the
+/// restriction. Codex answers the legacy `session/set_mode` with `{}` and
+/// leaves the mode untouched, so "the call returned Ok" proves nothing —
+/// `effective` is filled in only from a mode the agent itself reported back.
+#[derive(Debug, Clone, Default)]
+pub struct ModeOutcome {
+    pub requested: String,
+    /// The mode the agent says is now current. `None` = it would not say.
+    pub effective: Option<String>,
+    /// Which mechanism answered: "config_option", "set_mode", or "none".
+    pub via: &'static str,
+}
+
+impl ModeOutcome {
+    /// Did the agent confirm the mode we asked for? `false` also covers
+    /// "it never told us", which for a safety flag must count as a failure.
+    pub fn confirmed(&self) -> bool {
+        self.effective.as_deref() == Some(self.requested.as_str())
     }
 }
 
@@ -119,6 +203,9 @@ pub struct CodexAgent {
     agent: Agent,
     session_id: String,
     cwd: PathBuf,
+    mode: ModeOutcome,
+    models: Vec<ModelInfo>,
+    model: Option<String>,
 }
 
 impl CodexAgent {
@@ -135,7 +222,10 @@ impl CodexAgent {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("session/new returned no sessionId: {res}"))?
             .to_string();
-        this.pin_mode(cfg.mode.as_deref());
+        this.models = models_from(&res);
+        this.model = current_config(&res, "model");
+        this.mode = this.pin_mode(cfg.mode.as_deref());
+        this.model = this.pin_model(cfg.model.as_deref());
         Ok(this)
     }
 
@@ -154,12 +244,73 @@ impl CodexAgent {
         )?;
         // Swallow the replayed session/update frames.
         let _ = this.pump(load, Duration::from_secs(120))?;
-        this.pin_mode(cfg.mode.as_deref());
+        this.mode = this.pin_mode(cfg.mode.as_deref());
+        this.model = this.pin_model(cfg.model.as_deref());
         Ok(this)
     }
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// What the agent did with our mode request. Callers that promised the
+    /// user a restriction must check this before running a turn.
+    pub fn mode(&self) -> &ModeOutcome {
+        &self.mode
+    }
+
+    /// The models this agent reported when the session opened. Empty when the
+    /// bridge does not report any — callers must treat that as "unknown",
+    /// never as "none".
+    pub fn models(&self) -> &[ModelInfo] {
+        &self.models
+    }
+
+    /// The model the agent says this session is running, after any selection.
+    /// `None` when it would not say.
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    /// Ask the agent to switch model, and report what it says is current.
+    ///
+    /// Same mechanism as the mode, and the same reason for checking the reply:
+    /// a picker that silently does nothing is worse than no picker. Unlike the
+    /// mode, this one has no fallback path — `session/set_mode` is about modes
+    /// only — so an agent without config options keeps its own default and
+    /// says so by returning `None`.
+    fn pin_model(&mut self, model: Option<&str>) -> Option<String> {
+        let want = model?;
+
+        // Two namespaces, and picking the wrong one gets "Invalid params".
+        //
+        // `session/set_model` takes the ids from `models.availableModels` —
+        // for Codex those carry a reasoning level, `gpt-5.5[low]`. The `model`
+        // *config option* takes bare ids, `gpt-5.5`, with the level as a
+        // separate `reasoning_effort` option. We show the user the
+        // availableModels ids, because those are the ones that say what will
+        // actually run, so try that method first and fall back to the config
+        // option with the bracket stripped. (Measured against codex-acp on
+        // 12 Sep 2026: set_config_option with a bracketed id is rejected.)
+        if let Ok(id) = self.agent.request(
+            "session/set_model",
+            json!({ "sessionId": self.session_id, "modelId": want }),
+        ) {
+            if self.pump(id, Duration::from_secs(20)).is_ok() {
+                return Some(want.to_string());
+            }
+        }
+
+        let bare = want.split('[').next().unwrap_or(want);
+        let id = self
+            .agent
+            .request(
+                "session/set_config_option",
+                json!({ "sessionId": self.session_id, "configId": "model", "value": bare }),
+            )
+            .ok()?;
+        let res = self.pump(id, Duration::from_secs(20)).ok()?;
+        current_config(&res, "model")
     }
 
     /// Run one prompt turn. `decide` is called for every
@@ -224,6 +375,9 @@ impl CodexAgent {
             agent,
             session_id: String::new(),
             cwd,
+            mode: ModeOutcome::default(),
+            models: Vec::new(),
+            model: None,
         };
 
         let init = this.agent.request(
@@ -247,17 +401,46 @@ impl CodexAgent {
         Ok(this)
     }
 
-    /// `session/set_mode` is best-effort: the bridge accepts it but spike 1
-    /// showed it does not always take. We still send it — on a bridge that
-    /// honours it, this is what puts our permission engine in the loop.
-    fn pin_mode(&mut self, mode: Option<&str>) {
-        let Some(mode) = mode else { return };
+    /// Pin the session's mode, and find out whether it took.
+    ///
+    /// Two mechanisms, in the order ACP is moving: `session/set_config_option`
+    /// first, because the spec requires the agent to answer it with the
+    /// complete option list — that reply is the only confirmation the protocol
+    /// offers, and without a confirmation a safety flag is decoration. The
+    /// legacy `session/set_mode` is the fallback for agents that predate config
+    /// options; it answers `{}`, so a success there leaves `effective` unset
+    /// and [`ModeOutcome::confirmed`] false, which is the truthful answer.
+    ///
+    /// Measured against @agentclientprotocol/codex-acp on 12 Sep 2026:
+    /// `set_mode` returns `{}` and the mode stays `agent` — the agent then
+    /// writes files with no permission request at all. That is the whole
+    /// reason this returns a report instead of nothing.
+    fn pin_mode(&mut self, mode: Option<&str>) -> ModeOutcome {
+        let Some(mode) = mode else {
+            return ModeOutcome { requested: String::new(), effective: None, via: "none" };
+        };
+        let requested = mode.to_string();
+
+        if let Ok(id) = self.agent.request(
+            "session/set_config_option",
+            json!({ "sessionId": self.session_id, "configId": "mode", "value": mode }),
+        ) {
+            if let Ok(res) = self.pump(id, Duration::from_secs(15)) {
+                if let Some(v) = current_config(&res, "mode") {
+                    return ModeOutcome { requested, effective: Some(v), via: "config_option" };
+                }
+            }
+        }
+
         if let Ok(id) = self.agent.request(
             "session/set_mode",
             json!({ "sessionId": self.session_id, "modeId": mode }),
         ) {
-            let _ = self.pump(id, Duration::from_secs(15));
+            if self.pump(id, Duration::from_secs(15)).is_ok() {
+                return ModeOutcome { requested, effective: None, via: "set_mode" };
+            }
         }
+        ModeOutcome { requested, effective: None, via: "none" }
     }
 
     /// Wait for the response to `id`, discarding any `session/update` frames
@@ -265,6 +448,35 @@ impl CodexAgent {
     fn pump(&self, id: i64, timeout: Duration) -> Result<Value> {
         let mut ignore = |_: &Agent, _: Inbound| {};
         self.agent.wait_for(id, timeout, &mut ignore)
+    }
+}
+
+/// Dig the current value of the `mode` config option out of an agent reply.
+/// Accepts both shapes the bridges use: the flat `configOptions` list from
+/// `set_config_option`, and the `modes.currentModeId` that `session/new` and
+/// `session/load` return.
+fn current_config(res: &Value, id: &str) -> Option<String> {
+    if let Some(opts) = res.get("configOptions").and_then(Value::as_array) {
+        for o in opts {
+            if o.get("id").and_then(Value::as_str) == Some(id) {
+                if let Some(v) = o.get("currentValue").and_then(Value::as_str) {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    match id {
+        "mode" => res
+            .get("modes")
+            .and_then(|m| m.get("currentModeId"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        "model" => res
+            .get("models")
+            .and_then(|m| m.get("currentModelId"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        _ => None,
     }
 }
 

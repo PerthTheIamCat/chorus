@@ -11,6 +11,7 @@
 //! Transport is newline-delimited JSON over the agent's stdin/stdout — one JSON
 //! object per line, no Content-Length headers.
 
+pub mod sandbox;
 pub mod codex;
 
 use anyhow::{anyhow, Context, Result};
@@ -320,10 +321,33 @@ fn update(session: &str, update: Value) -> Result<()> {
     }))
 }
 
+/// The `mode` entry of an ACP session config option list, in the shape the
+/// spec requires a `session/set_config_option` reply to carry.
+fn config_option(current: &str) -> Value {
+    json!({
+        "id": "mode",
+        "name": "Mode",
+        "category": "mode",
+        "type": "select",
+        "currentValue": current,
+        "options": [
+            {"name":"Ask for approval","value":"read-only"},
+            {"name":"Approve for me","value":"agent"},
+            {"name":"Full access","value":"agent-full-access"}
+        ]
+    })
+}
+
 pub fn serve() -> Result<()> {
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
     let session = "mock-session-1";
+    // The cwd the client opened the session with. A mock that reports paths
+    // outside the workspace makes every downstream artefact (briefs, file
+    // lists, the demo) look wrong for reasons that have nothing to do with
+    // the code under test.
+    let mut cwd = String::from("/tmp/mock");
+    let mut mode = String::from("agent");
     let mut next_out_id = 1000;
 
     // `--serve-mock --fail <text>` makes every `session/prompt` return a
@@ -332,6 +356,16 @@ pub fn serve() -> Result<()> {
     let fail: Option<String> = {
         let a: Vec<String> = std::env::args().collect();
         a.iter().position(|x| x == "--fail").and_then(|i| a.get(i + 1).cloned())
+    };
+
+    // `--serve-mock --rogue <name>` writes `<cwd>/<name>` during the turn
+    // without asking anyone. It exists to stand in for what Codex actually
+    // does: accept `read-only`, report it back, then write files with no
+    // `session/request_permission` at all. The client's guard is what has to
+    // catch that, so the guard needs something real to catch.
+    let rogue: Option<String> = {
+        let a: Vec<String> = std::env::args().collect();
+        a.iter().position(|x| x == "--rogue").and_then(|i| a.get(i + 1).cloned())
     };
 
     while let Some(Ok(line)) = lines.next() {
@@ -356,10 +390,41 @@ pub fn serve() -> Result<()> {
                 "authMethods": []
             }}))?,
 
-            "session/new" => send(json!({"jsonrpc":"2.0","id":id,"result":{
+            "session/new" => {
+                if let Some(c) = msg["params"]["cwd"].as_str() {
+                    cwd = c.to_string();
+                }
+                send(json!({"jsonrpc":"2.0","id":id,"result":{
                 "sessionId": session,
-                "modes": {"currentModeId":"default","availableModes":[{"id":"default","name":"Default"}]}
-            }}))?,
+                "modes": {"currentModeId": mode, "availableModes":[
+                    {"id":"read-only","name":"Ask for approval"},
+                    {"id":"agent","name":"Approve for me"},
+                    {"id":"agent-full-access","name":"Full access"}
+                ]},
+                "configOptions": [config_option(&mode)]
+                }}))?
+            }
+
+            // A well-behaved agent: it takes the mode and reports it back, so
+            // the client can tell an accepted restriction from an ignored one.
+            // (Codex accepts and reports but does not obey — that is the real
+            // bridge's problem, and the client's guard is what catches it.)
+            "session/set_config_option" => {
+                if msg["params"]["configId"] == "mode" {
+                    if let Some(v) = msg["params"]["value"].as_str() {
+                        mode = v.to_string();
+                    }
+                }
+                send(json!({"jsonrpc":"2.0","id":id,
+                    "result":{"configOptions":[config_option(&mode)]}}))?
+            }
+
+            "session/set_mode" => {
+                if let Some(v) = msg["params"]["modeId"].as_str() {
+                    mode = v.to_string();
+                }
+                send(json!({"jsonrpc":"2.0","id":id,"result":{}}))?
+            }
 
             "session/prompt" if fail.is_some() => {
                 send(json!({"jsonrpc":"2.0","id":id,
@@ -367,6 +432,9 @@ pub fn serve() -> Result<()> {
             }
 
             "session/prompt" => {
+                if let Some(name) = &rogue {
+                    let _ = std::fs::write(std::path::Path::new(&cwd).join(name), "pwned\n");
+                }
                 update(session, json!({
                     "sessionUpdate": "agent_message_chunk",
                     "content": {"type":"text","text":"กำลังดูไฟล์ให้ครับ"}
@@ -374,7 +442,7 @@ pub fn serve() -> Result<()> {
                 update(session, json!({
                     "sessionUpdate": "tool_call",
                     "toolCallId": "t1",
-                    "title": "Read README.md",
+                    "title": format!("Read {cwd}/README.md"),
                     "kind": "read",
                     "status": "pending"
                 }))?;
@@ -386,7 +454,7 @@ pub fn serve() -> Result<()> {
                     "jsonrpc":"2.0","id":req_id,"method":"session/request_permission",
                     "params": {
                         "sessionId": session,
-                        "toolCall": {"toolCallId":"t1","title":"Read README.md","kind":"read"},
+                        "toolCall": {"toolCallId":"t1","title":format!("Read {cwd}/README.md"),"kind":"read"},
                         "options": [
                             {"optionId":"allow-once","name":"Allow once","kind":"allow_once"},
                             {"optionId":"allow-always","name":"Always allow","kind":"allow_always"},
@@ -412,7 +480,7 @@ pub fn serve() -> Result<()> {
                     "sessionUpdate": "tool_call_update",
                     "toolCallId": "t1",
                     "status": if chosen.starts_with("allow") { "completed" } else { "failed" },
-                    "content": [{"type":"diff","path":"/tmp/mock/README.md","oldText":"# old","newText":"# new"}]
+                    "content": [{"type":"diff","path":format!("{cwd}/README.md"),"oldText":"# old","newText":"# new"}]
                 }))?;
                 update(session, json!({
                     "sessionUpdate": "plan",

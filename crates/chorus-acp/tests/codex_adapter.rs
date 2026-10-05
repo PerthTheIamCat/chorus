@@ -3,7 +3,6 @@
 //! `TurnOutcome` and the permission callback is actually consulted.
 
 use chorus_acp::codex::{AgentEvent, CodexAgent, CodexConfig, Permission, PermissionAsk};
-use std::path::PathBuf;
 
 /// `target/debug/deps/<test>` → `target/debug/acp-probe` (which serves the
 /// mock via `--serve-mock`).
@@ -74,8 +73,18 @@ fn permission_callback_is_consulted_and_its_decision_is_sent() {
     };
     let outcome = agent.prompt("do the thing", &mut deny).expect("prompt");
 
-    // The mock asks once, to read README.md.
-    assert_eq!(asks, vec!["Read README.md"]);
+    // The mock asks once, to read a README inside the session's own cwd —
+    // it reports real paths so briefs and file lists are not full of
+    // placeholder ones.
+    assert_eq!(asks.len(), 1, "expected exactly one permission ask: {asks:?}");
+    assert!(
+        asks[0].starts_with("Read ") && asks[0].ends_with("README.md"),
+        "ask should name the file being read: {asks:?}"
+    );
+    assert!(
+        asks[0].contains(dir.to_str().unwrap()),
+        "the mock should report a path inside the session cwd: {asks:?}"
+    );
     // The mock marks the tool call failed when we don't allow it.
     assert!(
         outcome
@@ -87,4 +96,14 @@ fn permission_callback_is_consulted_and_its_decision_is_sent() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn bridge_names_map_to_the_current_packages() {
+    use chorus_acp::codex::bridge_for;
+    // Claude's bridge was renamed upstream; the old name is deprecated.
+    assert!(bridge_for("claude-opus").join(" ").contains("claude-agent-acp"));
+    assert!(bridge_for("codex").join(" ").contains("codex-acp"));
+    // Anything unknown falls back to Codex rather than failing to spawn.
+    assert!(bridge_for("something-else").join(" ").contains("codex-acp"));
 }
