@@ -434,11 +434,15 @@ struct ContentView: View {
                             ForEach(engine.events) { ev in
                                 EventRow(event: ev).id(ev.seq)
                             }
+                            if engine.busy { workingRow.id("working") }
                         }
                         .padding(12)
                     }
                     .onChange(of: engine.events.count) { _ in
                         if let last = engine.events.last { proxy.scrollTo(last.seq, anchor: .bottom) }
+                    }
+                    .onChange(of: engine.busy) { b in
+                        if b { withAnimation { proxy.scrollTo("working", anchor: .bottom) } }
                     }
                 }
             }
@@ -446,6 +450,29 @@ struct ContentView: View {
             composer
         }
         .frame(minWidth: 380)
+    }
+
+    private var workingRow: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            if let t = engine.turnStartedAt {
+                TimelineView(.periodic(from: t, by: 1)) { ctx in
+                    Text("กำลังทำงาน… \(Int(ctx.date.timeIntervalSince(t))) วิ")
+                }
+            } else {
+                Text("กำลังทำงาน…")
+            }
+            Spacer()
+            Button { engine.cancel(); queued.removeAll() } label: {
+                Label("หยุด", systemImage: "stop.fill")
+            }
+            .controlSize(.small)
+            .keyboardShortcut(".", modifiers: .command)
+            .help("หยุดเทิร์นนี้ (⌘.) — ล้างคิวด้วย")
+        }
+        .font(.callout).foregroundStyle(.secondary)
+        .padding(10)
+        .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var emptyState: some View {
@@ -837,27 +864,80 @@ struct ContentView: View {
 struct EventRow: View {
     let event: LedgerEvent
 
+    private var isUser: Bool { event.actor == "user" }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                Text(event.actor).font(.caption.bold())
-                Text(event.kind).font(.caption2)
-                    .padding(.horizontal, 5).padding(.vertical, 1)
-                    .background(.quaternary, in: Capsule())
-                Spacer()
-                Text("#\(event.seq)").font(.caption2).foregroundStyle(.tertiary)
-            }
-            if event.kind == "handoff", let b = HandoffBrief(json: event.body) {
-                handoffBody(b)
+        switch event.kind {
+        case "msg":
+            message
+        case "handoff":
+            if let b = HandoffBrief(json: event.body) {
+                card(tint: .purple) { handoffBody(b) }
             } else {
-                Text(event.body)
-                    .font(event.kind == "msg" ? .body : .caption.monospaced())
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                note(event.body)
+            }
+        case "tool_call", "tool_result", "diff":
+            toolRow
+        default:
+            note(event.body)
+        }
+    }
+
+    // User: right-aligned bubble. Agent: plain text under its name, like the
+    // chat panes people already know from Claude / Codex / Cursor.
+    private var message: some View {
+        VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
+            if !isUser {
+                HStack(spacing: 5) {
+                    Circle().fill(agentColor).frame(width: 7, height: 7)
+                    Text(event.actor).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                }
+            }
+            MarkdownText(text: event.body)
+                .padding(.horizontal, isUser ? 12 : 0).padding(.vertical, isUser ? 8 : 0)
+                .background(isUser ? Color.accentColor.opacity(0.14) : .clear,
+                            in: RoundedRectangle(cornerRadius: 12))
+        }
+        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+    }
+
+    /// One collapsed line per tool call; click to see the payload.
+    private var toolRow: some View {
+        DisclosureGroup {
+            Text(event.body)
+                .font(.caption2.monospaced())
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 4)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: event.kind == "diff" ? "plusminus" : "wrench.and.screwdriver")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Text(firstLine).font(.caption).lineLimit(1).foregroundStyle(.secondary)
             }
         }
-        .padding(8)
-        .background(rowColor, in: RoundedRectangle(cornerRadius: 6))
+        .padding(.horizontal, 8).padding(.vertical, 5)
+        .background(.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var firstLine: String {
+        let l = event.body.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? event.kind
+        return l.count > 110 ? String(l.prefix(110)) + "…" : l
+    }
+
+    private func note(_ t: String) -> some View {
+        Text(t).font(.caption).foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func card<C: View>(tint: Color, @ViewBuilder _ c: () -> C) -> some View {
+        c().padding(10)
+            .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var agentColor: Color {
+        let palette: [Color] = [.green, .orange, .teal, .pink, .indigo]
+        return palette[abs(event.actor.hashValue) % palette.count]
     }
 
     /// The handoff is the product's whole argument, so it gets read as a
@@ -896,14 +976,6 @@ struct EventRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var rowColor: Color {
-        switch event.kind {
-        case "handoff": return .purple.opacity(0.12)
-        case "diff": return .green.opacity(0.10)
-        case "tool_call", "tool_result": return .secondary.opacity(0.08)
-        default: return event.actor == "user" ? .blue.opacity(0.08) : .clear
-        }
-    }
 }
 
 struct CompareResultsSheet: View {
@@ -1185,5 +1257,49 @@ struct PaletteSheet: View {
             }
         }
         .frame(width: 460, height: 320)
+    }
+}
+
+
+/// Markdown for agent output: fenced code becomes a monospaced block, the rest
+/// goes through `AttributedString` (bold, italic, inline code, links) with
+/// whitespace preserved so lists and paragraphs keep their shape.
+struct MarkdownText: View {
+    let text: String
+
+    private var parts: [(code: Bool, body: String)] {
+        var out: [(Bool, String)] = []
+        for (i, chunk) in text.components(separatedBy: "```").enumerated() {
+            guard !chunk.isEmpty else { continue }
+            if i % 2 == 1 {
+                // Drop the language tag on the first line.
+                let lines = chunk.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+                out.append((true, lines.count > 1 ? String(lines[1]) : chunk))
+            } else {
+                out.append((false, chunk.trimmingCharacters(in: .newlines)))
+            }
+        }
+        return out
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(parts.enumerated()), id: \.offset) { _, p in
+                if p.code {
+                    ScrollView(.horizontal) {
+                        Text(p.body.trimmingCharacters(in: .newlines))
+                            .font(.callout.monospaced()).textSelection(.enabled)
+                            .padding(10)
+                    }
+                    .background(.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                } else if let a = try? AttributedString(
+                    markdown: p.body,
+                    options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+                    Text(a).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Text(p.body).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
     }
 }

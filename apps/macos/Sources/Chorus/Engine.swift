@@ -149,10 +149,30 @@ final class Engine: ObservableObject {
         permGate.signal()
     }
 
+    /// Turns block the engine queue until they finish, so the ledger cannot be
+    /// re-read mid-turn. Without this the user's own message vanished into a
+    /// blank thread until the answer landed. The synthetic row (negative seq)
+    /// is replaced wholesale by the next `refresh()`.
+    private var echoCounter: Int64 = 0
+    private func echoUser(_ text: String) {
+        echoCounter += 1
+        events.append(LedgerEvent(seq: Int64.min + echoCounter, kind: "msg", actor: "user", body: text))
+        turnStartedAt = Date()
+    }
+
+    @Published var turnStartedAt: Date?
+
+    /// Stop button. Kills the agent process; the turn thread then returns an
+    /// error, which `stopped` turns into a plain note instead of a red banner.
+    func cancel() {
+        _ = Self.string(from: chorus_cancel())
+    }
+
     /// Run a turn where every permission request pops a dialog.
     func sendInteractive(_ prompt: String, agent: String) {
         guard let h = handle, !busy else { return }
         busy = true; lastError = nil
+        echoUser(prompt)
         let ctx = CallbackContext(raw: Unmanaged.passUnretained(self).toOpaque())
         let cb: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Int32 = { ctx, ask in
             guard let ctx, let ask else { return 0 }
@@ -168,7 +188,7 @@ final class Engine: ObservableObject {
             let r = Self.decode(TurnResult.self, json)
             DispatchQueue.main.async {
                 self?.busy = false
-                if r?.ok != true { self?.lastError = r?.error ?? "turn failed" }
+                if r?.ok != true, !Self.isStop(r?.error) { self?.lastError = r?.error ?? "turn failed" }
                 self?.refresh()
                 self?.compactIfIdle()
             }
@@ -181,6 +201,7 @@ final class Engine: ObservableObject {
     func send(_ prompt: String, agent: String, level: Int32) {
         guard let h = handle, !busy else { return }
         busy = true
+        echoUser(prompt)
         lastError = nil
         queue.async { [weak self] in
             let json = prompt.withCString { p in
@@ -195,7 +216,7 @@ final class Engine: ObservableObject {
                     self?.contextUsed = r.context_used
                     self?.contextWindow = r.context_window
                 } else {
-                    self?.lastError = result?.error ?? "turn failed"
+                    if !Self.isStop(result?.error) { self?.lastError = result?.error ?? "turn failed" }
                 }
                 self?.refresh()
                 self?.compactIfIdle()
@@ -207,6 +228,7 @@ final class Engine: ObservableObject {
     func sendRelay(_ prompt: String, agents: String, level: Int32) {
         guard let h = handle, !busy else { return }
         busy = true; lastError = nil
+        echoUser(prompt)
         queue.async { [weak self] in
             let json = prompt.withCString { p in
                 agents.withCString { a in
@@ -216,7 +238,7 @@ final class Engine: ObservableObject {
             let obj = Self.decode(SimpleResult.self, json)
             DispatchQueue.main.async {
                 self?.busy = false
-                if obj?.ok != true { self?.lastError = obj?.error ?? "relay failed" }
+                if obj?.ok != true, !Self.isStop(obj?.error) { self?.lastError = obj?.error ?? "relay failed" }
                 self?.refresh()
                 self?.compactIfIdle()
             }
@@ -277,6 +299,8 @@ final class Engine: ObservableObject {
     /// this hops to the background queue rather than blocking whatever
     /// thread called `refresh()` (including the main thread, since several
     /// call sites are already inside a `DispatchQueue.main.async`).
+    static func isStop(_ e: String?) -> Bool { e?.contains("หยุดโดยผู้ใช้") == true }
+
     func refresh() {
         guard let h = handle else { return }
         queue.async { [weak self] in

@@ -76,6 +76,9 @@ char *chorus_memory_review(const ChorusEngine *e, int64_t proposal_id, int appro
 char *chorus_working_diff(const ChorusEngine *e);
 
 /* Take a manual checkpoint. JSON: {"ok":true,"sha":"..."} */
+/* Stop the running turn; callable from any thread. {"ok":true,"was_running":bool} */
+char *chorus_cancel(void);
+
 char *chorus_snapshot(const ChorusEngine *e, const char *message);
 
 /* Roll the workspace back to `sha` (NULL/"" = the session base).

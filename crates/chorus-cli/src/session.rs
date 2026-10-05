@@ -680,6 +680,7 @@ impl Session {
         policy: Policy,
     ) -> Result<RelayReport> {
         let first = chain.first().context("relay chain is empty")?;
+        chorus_acp::reset_cancel();
         let saved_bridge = self.forced_bridge.clone();
         self.forced_bridge = Some(self.resolve_bridge(&first.name, &first.bridge));
 
@@ -712,6 +713,11 @@ impl Session {
                         }),
                         Err(e) => Err(e),
                     }
+                }
+                Err(_) if chorus_acp::was_cancelled() => {
+                    // The user pressed Stop. Not a provider failure — failing
+                    // over would just start the same turn on another agent.
+                    Err(anyhow::anyhow!("หยุดโดยผู้ใช้"))
                 }
                 Err(e) => {
                     // `{e:#}` flattens anyhow's context chain so the classifier

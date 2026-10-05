@@ -48,6 +48,39 @@ fn log_raw(log: &Log, dir: &str, text: &str) {
     }
 }
 
+/// Pid of the agent process currently answering a turn (0 = none).
+///
+/// Process-global on purpose: the shell's Stop button has no handle to the
+/// `Agent` (it lives on the turn thread, blocked in `prompt`), and only one
+/// turn runs at a time. Killing the process unblocks `prompt` with an error;
+/// [`was_cancelled`] is how the caller tells that apart from a real failure.
+static ACTIVE_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Stop the running turn. Returns false when no agent is running.
+pub fn cancel_active() -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    let pid = ACTIVE_PID.load(SeqCst);
+    if pid == 0 {
+        return false;
+    }
+    CANCELLED.store(true, SeqCst);
+    // Children first (the bridge's node/codex), then the bridge itself.
+    let _ = Command::new("pkill").args(["-TERM", "-P", &pid.to_string()]).status();
+    let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    true
+}
+
+/// True if the last turn ended because [`cancel_active`] killed it.
+pub fn was_cancelled() -> bool {
+    CANCELLED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Call before starting a turn.
+pub fn reset_cancel() {
+    CANCELLED.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// A spawned agent process we speak ACP to.
 pub struct Agent {
     child: Child,
@@ -86,6 +119,7 @@ impl Agent {
             command.env_remove(var);
         }
         let mut child = command.spawn().with_context(|| format!("spawn {cmd:?}"))?;
+        ACTIVE_PID.store(child.id(), std::sync::atomic::Ordering::SeqCst);
 
         let stdout = child.stdout.take().expect("piped");
         let stderr = child.stderr.take().expect("piped");
@@ -291,6 +325,9 @@ impl Agent {
 
 impl Drop for Agent {
     fn drop(&mut self) {
+        let _ = ACTIVE_PID.compare_exchange(
+            self.child.id(), 0,
+            std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

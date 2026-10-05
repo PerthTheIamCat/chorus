@@ -651,6 +651,14 @@ fn parse_reason(s: &str) -> HandoffReason {
     }
 }
 
+/// Stop the turn that is running right now (the shell's Stop button).
+/// Safe to call from any thread, with or without a live engine.
+/// JSON: {"ok":true,"was_running":bool}
+#[no_mangle]
+pub extern "C" fn chorus_cancel() -> *mut c_char {
+    out(serde_json::json!({ "ok": true, "was_running": chorus_cli::cancel_active() }).to_string())
+}
+
 /// How many events still have no stored summary rungs. The shell polls this
 /// to decide whether a background compaction pass is worth running.
 /// JSON: {"ok":true,"pending":N}
