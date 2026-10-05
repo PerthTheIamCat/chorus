@@ -52,8 +52,34 @@ final class Engine: ObservableObject {
     @Published var sessionID: Int64 = -1
     @Published var contextUsed: Int64?
     @Published var contextWindow: Int64?
+    /// goal / done / pending for this session — the context tier the design
+    /// never trims. Empty only before the first turn.
+    @Published var taskState = ""
+    /// Events with no stored summary rungs yet. Non-zero just means the next
+    /// compaction pass has work, not that anything is wrong.
+    @Published var uncompacted: Int64 = 0
 
-    private var handle: OpaquePointer?
+    /// The Rust engine handle, carried onto `queue` and back.
+    ///
+    /// `OpaquePointer` is not `Sendable`, and the compiler is right to object:
+    /// the Rust side owns a SQLite connection that must not be touched from two
+    /// threads at once. What actually makes this safe is that *every* use goes
+    /// through one **serial** `DispatchQueue`. This box states that invariant in
+    /// the type system instead of leaving a dozen warnings that all repeat the
+    /// same thing — and anyone who later reaches for a second queue to make
+    /// compaction "not block" has to argue with this comment first.
+    private struct Handle: @unchecked Sendable {
+        let raw: OpaquePointer
+    }
+
+    /// Same bargain for the `self` pointer handed to the C permission callback:
+    /// it is only ever dereferenced on the callback's own thread, which blocks
+    /// until the main actor answers.
+    private struct CallbackContext: @unchecked Sendable {
+        let raw: UnsafeMutableRawPointer
+    }
+
+    private var handle: Handle?
     private let queue = DispatchQueue(label: "chorus.engine")
 
     /// Opening a session runs `git init` + a first snapshot of the whole
@@ -80,7 +106,7 @@ final class Engine: ObservableObject {
                     self.lastError = "could not open a session (is the workspace path valid?)"
                     return
                 }
-                self.handle = h
+                self.handle = Handle(raw: h)
                 self.sessionID = chorus_engine_session_id(h)
                 self.refresh()
             }
@@ -88,7 +114,7 @@ final class Engine: ObservableObject {
     }
 
     func close() {
-        if let h = handle { chorus_engine_free(h) }
+        if let h = handle { chorus_engine_free(h.raw) }
         handle = nil
     }
 
@@ -127,7 +153,7 @@ final class Engine: ObservableObject {
     func sendInteractive(_ prompt: String, agent: String) {
         guard let h = handle, !busy else { return }
         busy = true; lastError = nil
-        let ctx = Unmanaged.passUnretained(self).toOpaque()
+        let ctx = CallbackContext(raw: Unmanaged.passUnretained(self).toOpaque())
         let cb: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Int32 = { ctx, ask in
             guard let ctx, let ask else { return 0 }
             let engine = Unmanaged<Engine>.fromOpaque(ctx).takeUnretainedValue()
@@ -136,7 +162,7 @@ final class Engine: ObservableObject {
         queue.async { [weak self] in
             let json = prompt.withCString { p in
                 agent.withCString { a in
-                    Self.string(from: chorus_run_turn_interactive(h, a, p, cb, ctx))
+                    Self.string(from: chorus_run_turn_interactive(h.raw, a, p, cb, ctx.raw))
                 }
             }
             let r = Self.decode(TurnResult.self, json)
@@ -144,19 +170,22 @@ final class Engine: ObservableObject {
                 self?.busy = false
                 if r?.ok != true { self?.lastError = r?.error ?? "turn failed" }
                 self?.refresh()
+                self?.compactIfIdle()
             }
         }
     }
 
     /// Run one turn, then refresh the transcript.
-    func send(_ prompt: String, agent: String, allow: Bool) {
+    /// `level` mirrors `Policy::from_level` in chorus-cli/session.rs:
+    /// 0 deny · 1 read-only (auto-allow reads, deny writes/commands/network) · 2 allow all.
+    func send(_ prompt: String, agent: String, level: Int32) {
         guard let h = handle, !busy else { return }
         busy = true
         lastError = nil
         queue.async { [weak self] in
             let json = prompt.withCString { p in
                 agent.withCString { a in
-                    Self.string(from: chorus_run_turn(h, a, p, allow ? 1 : 0))
+                    Self.string(from: chorus_run_turn(h.raw, a, p, level))
                 }
             }
             let result = Self.decode(TurnResult.self, json)
@@ -169,18 +198,19 @@ final class Engine: ObservableObject {
                     self?.lastError = result?.error ?? "turn failed"
                 }
                 self?.refresh()
+                self?.compactIfIdle()
             }
         }
     }
 
     /// Run one turn against a relay chain (comma-separated agent names).
-    func sendRelay(_ prompt: String, agents: String, allow: Bool) {
+    func sendRelay(_ prompt: String, agents: String, level: Int32) {
         guard let h = handle, !busy else { return }
         busy = true; lastError = nil
         queue.async { [weak self] in
             let json = prompt.withCString { p in
                 agents.withCString { a in
-                    Self.string(from: chorus_run_relay(h, a, p, allow ? 1 : 0))
+                    Self.string(from: chorus_run_relay(h.raw, a, p, level))
                 }
             }
             let obj = Self.decode(SimpleResult.self, json)
@@ -188,19 +218,20 @@ final class Engine: ObservableObject {
                 self?.busy = false
                 if obj?.ok != true { self?.lastError = obj?.error ?? "relay failed" }
                 self?.refresh()
+                self?.compactIfIdle()
             }
         }
     }
 
     /// Compare mode — fork per agent, run the prompt on each.
-    func compare(_ prompt: String, agents: String, allow: Bool,
+    func compare(_ prompt: String, agents: String, level: Int32,
                  completion: @escaping (String) -> Void) {
         guard let h = handle, !busy else { return }
         busy = true; lastError = nil
         queue.async { [weak self] in
             let json = prompt.withCString { p in
                 agents.withCString { a in
-                    Self.string(from: chorus_compare(h, a, p, allow ? 1 : 0))
+                    Self.string(from: chorus_compare(h.raw, a, p, level))
                 }
             }
             DispatchQueue.main.async {
@@ -212,7 +243,7 @@ final class Engine: ObservableObject {
     }
 
     /// Hand the session to another agent.
-    func handoff(to: String, reason: String, goal: String, done: [String], pending: [String], allow: Bool,
+    func handoff(to: String, reason: String, goal: String, done: [String], pending: [String], level: Int32,
                  completion: @escaping (HandoffResult?) -> Void) {
         guard let h = handle, !busy else { return }
         busy = true
@@ -225,7 +256,7 @@ final class Engine: ObservableObject {
                     goal.withCString { g in
                         doneJSON.withCString { d in
                             pendingJSON.withCString { p in
-                                Self.string(from: chorus_handoff(h, t, r, g, d, p, allow ? 1 : 0))
+                                Self.string(from: chorus_handoff(h.raw, t, r, g, d, p, level))
                             }
                         }
                     }
@@ -249,13 +280,21 @@ final class Engine: ObservableObject {
     func refresh() {
         guard let h = handle else { return }
         queue.async { [weak self] in
-            let eventsJSON = Self.string(from: chorus_transcript_json(h))
-            let diffJSON = Self.string(from: chorus_working_diff(h))
-            let memJSON = Self.string(from: chorus_memory_state(h))
+            let eventsJSON = Self.string(from: chorus_transcript_json(h.raw))
+            let diffJSON = Self.string(from: chorus_working_diff(h.raw))
+            let memJSON = Self.string(from: chorus_memory_state(h.raw))
+            let taskJSON = Self.string(from: chorus_task_state(h.raw))
+            let warmJSON = Self.string(from: chorus_uncompacted(h.raw))
             DispatchQueue.main.async {
                 guard let self else { return }
                 if let rows = Self.decode([LedgerEvent].self, eventsJSON) {
                     self.events = rows
+                }
+                if let t = Self.decode(TaskStateResult.self, taskJSON) {
+                    self.taskState = t.text ?? ""
+                }
+                if let w = Self.decode(WarmTierResult.self, warmJSON) {
+                    self.uncompacted = w.pending ?? 0
                 }
                 if let obj = Self.decode(DiffResult.self, diffJSON) {
                     self.workingDiff = obj.diff ?? ""
@@ -263,6 +302,195 @@ final class Engine: ObservableObject {
                 if let s = Self.decode(MemoryState.self, memJSON) {
                     self.facts = s.facts ?? []
                     self.pending = s.pending ?? []
+                }
+            }
+        }
+    }
+
+    private struct TaskStateResult: Codable {
+        let ok: Bool?
+        let text: String?
+    }
+    private struct WarmTierResult: Codable {
+        let ok: Bool?
+        let pending: Int64?
+    }
+    private struct CompactResult: Codable {
+        let ok: Bool?
+        let compacted: Int?
+        let remaining: Int?
+        let model: String?
+        let error: String?
+    }
+
+
+    // MARK: agents, sessions, one-click handoff
+
+    struct ModelChoice: Codable, Hashable {
+        let id: String
+        let label: String
+        let is_default: Bool
+    }
+
+    struct AgentInfo: Codable, Identifiable, Hashable {
+        let id: String
+        let label: String
+        let models: [ModelChoice]
+        let auth: String        // "ok" | "needs_login" | "missing_cli"
+        let hint: String        // the exact command that fixes it
+        let detail: String
+
+        var ready: Bool { auth == "ok" }
+        var defaultModel: String { models.first(where: { $0.is_default })?.id ?? models.first?.id ?? id }
+    }
+
+    struct SessionSummary: Codable, Identifiable, Hashable {
+        let id: Int64
+        let title: String
+        let cwd: String
+        let started_ms: Int64
+        let last_ms: Int64
+        let events: Int64
+        let agents: [String]
+        let goal: String
+        let forked_from: Int64?
+    }
+
+    private struct AgentsResult: Codable { let ok: Bool?; let agents: [AgentInfo]? }
+    private struct SessionsResult: Codable { let ok: Bool?; let sessions: [SessionSummary]? }
+    private struct HandoffAutoResult: Codable {
+        let ok: Bool?; let to: String?; let goal: String?; let echo_back: String?; let error: String?
+    }
+
+    @Published var agents: [AgentInfo] = []
+    @Published var sessions: [SessionSummary] = []
+
+    /// Pin the model an agent runs. Must be called for the picker to mean
+    /// anything: the engine defaults to whatever the agent's own CLI is
+    /// configured for, so without this the picker changes a label and nothing
+    /// else — which is exactly what it did until this existed.
+    func setModel(agent: String, model: String) {
+        guard let h = handle else { return }
+        queue.async {
+            agent.withCString { a in
+                model.withCString { m in
+                    _ = Self.string(from: chorus_set_model(h.raw, a, m))
+                }
+            }
+        }
+    }
+
+    /// Which agents can actually run here. Cheap enough to call on every
+    /// appearance and after the user comes back from logging in.
+    func loadAgents() {
+        queue.async { [weak self] in
+            let json = Self.string(from: chorus_list_agents())
+            let r = Self.decode(AgentsResult.self, json)
+            DispatchQueue.main.async { self?.agents = r?.agents ?? [] }
+        }
+    }
+
+    /// Every past session in this project's store, newest activity first.
+    func loadSessions(db: String) {
+        queue.async { [weak self] in
+            let json = db.withCString { Self.string(from: chorus_list_sessions($0)) }
+            let r = Self.decode(SessionsResult.self, json)
+            DispatchQueue.main.async { self?.sessions = r?.sessions ?? [] }
+        }
+    }
+
+    /// Reopen a session that already exists, without starting a new one.
+    func reopen(db: String, sessionID: Int64) {
+        close()
+        busy = true
+        lastError = nil
+        queue.async { [weak self] in
+            let h = db.withCString { chorus_engine_reopen($0, sessionID) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.busy = false
+                guard let h else {
+                    self.lastError = "เปิด session \(sessionID) ไม่ได้"
+                    return
+                }
+                self.handle = Handle(raw: h)
+                self.sessionID = chorus_engine_session_id(h)
+                self.refresh()
+            }
+        }
+    }
+
+    /// Hand the session to another agent with nothing typed by the user: the
+    /// brief is built from task state the ledger already holds. This is the
+    /// difference between "switch agent" being a form and being a button.
+    func handoffAuto(to: String, level: Int32) {
+        guard let h = handle, !busy else { return }
+        busy = true
+        lastError = nil
+        queue.async { [weak self] in
+            let json = to.withCString { Self.string(from: chorus_handoff_auto(h.raw, $0, level)) }
+            let r = Self.decode(HandoffAutoResult.self, json)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.busy = false
+                if r?.ok != true { self.lastError = r?.error ?? "ส่งต่อไม่สำเร็จ" }
+                self.refresh()
+                self.compactIfIdle()
+            }
+        }
+    }
+
+    /// Open Terminal on the command that fixes an agent's login. The app can
+    /// not complete an OAuth flow itself, and pretending otherwise would just
+    /// hide the one step the user has to take.
+    func runLoginCommand(_ command: String) {
+        let script = "tell application \"Terminal\"\nactivate\ndo script \"\(command)\"\nend tell"
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        p.arguments = ["-e", script]
+        do { try p.run() } catch { lastError = "เปิด Terminal ไม่ได้: \(error.localizedDescription)" }
+    }
+
+    private struct AssembledContext: Codable {
+        let ok: Bool?
+        let text: String?
+        let tokens: Int64?
+        let error: String?
+    }
+
+    /// Exactly what a turn would hand the agent right now — not a summary of
+    /// it, the thing itself. The app claims to carry context between agents;
+    /// this is the button that lets someone check.
+    func assembledContext(budget: Int64 = 120_000, completion: @escaping (String, Int64) -> Void) {
+        guard let h = handle else { return completion("(ยังไม่ได้เปิดเซสชัน)", 0) }
+        queue.async {
+            let json = Self.string(from: chorus_assembled_context(h.raw, budget))
+            let r = Self.decode(AssembledContext.self, json)
+            DispatchQueue.main.async {
+                completion(r?.text ?? r?.error ?? "(ประกอบ context ไม่สำเร็จ)", r?.tokens ?? 0)
+            }
+        }
+    }
+
+    /// Fill in missing summary rungs — the warm tier the context assembler
+    /// reads. This is the one call that is *allowed* to be slow (it may run a
+    /// local model per event), which is exactly why context assembly never
+    /// does this work itself.
+    ///
+    /// It shares `queue` with turns on purpose: the Rust engine handle owns a
+    /// SQLite connection that is not safe to touch from two threads, and
+    /// `queue` being serial is what keeps that true today. So each pass is
+    /// deliberately small — a long session catches up over several turns
+    /// instead of making the next turn wait on one big pass.
+    func compactIfIdle(limit: Int32 = 40) {
+        guard let h = handle, !busy else { return }
+        queue.async { [weak self] in
+            let json = Self.string(from: chorus_compact(h.raw, limit))
+            let r = Self.decode(CompactResult.self, json)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let remaining = r?.remaining {
+                    self.uncompacted = Int64(remaining)
                 }
             }
         }
@@ -285,7 +513,7 @@ final class Engine: ObservableObject {
 
     func refreshMemory() {
         guard let h = handle else { return }
-        let json = Self.string(from: chorus_memory_state(h))
+        let json = Self.string(from: chorus_memory_state(h.raw))
         if let s = Self.decode(MemoryState.self, json) {
             facts = s.facts ?? []
             pending = s.pending ?? []
@@ -294,7 +522,7 @@ final class Engine: ObservableObject {
 
     func review(_ id: Int64, approve: Bool) {
         guard let h = handle else { return }
-        _ = Self.string(from: chorus_memory_review(h, id, approve ? 1 : 0))
+        _ = Self.string(from: chorus_memory_review(h.raw, id, approve ? 1 : 0))
         refreshMemory()
     }
 
@@ -304,7 +532,7 @@ final class Engine: ObservableObject {
     func snapshot() {
         guard let h = handle else { return }
         queue.async {
-            _ = "manual checkpoint".withCString { chorus_snapshot(h, $0) }
+            _ = "manual checkpoint".withCString { chorus_snapshot(h.raw, $0) }
             DispatchQueue.main.async { [weak self] in self?.refresh() }
         }
     }
@@ -313,7 +541,7 @@ final class Engine: ObservableObject {
     func rejectHunks(_ patch: String) {
         guard let h = handle else { return }
         queue.async { [weak self] in
-            let r = patch.withCString { Self.string(from: chorus_reject_hunks(h, $0)) }
+            let r = patch.withCString { Self.string(from: chorus_reject_hunks(h.raw, $0)) }
             let obj = Self.decode(SimpleResult.self, r)
             DispatchQueue.main.async {
                 if obj?.ok != true { self?.lastError = obj?.error ?? "reject failed" }
@@ -326,7 +554,7 @@ final class Engine: ObservableObject {
     func revertToStart() {
         guard let h = handle else { return }
         queue.async { [weak self] in
-            let r = "".withCString { Self.string(from: chorus_restore(h, $0)) }
+            let r = "".withCString { Self.string(from: chorus_restore(h.raw, $0)) }
             let obj = Self.decode(SimpleResult.self, r)
             DispatchQueue.main.async {
                 if obj?.ok != true { self?.lastError = obj?.error ?? "restore failed" }

@@ -1,4 +1,39 @@
+import AppKit
 import SwiftUI
+
+/// Mirrors `Policy::from_level` in chorus-cli/session.rs — the FFI takes
+/// this as a plain int, not a bool, since read-only sits between deny
+/// and allow (auto-approves reads, still denies writes/commands/network).
+/// What the agent may do. Two answers, not four.
+///
+/// There were four: ask / deny / read-only / allow. Two of them stopped being
+/// distinguishable once the engine learned that agents do not reliably ask
+/// permission at all — deny and read-only now produce the same thing (the
+/// restricted ACP mode, plus a revert of anything written anyway), and
+/// deny-everything was never usable: an agent that may not read cannot answer.
+/// A control whose options differ only in theory is a control that makes people
+/// guess, so it is down to the two answers that behave differently.
+enum PermissionLevel: Int32, CaseIterable {
+    /// Routes to the interactive path: each request pops a dialog, and if the
+    /// agent writes without asking, the turn is reverted.
+    case ask = -1
+    /// Everything allowed, nothing reverted.
+    case allowAll = 2
+
+    var label: String {
+        switch self {
+        case .ask: "ถามก่อน"
+        case .allowAll: "ให้ทำเลย"
+        }
+    }
+
+    var hint: String {
+        switch self {
+        case .ask: "เด้งถามก่อนเขียนไฟล์หรือรันคำสั่ง — ถ้า agent เขียนโดยไม่ถาม Chorus ย้อนกลับให้"
+        case .allowAll: "ให้ทำได้ทุกอย่างโดยไม่ถาม — ใช้กับโฟลเดอร์ที่ลบทิ้งได้เท่านั้น"
+        }
+    }
+}
 
 /// sessions (left) · thread (centre) · context (right) — the layout from
 /// design §7, at its smallest. Every action goes straight to `Engine`,
@@ -12,20 +47,24 @@ struct ContentView: View {
     // a home folder (worse still if it's iCloud-synced). Force a real
     // project path instead of silently picking something enormous.
     @State private var workspace = ""
+    @State private var recents: [String] =
+        UserDefaults.standard.stringArray(forKey: "chorus.recentWorkspaces") ?? []
     @State private var draft = ""
     @State private var agent = "codex"
-    @State private var allow = false
-    @State private var sendMode = SendMode.single
-    @State private var chainAgents = "codex,claude-opus"
+    @State private var permission = PermissionLevel.ask
+    @State private var model = ""
+    @State private var showSettings = false
     @State private var compareOutput: String?
+    @State private var inspected: (text: String, tokens: Int64)?
+    @State private var lastPrompt = ""
 
-    enum SendMode: String, CaseIterable { case single = "Single", relay = "Relay", compare = "Compare", ask = "Ask each" }
-    @State private var showHandoff = false
     @State private var rightTab = RightTab.context
     @State private var confirmRevert = false
     @State private var rejected: Set<UUID> = []
 
-    enum RightTab: String, CaseIterable { case context = "Context", changes = "Changes", memory = "Memory" }
+    enum RightTab: String, CaseIterable {
+        case sessions = "เซสชัน", context = "คอนเท็กซ์", changes = "ที่แก้ไป", memory = "ความจำ"
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -43,6 +82,7 @@ struct ContentView: View {
                     .padding(8)
                     Divider()
                     switch rightTab {
+                    case .sessions: sessionsPane
                     case .context: contextPane
                     case .changes: changesPane
                     case .memory: memoryPane
@@ -53,19 +93,44 @@ struct ContentView: View {
         }
         .toolbar {
             ToolbarItem(placement: .principal) {
-                Text(engine.sessionID >= 0 ? "session \(engine.sessionID)" : "no session")
+                Text(engine.sessionID >= 0 ? "เซสชัน \(engine.sessionID)" : "ยังไม่ได้เปิดเซสชัน")
                     .font(.headline)
             }
+            ToolbarItemGroup(placement: .primaryAction) {
+                // Handing over is one click per agent. Everything the next
+                // agent needs is already in the ledger, so asking the user to
+                // fill in a form would be asking them to retype what we know.
+                if engine.sessionID >= 0 {
+                    ForEach(engine.agents.filter { $0.ready && $0.id != currentAgentID }) { a in
+                        Button {
+                            engine.handoffAuto(to: a.defaultModel, level: max(permission.rawValue, 0))
+                        } label: {
+                            Label("ส่งต่อให้ \(a.label)", systemImage: "arrow.left.arrow.right")
+                        }
+                        .disabled(engine.busy)
+                        .help("ส่งงานต่อให้ \(a.label) พร้อมเป้าหมาย สิ่งที่ทำไปแล้ว และ diff — ไม่ต้องพิมพ์อะไร")
+                    }
+                }
+                Button { showSettings = true } label: {
+                    Label("ตั้งค่า", systemImage: "gearshape")
+                }
+            }
         }
-        .sheet(isPresented: $showHandoff) {
-            HandoffSheet().environmentObject(engine)
+        .onAppear { engine.loadAgents() }
+        .onChange(of: engine.agents) { _ in syncModelSelection() }
+        .onChange(of: model) { m in applyModel(m) }
+        .sheet(isPresented: $showSettings) {
+            SettingsSheet().environmentObject(engine)
         }
         .sheet(isPresented: Binding(get: { compareOutput != nil }, set: { if !$0 { compareOutput = nil } })) {
             CompareResultsSheet(json: compareOutput ?? "")
         }
+        .sheet(isPresented: Binding(get: { inspected != nil }, set: { if !$0 { inspected = nil } })) {
+            contextInspector
+        }
         .sheet(item: $engine.pendingAsk) { ask in
             VStack(alignment: .leading, spacing: 14) {
-                Text("Permission").font(.title3.bold())
+                Text("ขออนุญาต").font(.title3.bold())
                 Text("\(agent) wants to: **\(ask.tool)**")
                 if !ask.kind.isEmpty {
                     Text("kind: \(ask.kind)").font(.caption).foregroundStyle(.secondary)
@@ -95,74 +160,147 @@ struct ContentView: View {
     private var sidebar: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                sidebarSection("Workspace") {
-                    TextField("/path/to/a/small/project", text: $workspace)
-                        .textFieldStyle(.roundedBorder)
-                    Text("A real project folder — the first turn snapshots the whole "
-                         + "tree, so avoid your home directory or anything iCloud-synced.")
+                sidebarSection("โฟลเดอร์งาน") {
+                    if workspace.isEmpty {
+                        Button(action: pickFolder) {
+                            VStack(spacing: 8) {
+                                Image(systemName: "folder.badge.plus")
+                                    .font(.system(size: 26))
+                                    .foregroundStyle(.secondary)
+                                Text("เลือกโฟลเดอร์โปรเจกต์")
+                                    .font(.callout.weight(.medium))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 18)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [5]))
+                                .foregroundStyle(.tertiary)
+                        )
+
+                        if !recents.isEmpty {
+                            Text("Recent").font(.caption).foregroundStyle(.secondary).padding(.top, 2)
+                            ForEach(recents, id: \.self) { path in
+                                Button { workspace = path } label: {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "clock")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            Text((path as NSString).lastPathComponent)
+                                                .font(.caption.weight(.medium))
+                                            Text(path)
+                                                .font(.caption2).foregroundStyle(.tertiary)
+                                                .lineLimit(1).truncationMode(.middle)
+                                        }
+                                        Spacer(minLength: 0)
+                                    }
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.vertical, 2)
+                            }
+                        }
+                    } else {
+                        HStack(spacing: 10) {
+                            Image(systemName: "folder.fill")
+                                .font(.title3).foregroundStyle(.blue)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text((workspace as NSString).lastPathComponent)
+                                    .font(.callout.weight(.semibold)).lineLimit(1)
+                                Text(workspace)
+                                    .font(.caption2).foregroundStyle(.secondary)
+                                    .lineLimit(1).truncationMode(.middle)
+                            }
+                            Spacer(minLength: 0)
+                            Button("Change…", action: pickFolder)
+                                .controlSize(.small)
+                                .disabled(engine.busy)
+                        }
+                        .padding(10)
+                        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+                    }
+
+                    Text("เทิร์นแรกจะ snapshot ทั้งโฟลเดอร์ — อย่าเลือก home หรือโฟลเดอร์ที่ sync iCloud")
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+
                     Button {
-                        let db = (workspace as NSString)
-                            .appendingPathComponent(".chorus/store.db")
-                        try? FileManager.default.createDirectory(
-                            atPath: (db as NSString).deletingLastPathComponent,
-                            withIntermediateDirectories: true)
-                        engine.open(db: db, cwd: workspace, title: "session")
+                        startSession()
                     } label: {
                         HStack(spacing: 6) {
                             if engine.busy {
                                 ProgressView().controlSize(.small)
-                                Text("Snapshotting workspace…")
+                                Text("กำลัง snapshot โฟลเดอร์…")
                             } else {
-                                Text("Start session here")
+                                Image(systemName: "play.fill")
+                                Text("เริ่มเซสชัน")
                             }
                             Spacer(minLength: 0)
                         }
                     }
+                    .buttonStyle(.borderedProminent)
                     .disabled(engine.busy || workspace.trimmingCharacters(in: .whitespaces).isEmpty)
                     .frame(maxWidth: .infinity)
                 }
 
-                sidebarSection("Agent") {
-                    Text("send as").font(.caption).foregroundStyle(.secondary)
-                    Picker("", selection: $sendMode) {
-                        ForEach(SendMode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                sidebarSection("เอเจนต์") {
+                    if engine.agents.isEmpty {
+                        Text("กำลังดูว่ามีตัวไหนใช้ได้บ้าง…")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Picker("", selection: $model) {
+                        ForEach(engine.agents) { a in
+                            ForEach(a.models, id: \.id) { m in
+                                Text(a.ready ? m.label : "\(m.label) — ยังไม่ได้ login")
+                                    .tag(m.id)
+                            }
+                        }
                     }
                     .labelsHidden()
                     .frame(maxWidth: .infinity)
 
-                    if sendMode == .single {
-                        Text("current").font(.caption).foregroundStyle(.secondary)
-                        Picker("", selection: $agent) {
-                            Text("codex").tag("codex")
-                            Text("claude-opus").tag("claude-opus")
-                            Text("gemini").tag("gemini")
+                    if let a = agentFor(model), !a.ready {
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                            Text(a.detail).font(.caption2)
+                            Spacer(minLength: 0)
+                            Button("แก้") { showSettings = true }
+                                .buttonStyle(.link).font(.caption2)
                         }
-                        .labelsHidden()
-                        .frame(maxWidth: .infinity)
-                    } else {
-                        Text("chain (comma-separated)").font(.caption).foregroundStyle(.secondary)
-                        TextField("codex,claude-opus", text: $chainAgents)
-                            .textFieldStyle(.roundedBorder)
-                        Text(sendMode == .relay
-                             ? "tries each in order; hands off on rate limit / quota"
-                             : "forks per agent, runs the same prompt, compare the diffs")
-                            .font(.caption2).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    Toggle(isOn: $allow) {
-                        Text("Allow file writes / commands")
-                            .fixedSize(horizontal: false, vertical: true)
+                    Text("ถ้าตัวนี้ชนลิมิต Chorus จะสลับไปตัวที่เหลือให้เองโดยไม่ต้องสั่ง")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text("สิทธิ์").font(.caption).foregroundStyle(.secondary)
+                    Picker("", selection: $permission) {
+                        ForEach(PermissionLevel.allCases, id: \.self) { Text($0.label).tag($0) }
                     }
-                    .toggleStyle(.checkbox)
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    Text(permission.hint)
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if engine.sessionID >= 0 {
-                    Button("Hand off…") { showHandoff = true }
-                        .disabled(engine.busy)
-                        .frame(maxWidth: .infinity)
+                    Button("ถามหลายตัวพร้อมกันแล้วเทียบ") {
+                        let others = engine.agents.filter(\.ready).map(\.defaultModel)
+                        guard others.count > 1 else { return }
+                        engine.compare(
+                            lastPrompt.isEmpty ? "ทบทวนงานที่ค้างอยู่แล้วเสนอขั้นต่อไป" : lastPrompt,
+                            agents: others.joined(separator: ","),
+                            level: max(permission.rawValue, 0)
+                        ) { compareOutput = $0 }
+                    }
+                    .disabled(engine.busy || engine.agents.filter(\.ready).count < 2)
+                    .frame(maxWidth: .infinity)
+                    .help("แยกสาขาให้แต่ละตัวทำโจทย์เดียวกัน แล้วเอา diff มาเทียบ")
                 }
 
                 Spacer(minLength: 0)
@@ -171,6 +309,80 @@ struct ContentView: View {
         }
         .navigationTitle("Chorus")
         .frame(minWidth: 280, idealWidth: 300)
+    }
+
+    /// The agent whose model id is currently selected.
+    private func agentFor(_ modelID: String) -> Engine.AgentInfo? {
+        engine.agents.first { $0.models.contains(where: { $0.id == modelID }) || $0.id == modelID }
+    }
+    /// Keep the model picker pointed at something that actually exists.
+    ///
+    /// The picker's tags are *model* ids (`gpt-5.1-codex`), and it was seeded
+    /// with an *agent* id (`"codex"`). SwiftUI renders a Picker whose selection
+    /// matches no tag as blank — so the app opened with an empty agent box and
+    /// no way to tell whether detection had failed or the list was just not
+    /// drawn. Seed from the loaded agents instead: a ready one first, because a
+    /// picker should not default to something that cannot answer a turn.
+    /// Tell the engine which model the picked one is. Without this the
+    /// selection is decoration — the agent runs whatever its own CLI defaults
+    /// to, and the label lies.
+    private func applyModel(_ modelID: String) {
+        guard let a = agentFor(modelID) else { return }
+        engine.setModel(agent: a.id, model: modelID)
+    }
+
+    private func syncModelSelection() {
+        let known = engine.agents.flatMap { $0.models.map(\.id) }
+        guard !known.isEmpty else { return }
+        if known.contains(model) {
+            applyModel(model)
+            return
+        }
+        model = engine.agents.first(where: \.ready)?.defaultModel
+            ?? engine.agents[0].defaultModel
+        applyModel(model)
+    }
+
+
+    private var currentAgentID: String { agentFor(model)?.id ?? "" }
+
+    /// The chosen agent first, then every other agent that could actually take
+    /// over. Built here rather than typed by the user — that text field was the
+    /// single most confusing control in the old window.
+    private var relayChain: String {
+        var chain = [model]
+        for a in engine.agents where a.ready && a.id != currentAgentID {
+            chain.append(a.defaultModel)
+        }
+        return chain.joined(separator: ",")
+    }
+
+    private func pickFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Select"
+        panel.message = "เลือกโฟลเดอร์โปรเจกต์ให้ Chorus"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        workspace = url.path
+        addRecent(url.path)
+    }
+
+    private func addRecent(_ path: String) {
+        var list = recents.filter { $0 != path }
+        list.insert(path, at: 0)
+        if list.count > 6 { list = Array(list.prefix(6)) }
+        recents = list
+        UserDefaults.standard.set(list, forKey: "chorus.recentWorkspaces")
+    }
+
+    private func startSession() {
+        let db = (workspace as NSString).appendingPathComponent(".chorus/store.db")
+        try? FileManager.default.createDirectory(
+            atPath: (db as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true)
+        engine.open(db: db, cwd: workspace, title: "session")
     }
 
     /// A section header plus its content, spaced and left-aligned — the
@@ -196,23 +408,41 @@ struct ContentView: View {
                     .padding(8)
                     .background(.red.opacity(0.08))
             }
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(engine.events) { ev in
-                            EventRow(event: ev).id(ev.seq)
+            if engine.sessionID < 0 {
+                emptyState
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 10) {
+                            ForEach(engine.events) { ev in
+                                EventRow(event: ev).id(ev.seq)
+                            }
                         }
+                        .padding(12)
                     }
-                    .padding(12)
-                }
-                .onChange(of: engine.events.count) { _ in
-                    if let last = engine.events.last { proxy.scrollTo(last.seq, anchor: .bottom) }
+                    .onChange(of: engine.events.count) { _ in
+                        if let last = engine.events.last { proxy.scrollTo(last.seq, anchor: .bottom) }
+                    }
                 }
             }
             Divider()
             composer
         }
         .frame(minWidth: 380)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            Spacer()
+            Image(systemName: "bubble.left.and.bubble.right")
+                .font(.system(size: 36)).foregroundStyle(.tertiary)
+            Text("ยังไม่ได้เปิดเซสชัน").font(.title3.weight(.semibold))
+            Text("เลือกโฟลเดอร์โปรเจกต์ทางซ้าย แล้วกดเริ่มเซสชัน")
+                .font(.callout).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var composer: some View {
@@ -224,15 +454,14 @@ struct ContentView: View {
                 let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else { return }
                 draft = ""
-                switch sendMode {
-                case .single:
-                    engine.send(text, agent: agent, allow: allow)
-                case .ask:
-                    engine.sendInteractive(text, agent: agent)
-                case .relay:
-                    engine.sendRelay(text, agents: chainAgents, allow: allow)
-                case .compare:
-                    engine.compare(text, agents: chainAgents, allow: allow) { compareOutput = $0 }
+                lastPrompt = text
+                if permission == .ask {
+                    engine.sendInteractive(text, agent: model)
+                } else {
+                    // Always the relay path, even for one agent: a chain of one
+                    // behaves exactly like a single turn, and the user never has
+                    // to know the word "relay" to get failover.
+                    engine.sendRelay(text, agents: relayChain, level: permission.rawValue)
                 }
             } label: {
                 if engine.busy { ProgressView().controlSize(.small) }
@@ -330,9 +559,110 @@ struct ContentView: View {
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
+    /// The app's honesty surface. Everything else in this window *describes*
+    /// what gets carried between agents; this shows the bytes.
+    private var contextInspector: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("สิ่งที่ agent ตัวถัดไปจะได้เห็น").font(.headline)
+                    Text("ประกอบสดจาก ledger ไม่ใช่คำอธิบาย — นี่คือข้อความจริงที่จะถูกส่ง")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let n = inspected?.tokens, n > 0 {
+                    Text("\(n) token").font(.caption.monospaced()).foregroundStyle(.secondary)
+                }
+                Button("Done") { inspected = nil }.keyboardShortcut(.defaultAction)
+            }
+            ScrollView {
+                Text(inspected?.text ?? "")
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 640, minHeight: 460)
+    }
+
+    /// Every past conversation in this project. The app's own memory is the
+    /// selling point; not being able to see what it remembers was odd.
+    private var sessionsPane: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("เซสชันทั้งหมด").font(.headline)
+                Spacer()
+                Button {
+                    engine.loadSessions(db: dbPath)
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .disabled(workspace.isEmpty)
+            }
+            if engine.sessions.isEmpty {
+                Text(workspace.isEmpty
+                     ? "เลือกโฟลเดอร์โปรเจกต์ก่อน"
+                     : "ยังไม่มี session ในโปรเจกต์นี้")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    ForEach(engine.sessions) { s in
+                        Button {
+                            engine.reopen(db: dbPath, sessionID: s.id)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(spacing: 6) {
+                                    Text("#\(s.id)")
+                                        .font(.caption2.monospaced())
+                                        .foregroundStyle(.tertiary)
+                                    Text(s.goal.isEmpty ? s.title : s.goal)
+                                        .font(.caption.weight(.medium))
+                                        .lineLimit(2)
+                                        .multilineTextAlignment(.leading)
+                                    Spacer(minLength: 0)
+                                }
+                                HStack(spacing: 5) {
+                                    ForEach(s.agents, id: \.self) { a in
+                                        Text(a)
+                                            .font(.caption2)
+                                            .padding(.horizontal, 4).padding(.vertical, 1)
+                                            .background(.quaternary, in: Capsule())
+                                    }
+                                    Text("\(s.events) events")
+                                        .font(.caption2).foregroundStyle(.tertiary)
+                                    if s.forked_from != nil {
+                                        Image(systemName: "arrow.triangle.branch")
+                                            .font(.caption2).foregroundStyle(.tertiary)
+                                    }
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(7)
+                            .background(
+                                s.id == engine.sessionID ? Color.accentColor.opacity(0.15) : Color.clear,
+                                in: RoundedRectangle(cornerRadius: 6))
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .onAppear { if !workspace.isEmpty { engine.loadSessions(db: dbPath) } }
+    }
+
+    private var dbPath: String {
+        (workspace as NSString).appendingPathComponent(".chorus/store.db")
+    }
+
     private var contextPane: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Context").font(.headline)
+            Text("คอนเท็กซ์").font(.headline)
             if let used = engine.contextUsed, let win = engine.contextWindow, win > 0 {
                 let frac = Double(used) / Double(win)
                 ProgressView(value: frac) {
@@ -343,10 +673,50 @@ struct ContentView: View {
                         .font(.caption).foregroundStyle(.orange)
                 }
             } else {
-                Text("no turn yet").font(.caption).foregroundStyle(.secondary)
+                Text("ยังไม่มีเทิร์น").font(.caption).foregroundStyle(.secondary)
             }
+
+            Button {
+                engine.assembledContext { text, tokens in
+                    inspected = (text, tokens)
+                }
+            } label: {
+                Label("ดูสิ่งที่ agent เห็นจริง ๆ", systemImage: "doc.text.magnifyingglass")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(engine.sessionID < 0)
+
+            // The tier the design never trims. Showing it is also the cheapest
+            // way to notice if it ever goes empty again.
+            if !engine.taskState.isEmpty {
+                Divider()
+                Text("Task state").font(.caption.weight(.semibold))
+                ScrollView {
+                    Text(engine.taskState)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 160)
+            }
+
             Spacer()
-            Text("\(engine.events.count) events").font(.caption).foregroundStyle(.secondary)
+
+            // The warm tier catches up a little after every turn; this is just
+            // so a backlog is visible rather than mysterious.
+            HStack(spacing: 6) {
+                Text("\(engine.events.count) events")
+                if engine.uncompacted > 0 {
+                    Text("·")
+                    Text("\(engine.uncompacted) to summarise")
+                    Button("Now") { engine.compactIfIdle(limit: 500) }
+                        .buttonStyle(.link)
+                        .disabled(engine.busy)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
         .padding(12)
         .frame(maxHeight: .infinity, alignment: .top)
@@ -366,13 +736,53 @@ struct EventRow: View {
                 Spacer()
                 Text("#\(event.seq)").font(.caption2).foregroundStyle(.tertiary)
             }
-            Text(event.body)
-                .font(event.kind == "msg" ? .body : .caption.monospaced())
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if event.kind == "handoff", let b = HandoffBrief(json: event.body) {
+                handoffBody(b)
+            } else {
+                Text(event.body)
+                    .font(event.kind == "msg" ? .body : .caption.monospaced())
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .padding(8)
         .background(rowColor, in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    /// The handoff is the product's whole argument, so it gets read as a
+    /// moment — who fell over, why, and what the next agent was told — rather
+    /// than as the brief's raw JSON.
+    @ViewBuilder
+    private func handoffBody(_ b: HandoffBrief) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Text(b.from).font(.caption.bold())
+                Image(systemName: "arrow.right").font(.caption2)
+                Text(b.to).font(.caption.bold())
+                Text(b.reason)
+                    .font(.caption2)
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(.orange.opacity(0.25), in: Capsule())
+            }
+            if !b.goal.isEmpty {
+                Text("goal · \(b.goal)").font(.caption)
+            }
+            HStack(spacing: 10) {
+                if !b.done.isEmpty { Text("done \(b.done.count)") }
+                if !b.pending.isEmpty { Text("pending \(b.pending.count)") }
+                if !b.files.isEmpty { Text("files \(b.files.count)") }
+                if b.diffBytes > 0 { Text("diff \(b.diffBytes)B") }
+            }
+            .font(.caption2).foregroundStyle(.secondary)
+            DisclosureGroup("ดู brief ที่ส่งต่อ") {
+                Text(event.body)
+                    .font(.caption2.monospaced())
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .font(.caption2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var rowColor: Color {
@@ -382,66 +792,6 @@ struct EventRow: View {
         case "tool_call", "tool_result": return .secondary.opacity(0.08)
         default: return event.actor == "user" ? .blue.opacity(0.08) : .clear
         }
-    }
-}
-
-struct HandoffSheet: View {
-    @EnvironmentObject var engine: Engine
-    @Environment(\.dismiss) private var dismiss
-
-    @State private var to = "codex"
-    @State private var reason = "rate_limit"
-    @State private var goal = ""
-    @State private var pending = ""
-    @State private var echo: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Hand off the session").font(.title3.bold())
-            HStack {
-                Picker("to", selection: $to) {
-                    Text("codex").tag("codex")
-                    Text("claude-opus").tag("claude-opus")
-                    Text("gemini").tag("gemini")
-                }
-                Picker("reason", selection: $reason) {
-                    Text("rate limit").tag("rate_limit")
-                    Text("quota").tag("quota")
-                    Text("context full").tag("context")
-                    Text("my choice").tag("manual")
-                }
-            }
-            TextField("goal for the next agent", text: $goal)
-                .textFieldStyle(.roundedBorder)
-            TextField("pending (one per line)", text: $pending, axis: .vertical)
-                .lineLimit(2...5)
-                .textFieldStyle(.roundedBorder)
-
-            if let echo {
-                GroupBox("Incoming agent understood:") {
-                    Text(echo).font(.callout).frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }
-                Button(engine.busy ? "Handing off…" : "Hand off") {
-                    engine.handoff(
-                        to: to, reason: reason, goal: goal,
-                        done: [],
-                        pending: pending.split(separator: "\n").map(String.init),
-                        allow: false
-                    ) { result in
-                        echo = result?.echo_back
-                    }
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(goal.isEmpty || engine.busy)
-            }
-        }
-        .padding(20)
-        .frame(width: 480)
     }
 }
 
@@ -576,6 +926,118 @@ struct HunkView: View {
             .padding(4)
             .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 4))
             .opacity(rejected ? 0.45 : 1)
+        }
+    }
+}
+
+/// Just enough of the handoff brief to render the moment it describes.
+struct HandoffBrief {
+    let goal: String
+    let done: [String]
+    let pending: [String]
+    let files: [String]
+    let diffBytes: Int
+    let from: String
+    let to: String
+    let reason: String
+
+    init?(json: String) {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        let meta = obj["handoff"] as? [String: Any] ?? [:]
+        goal = obj["goal"] as? String ?? ""
+        done = obj["done"] as? [String] ?? []
+        pending = obj["pending"] as? [String] ?? []
+        files = obj["files"] as? [String] ?? []
+        diffBytes = (obj["diff"] as? String)?.utf8.count ?? 0
+        from = meta["from"] as? String ?? "?"
+        to = meta["to"] as? String ?? "?"
+        reason = (meta["reason"] as? String ?? "handoff").replacingOccurrences(of: "_", with: " ")
+    }
+}
+
+/// Everything that decides *whether Chorus can run at all* in one place:
+/// which agents are installed, which are logged in, and the one command that
+/// fixes each. The app cannot complete an OAuth flow for you, so it does the
+/// next most useful thing — opens Terminal on the exact command and then lets
+/// you re-check without restarting.
+struct SettingsSheet: View {
+    @EnvironmentObject var engine: Engine
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("ตั้งค่า").font(.title3.bold())
+                    Text("Chorus เรียก CLI ของแต่ละเจ้าผ่าน ACP — ต้อง login ที่ CLI นั้น ไม่ใช่ที่นี่")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("เสร็จ") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+
+            ForEach(engine.agents) { a in
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(a.ready ? Color.green : (a.auth == "needs_login" ? .orange : .red))
+                            .frame(width: 8, height: 8)
+                        Text(a.label).font(.headline)
+                        Spacer()
+                        Text(statusLabel(a.auth))
+                            .font(.caption)
+                            .foregroundStyle(a.ready ? .secondary : .primary)
+                    }
+                    Text(a.detail).font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if !a.models.isEmpty {
+                        Text("โมเดลที่เลือกได้").font(.caption2).foregroundStyle(.tertiary)
+                        Text(a.models.map(\.label).joined(separator: " · "))
+                            .font(.caption.monospaced())
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if !a.ready {
+                        HStack(spacing: 8) {
+                            Text(a.hint)
+                                .font(.caption.monospaced())
+                                .padding(.horizontal, 6).padding(.vertical, 3)
+                                .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+                                .textSelection(.enabled)
+                            Button("เปิด Terminal แล้วรันให้") { engine.runLoginCommand(a.hint) }
+                                .controlSize(.small)
+                            Button("ตรวจใหม่") { engine.loadAgents() }
+                                .controlSize(.small)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            Text("เปลี่ยนรายการโมเดลเองได้ด้วย CHORUS_CLAUDE_MODELS / CHORUS_CODEX_MODELS "
+                 + "(รูปแบบ id=ชื่อ คั่นด้วยจุลภาค) — ACP ไม่มีวิธีถามรายการโมเดลจาก agent "
+                 + "รายการนี้เลยเป็นของที่เราดูแลเอง ไม่ใช่ของที่ provider บอกมา")
+                .font(.caption2).foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 0)
+        }
+        .padding(18)
+        .frame(width: 520, height: 480)
+        .onAppear { engine.loadAgents() }
+    }
+
+    private func statusLabel(_ auth: String) -> String {
+        switch auth {
+        case "ok": "พร้อมใช้"
+        case "needs_login": "ยังไม่ได้ login"
+        default: "ยังไม่ได้ติดตั้ง CLI"
         }
     }
 }
