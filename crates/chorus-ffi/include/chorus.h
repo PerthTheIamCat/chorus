@@ -79,6 +79,9 @@ char *chorus_working_diff(const ChorusEngine *e);
 /* Stop the running turn; callable from any thread. {"ok":true,"was_running":bool} */
 char *chorus_cancel(void);
 
+/* Skills visible in a workspace (chorus/project/user). {"ok":true,"skills":[{name,description,path,source}]} */
+char *chorus_list_skills(const char *cwd);
+
 char *chorus_snapshot(const ChorusEngine *e, const char *message);
 
 /* Roll the workspace back to `sha` (NULL/"" = the session base).

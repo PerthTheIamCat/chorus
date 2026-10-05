@@ -63,6 +63,7 @@ struct ContentView: View {
 
     @State private var rightTab = RightTab.context
     @State private var showPalette = false
+    @State private var expanded: Set<String> = []
     @State private var queued: [(model: String, text: String)] = []
     @State private var hint: String?
     @State private var showAgentSettings = false
@@ -70,7 +71,7 @@ struct ContentView: View {
     @State private var rejected: Set<UUID> = []
 
     enum RightTab: String, CaseIterable {
-        case context = "คอนเท็กซ์", changes = "ที่แก้ไป", memory = "ความจำ"
+        case context = "คอนเท็กซ์", subagents = "งานย่อย", changes = "ที่แก้ไป", memory = "ความจำ"
     }
 
     var body: some View {
@@ -90,6 +91,7 @@ struct ContentView: View {
                     Divider()
                     switch rightTab {
                     case .context: contextPane
+                    case .subagents: subagentsPane
                     case .changes: changesPane
                     case .memory: memoryPane
                     }
@@ -123,6 +125,7 @@ struct ContentView: View {
             }
         }
         .onAppear { engine.loadAgents() }
+        .onChange(of: engine.sessionID) { _ in if !workspace.isEmpty { engine.loadSessions(db: dbPath) } }
         .onChange(of: engine.busy) { _ in flushQueue() }
         .onChange(of: engine.agents) { _ in syncModelSelection() }
         .onChange(of: model) { m in applyModel(m) }
@@ -132,7 +135,7 @@ struct ContentView: View {
                 .keyboardShortcut("k", modifiers: .command).opacity(0)
         )
         .sheet(isPresented: $showSettings) {
-            SettingsSheet().environmentObject(engine)
+            SettingsSheet(workspace: workspace).environmentObject(engine)
         }
         .sheet(isPresented: Binding(get: { compareOutput != nil }, set: { if !$0 { compareOutput = nil } })) {
             CompareResultsSheet(json: compareOutput ?? "")
@@ -172,95 +175,7 @@ struct ContentView: View {
     private var sidebar: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                sidebarSection("โฟลเดอร์งาน") {
-                    if workspace.isEmpty {
-                        Button(action: pickFolder) {
-                            VStack(spacing: 8) {
-                                Image(systemName: "folder.badge.plus")
-                                    .font(.system(size: 26))
-                                    .foregroundStyle(.secondary)
-                                Text("เลือกโฟลเดอร์โปรเจกต์")
-                                    .font(.callout.weight(.medium))
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 18)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8)
-                                .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [5]))
-                                .foregroundStyle(.tertiary)
-                        )
-
-                        if !recents.isEmpty {
-                            Text("Recent").font(.caption).foregroundStyle(.secondary).padding(.top, 2)
-                            ForEach(recents, id: \.self) { path in
-                                Button { workspace = path } label: {
-                                    HStack(spacing: 8) {
-                                        Image(systemName: "clock")
-                                            .font(.caption).foregroundStyle(.secondary)
-                                        VStack(alignment: .leading, spacing: 1) {
-                                            Text((path as NSString).lastPathComponent)
-                                                .font(.caption.weight(.medium))
-                                            Text(path)
-                                                .font(.caption2).foregroundStyle(.tertiary)
-                                                .lineLimit(1).truncationMode(.middle)
-                                        }
-                                        Spacer(minLength: 0)
-                                    }
-                                    .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .padding(.vertical, 2)
-                            }
-                        }
-                    } else {
-                        HStack(spacing: 10) {
-                            Image(systemName: "folder.fill")
-                                .font(.title3).foregroundStyle(.blue)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text((workspace as NSString).lastPathComponent)
-                                    .font(.callout.weight(.semibold)).lineLimit(1)
-                                Text(workspace)
-                                    .font(.caption2).foregroundStyle(.secondary)
-                                    .lineLimit(1).truncationMode(.middle)
-                            }
-                            Spacer(minLength: 0)
-                            Button("Change…", action: pickFolder)
-                                .controlSize(.small)
-                                .disabled(engine.busy)
-                        }
-                        .padding(10)
-                        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
-                    }
-
-                    Text("เทิร์นแรกจะ snapshot ทั้งโฟลเดอร์ — อย่าเลือก home หรือโฟลเดอร์ที่ sync iCloud")
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Button {
-                        startSession()
-                    } label: {
-                        HStack(spacing: 6) {
-                            if engine.busy {
-                                ProgressView().controlSize(.small)
-                                Text("กำลัง snapshot โฟลเดอร์…")
-                            } else {
-                                Image(systemName: "play.fill")
-                                Text("เริ่มเซสชัน")
-                            }
-                            Spacer(minLength: 0)
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(engine.busy || workspace.trimmingCharacters(in: .whitespaces).isEmpty)
-                    .frame(maxWidth: .infinity)
-                }
-
-                sidebarSection("เซสชัน") {
-                    sessionList
-                }
+                projectsSection
 
                 DisclosureGroup("เอเจนต์และสิทธิ์", isExpanded: $showAgentSettings) {
                   VStack(alignment: .leading, spacing: 6) {
@@ -385,16 +300,21 @@ struct ContentView: View {
         panel.prompt = "Select"
         panel.message = "เลือกโฟลเดอร์โปรเจกต์ให้ Chorus"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        workspace = url.path
         addRecent(url.path)
+        expanded.insert(url.path)
+        engine.loadSessions(db: dbPath(for: url.path))
     }
 
     private func addRecent(_ path: String) {
         var list = recents.filter { $0 != path }
         list.insert(path, at: 0)
-        if list.count > 6 { list = Array(list.prefix(6)) }
+        if list.count > 30 { list = Array(list.prefix(30)) }
         recents = list
-        UserDefaults.standard.set(list, forKey: "chorus.recentWorkspaces")
+        persistRecents()
+    }
+
+    private func persistRecents() {
+        UserDefaults.standard.set(recents, forKey: "chorus.recentWorkspaces")
     }
 
     private func startSession() {
@@ -738,60 +658,199 @@ struct ContentView: View {
         .frame(minWidth: 640, minHeight: 460)
     }
 
-    /// Every past conversation in this project, in the sidebar where Claude,
-    /// Codex and Conductor put theirs — the app's own memory is the selling
-    /// point, so it should be the first thing on the left, not a hidden tab.
-    private var sessionList: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if engine.sessions.isEmpty {
-                Text(workspace.isEmpty
-                     ? "เลือกโฟลเดอร์โปรเจกต์ก่อน"
-                     : "ยังไม่มี session ในโปรเจกต์นี้")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            ForEach(engine.sessions) { s in
-                Button {
-                    engine.reopen(db: dbPath, sessionID: s.id)
+    // MARK: projects — several folders at once, each with its own sessions
+
+    private func dbPath(for project: String) -> String {
+        (project as NSString).appendingPathComponent(".chorus/store.db")
+    }
+
+    private var projectsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("โปรเจกต์").font(.subheadline.bold())
+                Spacer()
+                Menu {
+                    Button("เพิ่มโฟลเดอร์ที่มีอยู่…", action: pickFolder)
+                    Button("สร้างโฟลเดอร์ใหม่…", action: createFolder)
                 } label: {
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 6) {
-                            Text("#\(s.id)")
-                                .font(.caption2.monospaced())
-                                .foregroundStyle(.tertiary)
-                            Text(s.goal.isEmpty ? s.title : s.goal)
-                                .font(.caption.weight(.medium))
-                                .lineLimit(2)
-                                .multilineTextAlignment(.leading)
-                            Spacer(minLength: 0)
-                        }
-                        HStack(spacing: 5) {
-                            ForEach(s.agents, id: \.self) { a in
-                                Text(a)
-                                    .font(.caption2)
-                                    .padding(.horizontal, 4).padding(.vertical, 1)
-                                    .background(.quaternary, in: Capsule())
-                            }
-                            Text("\(s.events) events")
-                                .font(.caption2).foregroundStyle(.tertiary)
-                            if s.forked_from != nil {
-                                Image(systemName: "arrow.triangle.branch")
-                                    .font(.caption2).foregroundStyle(.tertiary)
-                            }
-                        }
+                    Image(systemName: "plus")
+                }
+                .menuStyle(.borderlessButton).fixedSize()
+                .help("เพิ่มหรือสร้างโปรเจกต์")
+            }
+            if recents.isEmpty {
+                Button(action: pickFolder) {
+                    VStack(spacing: 8) {
+                        Image(systemName: "folder.badge.plus")
+                            .font(.system(size: 26)).foregroundStyle(.secondary)
+                        Text("เลือกโฟลเดอร์โปรเจกต์").font(.callout.weight(.medium))
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(7)
-                    .background(
-                        s.id == engine.sessionID ? Color.accentColor.opacity(0.15) : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 6))
+                    .frame(maxWidth: .infinity).padding(.vertical, 18)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [5]))
+                        .foregroundStyle(.tertiary))
+            }
+            ForEach(recents, id: \.self) { project in projectRow(project) }
+            Text("เทิร์นแรกของเซสชันใหม่จะ snapshot โฟลเดอร์ — อย่าเลือก home หรือโฟลเดอร์ที่ sync iCloud")
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func projectRow(_ project: String) -> some View {
+        let open = expanded.contains(project)
+        let sessions = engine.sessionsByDB[dbPath(for: project)] ?? []
+        return VStack(alignment: .leading, spacing: 4) {
+            Button {
+                if open { expanded.remove(project) } else {
+                    expanded.insert(project)
+                    engine.loadSessions(db: dbPath(for: project))
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: open ? "chevron.down" : "chevron.right")
+                        .font(.caption2).foregroundStyle(.secondary).frame(width: 10)
+                    Image(systemName: "folder.fill").foregroundStyle(.blue)
+                    Text((project as NSString).lastPathComponent)
+                        .font(.callout.weight(.medium)).lineLimit(1)
+                    Spacer(minLength: 0)
+                    if project == workspace && engine.sessionID >= 0 {
+                        Circle().fill(.green).frame(width: 6, height: 6)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(project)
+            .contextMenu {
+                Button("เปิดใน Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: project)]) }
+                Button("เอาออกจากรายการ") {
+                    recents.removeAll { $0 == project }
+                    persistRecents()
+                }
+            }
+            if open {
+                Button {
+                    workspace = project
+                    startSession()
+                } label: {
+                    Label(engine.busy && workspace == project ? "กำลัง snapshot…" : "เซสชันใหม่", systemImage: "plus")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .disabled(engine.busy)
+                .padding(.leading, 22)
+                if sessions.isEmpty {
+                    Text("ยังไม่มีเซสชัน").font(.caption2).foregroundStyle(.tertiary).padding(.leading, 22)
+                }
+                ForEach(sessions) { s in
+                    Button {
+                        workspace = project
+                        engine.reopen(db: dbPath(for: project), sessionID: s.id)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(s.goal.isEmpty ? s.title : s.goal)
+                                .font(.caption.weight(.medium)).lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                            HStack(spacing: 4) {
+                                ForEach(s.agents, id: \.self) { a in
+                                    Text(a).font(.caption2)
+                                        .padding(.horizontal, 4).padding(.vertical, 1)
+                                        .background(.quaternary, in: Capsule())
+                                }
+                                if s.forked_from != nil {
+                                    Image(systemName: "arrow.triangle.branch").font(.caption2).foregroundStyle(.tertiary)
+                                }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(6)
+                        .background(
+                            (project == workspace && s.id == engine.sessionID) ? Color.accentColor.opacity(0.15) : .clear,
+                            in: RoundedRectangle(cornerRadius: 6))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(engine.busy)
+                    .padding(.leading, 16)
+                }
             }
         }
-        .onAppear { if !workspace.isEmpty { engine.loadSessions(db: dbPath) } }
-        .onChange(of: workspace) { _ in if !workspace.isEmpty { engine.loadSessions(db: dbPath) } }
-        .onChange(of: engine.sessionID) { _ in if !workspace.isEmpty { engine.loadSessions(db: dbPath) } }
+        .onAppear { if open { engine.loadSessions(db: dbPath(for: project)) } }
+    }
+
+    private func createFolder() {
+        let panel = NSSavePanel()
+        panel.nameFieldLabel = "ชื่อโปรเจกต์"
+        panel.prompt = "สร้าง"
+        panel.message = "สร้างโฟลเดอร์ใหม่สำหรับโปรเจกต์"
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        addRecent(url.path)
+        expanded.insert(url.path)
+    }
+
+    /// Delegated work, read back from the ledger: every tool call that looks
+    /// like a spawned subagent (Task / Agent / delegate), the result that
+    /// followed it, and who ran it. This is the ledger's view — it fills in
+    /// when a turn ends, not while it streams.
+    private var subagentsPane: some View {
+        let evs = engine.events
+        let calls: [(call: LedgerEvent, result: LedgerEvent?)] = evs.enumerated().compactMap { i, e in
+            guard e.kind == "tool_call", Self.isSubagentCall(e.body) else { return nil }
+            let r = evs[(i + 1)...].first { $0.kind == "tool_result" }
+            return (e, r)
+        }
+        let byAgent = Dictionary(grouping: evs.filter { $0.actor != "user" && $0.kind == "tool_call" }, by: \.actor)
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("งานที่ agent แตกออกไปทำ").font(.headline)
+                if calls.isEmpty {
+                    Text("ยังไม่มี subagent ในเซสชันนี้ — เมื่อ agent เรียก Task/Agent จะขึ้นที่นี่หลังเทิร์นจบ")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(calls, id: \.call.seq) { c in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Image(systemName: c.result == nil ? "hourglass" : "checkmark.circle.fill")
+                                .foregroundStyle(c.result == nil ? Color.orange : Color.green)
+                            Text(c.call.actor).font(.caption.bold())
+                            Spacer()
+                            Text("#\(c.call.seq)").font(.caption2).foregroundStyle(.tertiary)
+                        }
+                        Text(c.call.body).font(.caption).lineLimit(3)
+                        if let r = c.result {
+                            DisclosureGroup("ผลลัพธ์") {
+                                Text(r.body).font(.caption2.monospaced()).textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }.font(.caption2)
+                        }
+                    }
+                    .padding(8)
+                    .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+                }
+                Divider()
+                Text("กิจกรรมต่อ agent").font(.subheadline.bold())
+                ForEach(byAgent.keys.sorted(), id: \.self) { a in
+                    HStack {
+                        Text(a).font(.caption)
+                        Spacer()
+                        Text("\(byAgent[a]?.count ?? 0) tool calls").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(12)
+        }
+    }
+
+    private static func isSubagentCall(_ body: String) -> Bool {
+        let t = body.lowercased()
+        return ["task:", "agent:", "subagent", "delegate", "spawn"].contains { t.contains($0) }
     }
 
     private var dbPath: String {
@@ -1148,6 +1207,11 @@ struct HandoffBrief {
 struct SettingsSheet: View {
     @EnvironmentObject var engine: Engine
     @Environment(\.dismiss) private var dismiss
+    let workspace: String
+    @State private var tab = Tab.agents
+    @State private var skillQuery = ""
+
+    enum Tab: String, CaseIterable { case agents = "เอเจนต์", skills = "Skills" }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -1161,6 +1225,58 @@ struct SettingsSheet: View {
                 Button("เสร็จ") { dismiss() }.keyboardShortcut(.defaultAction)
             }
 
+            Picker("", selection: $tab) {
+                ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented).labelsHidden()
+
+            if tab == .skills { skillsTab } else { agentsTab }
+        }
+        .padding(18)
+        .frame(width: 560, height: 560)
+        .onAppear { engine.loadAgents(); engine.loadSkills(cwd: workspace) }
+    }
+
+    private var skillsTab: some View {
+        let q = skillQuery.trimmingCharacters(in: .whitespaces)
+        let shown = engine.skills.filter {
+            q.isEmpty || $0.name.localizedCaseInsensitiveContains(q) || $0.description.localizedCaseInsensitiveContains(q)
+        }
+        let titles = ["chorus": "Chorus — ส่งให้ทุกเอเจนต์", "project": "โปรเจกต์นี้ (.claude/skills)", "user": "ของคุณ (~/.claude/skills)"]
+        return VStack(alignment: .leading, spacing: 8) {
+            TextField("ค้นหา skill…", text: $skillQuery).textFieldStyle(.roundedBorder)
+            Text("\(engine.skills.count) skill ที่เอเจนต์ในโฟลเดอร์นี้มองเห็น")
+                .font(.caption).foregroundStyle(.secondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(["chorus", "project", "user"], id: \.self) { src in
+                        let group = shown.filter { $0.source == src }
+                        if !group.isEmpty {
+                            Text(titles[src] ?? src).font(.subheadline.bold())
+                            ForEach(group) { sk in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(sk.name).font(.callout.weight(.medium))
+                                    Text(sk.description).font(.caption).foregroundStyle(.secondary)
+                                        .lineLimit(3)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(8)
+                                .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 6))
+                                .help(sk.path)
+                            }
+                        }
+                    }
+                    if shown.isEmpty {
+                        Text("ไม่พบ skill — วางไว้ที่ .chorus/skills/<ชื่อ>/SKILL.md เพื่อให้ทุกเอเจนต์ใช้ร่วมกัน")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private var agentsTab: some View {
+        VStack(alignment: .leading, spacing: 14) {
             ForEach(engine.agents) { a in
                 VStack(alignment: .leading, spacing: 7) {
                     HStack(spacing: 8) {
@@ -1211,9 +1327,6 @@ struct SettingsSheet: View {
 
             Spacer(minLength: 0)
         }
-        .padding(18)
-        .frame(width: 520, height: 480)
-        .onAppear { engine.loadAgents() }
     }
 
     private func statusLabel(_ auth: String) -> String {

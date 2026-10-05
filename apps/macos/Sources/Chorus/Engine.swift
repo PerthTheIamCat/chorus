@@ -388,6 +388,9 @@ final class Engine: ObservableObject {
 
     @Published var agents: [AgentInfo] = []
     @Published var sessions: [SessionSummary] = []
+    /// Sessions per project database, so the sidebar can list several
+    /// projects at once instead of only the open one.
+    @Published var sessionsByDB: [String: [SessionSummary]] = [:]
 
     /// Pin the model an agent runs. Must be called for the picker to mean
     /// anything: the engine defaults to whatever the agent's own CLI is
@@ -406,6 +409,24 @@ final class Engine: ObservableObject {
 
     /// Which agents can actually run here. Cheap enough to call on every
     /// appearance and after the user comes back from logging in.
+    struct SkillInfo: Codable, Identifiable, Hashable {
+        let name: String
+        let description: String
+        let path: String
+        let source: String      // "chorus" | "project" | "user"
+        var id: String { source + path }
+    }
+    @Published var skills: [SkillInfo] = []
+
+    func loadSkills(cwd: String) {
+        queue.async { [weak self] in
+            let json = cwd.withCString { Self.string(from: chorus_list_skills($0)) }
+            struct R: Codable { let skills: [SkillInfo]? }
+            let r = Self.decode(R.self, json)
+            DispatchQueue.main.async { self?.skills = r?.skills ?? [] }
+        }
+    }
+
     func loadAgents() {
         queue.async { [weak self] in
             let json = Self.string(from: chorus_list_agents())
@@ -419,7 +440,10 @@ final class Engine: ObservableObject {
         queue.async { [weak self] in
             let json = db.withCString { Self.string(from: chorus_list_sessions($0)) }
             let r = Self.decode(SessionsResult.self, json)
-            DispatchQueue.main.async { self?.sessions = r?.sessions ?? [] }
+            DispatchQueue.main.async {
+                self?.sessions = r?.sessions ?? []
+                self?.sessionsByDB[db] = r?.sessions ?? []
+            }
         }
     }
 

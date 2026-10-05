@@ -888,6 +888,44 @@ pub unsafe extern "C" fn chorus_set_model(
     }
 }
 
+/// Every skill an agent in this workspace could see, grouped by where it lives:
+/// `chorus` (`.chorus/skills`, projected to every agent), `project`
+/// (`.claude/skills`) and `user` (`~/.claude/skills`). Read-only.
+/// JSON: {"ok":true,"skills":[{"name","description","path","source"}]}
+///
+/// # Safety
+/// `cwd` must be a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_list_skills(cwd: *const c_char) -> *mut c_char {
+    let Some(cwd) = borrow(cwd) else {
+        return err("cwd must be valid UTF-8");
+    };
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let cwd = std::path::Path::new(cwd);
+        let mut roots = vec![
+            ("chorus", cwd.join(chorus_core::skills::SKILLS_DIR)),
+            ("project", cwd.join(chorus_core::skills::CLAUDE_SKILLS_DIR)),
+        ];
+        if let Some(home) = std::env::var_os("HOME") {
+            roots.push(("user", std::path::Path::new(&home).join(".claude/skills")));
+        }
+        let mut skills = Vec::new();
+        for (source, root) in roots {
+            for (name, description, dir) in chorus_core::skills::list_dir(&root) {
+                skills.push(serde_json::json!({
+                    "name": name, "description": description,
+                    "path": dir.join("SKILL.md").to_string_lossy(), "source": source,
+                }));
+            }
+        }
+        skills
+    }));
+    match r {
+        Ok(skills) => out(serde_json::json!({ "ok": true, "skills": skills }).to_string()),
+        Err(_) => err("panic in list_skills"),
+    }
+}
+
 /// Every agent Chorus knows how to bridge to, with whether it can run right
 /// now. Cheap and non-blocking — no login, no network (see `chorus_cli::agents`).
 /// JSON: {"ok":true,"agents":[{"id":"...","label":"...",
