@@ -82,6 +82,10 @@ char *chorus_cancel(void);
 /* Skills visible in a workspace (chorus/project/user). {"ok":true,"skills":[{name,description,path,source}]} */
 char *chorus_list_skills(const char *cwd);
 
+/* Rename / delete a session by store path (no open engine needed). {"ok":true} */
+char *chorus_rename_session(const char *db_path, int64_t id, const char *title);
+char *chorus_delete_session(const char *db_path, int64_t id);
+
 /* Re-ask an agent for its models and refresh the cache (slow: opens a session). {"ok":true,"count":N} */
 char *chorus_refresh_models(const char *agent_id, const char *cwd);
 

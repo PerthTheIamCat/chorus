@@ -90,32 +90,54 @@ final class Engine: ObservableObject {
     /// so compaction never makes a new message wait.
     private var compactWork: DispatchWorkItem?
 
+    /// True while a session is being opened or switched to. Separate from
+    /// `busy` (a running turn): reusing `busy` flashed the "working…" row and
+    /// disabled the composer on every sidebar click.
+    @Published var switching = false
+
     /// Opening a session runs `git init` + a first snapshot of the whole
-    /// workspace tree (checkpoint.rs) — on a large or slow-to-enumerate
-    /// directory (a home folder, an iCloud-synced tree) that can take a
-    /// long time. Do it off the main thread so the UI stays responsive
-    /// (`busy` drives a spinner) instead of looking hung.
+    /// workspace tree (checkpoint.rs) — slow on a big folder, so it runs on
+    /// `queue`, not the main thread.
     func open(db: String, cwd: String, title: String) {
-        close()
-        busy = true
+        swap { chorus_engine_open(db, cwd, title) }
+    }
+
+    /// Reopen a session that already exists, without starting a new one.
+    func reopen(db: String, sessionID: Int64) {
+        swap { chorus_engine_reopen(db, sessionID) }
+    }
+
+    /// Open the new handle and read its transcript off the main thread, then
+    /// publish handle + id + events in one main-thread step. The old thread
+    /// stays on screen until then: clearing first is what made every switch
+    /// blink through an empty view.
+    private func swap(_ make: @escaping @Sendable () -> OpaquePointer?) {
+        guard !busy, !switching else { return }
+        let old = handle
+        // Nothing may enqueue work against the old handle from here on: it
+        // is freed on `queue` once the new one is up.
+        handle = nil
+        switching = true
         lastError = nil
         queue.async { [weak self] in
-            let h = db.withCString { d in
-                cwd.withCString { c in
-                    title.withCString { t in
-                        chorus_engine_open(d, c, t)
-                    }
-                }
-            }
+            let h = make()
+            let eventsJSON = h.map { Self.string(from: chorus_transcript_json($0)) } ?? ""
+            if let old { chorus_engine_free(old.raw) }
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.busy = false
+                self.switching = false
+                self.memoryScope = nil
+                self.live = LiveTurn()
+                self.lastThoughts = ""
                 guard let h else {
-                    self.lastError = "could not open a session (is the workspace path valid?)"
+                    self.sessionID = -1
+                    self.events = []
+                    self.lastError = "เปิดเซสชันไม่ได้ (โฟลเดอร์ยังอยู่ไหม?)"
                     return
                 }
                 self.handle = Handle(raw: h)
                 self.sessionID = chorus_engine_session_id(h)
+                self.events = Self.decode([LedgerEvent].self, eventsJSON) ?? []
                 self.refresh()
             }
         }
@@ -123,8 +145,36 @@ final class Engine: ObservableObject {
 
     func close() {
         memoryScope = nil
-        if let h = handle { chorus_engine_free(h.raw) }
+        guard let old = handle else { return }
         handle = nil
+        sessionID = -1
+        events = []
+        queue.async { chorus_engine_free(old.raw) }
+    }
+
+    /// Rename or delete a session by store path; neither needs it open.
+    func renameSession(db: String, id: Int64, title: String) {
+        ioQueue.async { [weak self] in
+            let json = db.withCString { d in title.withCString { Self.string(from: chorus_rename_session(d, id, $0)) } }
+            let r = Self.decode(SimpleResult.self, json)
+            DispatchQueue.main.async {
+                if r?.ok != true { self?.lastError = "เปลี่ยนชื่อไม่ได้: \(r?.error ?? "unknown")" }
+                self?.loadSessions(db: db)
+            }
+        }
+    }
+
+    func deleteSession(db: String, id: Int64, isOpen: Bool) {
+        if isOpen { close() }
+        // After `close()`'s free on `queue`, so the open handle is gone first.
+        queue.async { [weak self] in
+            let json = db.withCString { Self.string(from: chorus_delete_session($0, id)) }
+            let r = Self.decode(SimpleResult.self, json)
+            DispatchQueue.main.async {
+                if r?.ok != true { self?.lastError = "ลบไม่ได้: \(r?.error ?? "unknown")" }
+                self?.loadSessions(db: db)
+            }
+        }
     }
 
     // MARK: interactive permission
@@ -536,27 +586,6 @@ final class Engine: ObservableObject {
             DispatchQueue.main.async {
                 self?.sessions = r?.sessions ?? []
                 self?.sessionsByDB[db] = r?.sessions ?? []
-            }
-        }
-    }
-
-    /// Reopen a session that already exists, without starting a new one.
-    func reopen(db: String, sessionID: Int64) {
-        close()
-        busy = true
-        lastError = nil
-        queue.async { [weak self] in
-            let h = db.withCString { chorus_engine_reopen($0, sessionID) }
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.busy = false
-                guard let h else {
-                    self.lastError = "เปิด session \(sessionID) ไม่ได้"
-                    return
-                }
-                self.handle = Handle(raw: h)
-                self.sessionID = chorus_engine_session_id(h)
-                self.refresh()
             }
         }
     }

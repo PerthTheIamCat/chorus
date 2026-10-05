@@ -69,6 +69,10 @@ struct ContentView: View {
     @State private var editing: ChorusProject?
     @State private var editingIsNew = false
     @State private var sidebarSel: SidebarSel?
+    @State private var sessionQuery = ""
+    @State private var renaming: (folder: String, s: Engine.SessionSummary)?
+    @State private var renameText = ""
+    @State private var deleting: (folder: String, s: Engine.SessionSummary)?
     @State private var queued: [(model: String, text: String)] = []
     @State private var hint: String?
     @State private var confirmRevert = false
@@ -105,7 +109,10 @@ struct ContentView: View {
         }
         .toolbar {
             ToolbarItem(placement: .principal) {
-                Text(engine.sessionID >= 0 ? "เซสชัน \(engine.sessionID)" : "ยังไม่ได้เปิดเซสชัน")
+                Text(engine.sessionID < 0 ? "ยังไม่ได้เปิดเซสชัน"
+                     : (engine.sessionsByDB[dbPath]?.first { $0.id == engine.sessionID }).map(displayTitle)
+                        ?? "เซสชัน \(engine.sessionID)")
+                    .lineLimit(1)
                     .font(.headline)
             }
             ToolbarItemGroup(placement: .primaryAction) {
@@ -141,6 +148,31 @@ struct ContentView: View {
         .onChange(of: engine.agents) { _, _ in syncModelSelection(); engine.refreshModels() }
         .onChange(of: model) { _, m in applyModel(m) }
         .sheet(isPresented: $showPalette) { palette }
+        .alert("เปลี่ยนชื่อเซสชัน", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+            TextField("ชื่อ", text: $renameText)
+            Button("บันทึก") {
+                if let r = renaming {
+                    engine.renameSession(db: dbPath(for: r.folder), id: r.s.id,
+                                         title: renameText.trimmingCharacters(in: .whitespaces))
+                }
+                renaming = nil
+            }
+            Button("ยกเลิก", role: .cancel) { renaming = nil }
+        }
+        .confirmationDialog(
+            "ลบเซสชันนี้?",
+            isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
+            presenting: deleting
+        ) { d in
+            Button("ลบถาวร", role: .destructive) {
+                let open = d.folder == workspace && d.s.id == engine.sessionID
+                engine.deleteSession(db: dbPath(for: d.folder), id: d.s.id, isOpen: open)
+                deleting = nil
+            }
+            Button("ยกเลิก", role: .cancel) { deleting = nil }
+        } message: { d in
+            Text("“\(displayTitle(d.s))” และประวัติทั้งหมดจะหายถาวร กู้คืนไม่ได้ ไฟล์ในโฟลเดอร์ไม่ถูกแตะ")
+        }
         .sheet(item: $editing) { p in
             ProjectEditor(project: p, isNew: editingIsNew,
                           onSave: { saved in
@@ -208,6 +240,9 @@ struct ContentView: View {
     /// for — system selection, hover, keyboard navigation, hit-testing.
     private var sidebar: some View {
         List(selection: $sidebarSel) {
+            TextField("ค้นหาเซสชัน", text: $sessionQuery)
+                .textFieldStyle(.roundedBorder)
+                .padding(.bottom, 4)
             Section {
                 if projects.projects.isEmpty {
                     Button { editing = ChorusProject(name: "", folders: []); editingIsNew = true } label: {
@@ -244,7 +279,7 @@ struct ContentView: View {
         guard case let .session(folder, id)? = sel else { return }
         if folder == workspace && id == engine.sessionID { return }
         // Switching frees the engine handle; never under a running turn.
-        guard !engine.busy else {
+        guard !engine.busy, !engine.switching else {
             sidebarSel = engine.sessionID >= 0 ? .session(workspace, engine.sessionID) : nil
             return
         }
@@ -823,9 +858,17 @@ struct ContentView: View {
             } else if rows.isEmpty {
                 Text("ยังไม่มีเซสชัน").font(.caption).foregroundStyle(.tertiary)
             }
-            ForEach(rows, id: \.key) { r in
+            ForEach(rows.filter { matches($0.s) }, id: \.key) { r in
                 sessionLabel(r.s, folder: r.folder, showFolder: p.folders.count > 1)
                     .tag(SidebarSel.session(r.folder, r.s.id))
+                    .contextMenu {
+                        Button("เปลี่ยนชื่อ…") { renaming = (r.folder, r.s); renameText = displayTitle(r.s) }
+                        Button("เปิดโฟลเดอร์ใน Finder") {
+                            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: r.folder)])
+                        }
+                        Divider()
+                        Button("ลบเซสชัน…", role: .destructive) { deleting = (r.folder, r.s) }
+                    }
             }
         } label: {
             HStack(spacing: 6) {
@@ -854,7 +897,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private func newSessionRow(_ p: ChorusProject) -> some View {
-        let title = engine.busy && p.folders.contains(workspace) ? "กำลังเตรียมโฟลเดอร์…" : "เซสชันใหม่"
+        let title = engine.switching && p.folders.contains(workspace) ? "กำลังเตรียมโฟลเดอร์…" : "เซสชันใหม่"
         if p.folders.count > 1 {
             Menu {
                 ForEach(p.folders, id: \.self) { f in
@@ -862,19 +905,33 @@ struct ContentView: View {
                 }
             } label: { Label(title, systemImage: "square.and.pencil") }
             .menuStyle(.borderlessButton)
-            .disabled(engine.busy)
+            .disabled(engine.busy || engine.switching)
         } else if let f = p.folders.first {
             Button { workspace = f; startSession() } label: {
                 Label(title, systemImage: "square.and.pencil")
             }
             .buttonStyle(.borderless)
-            .disabled(engine.busy)
+            .disabled(engine.busy || engine.switching)
         }
+    }
+
+    /// A title the user set wins; otherwise the first thing they asked.
+    private func displayTitle(_ s: Engine.SessionSummary) -> String {
+        let t = s.title.trimmingCharacters(in: .whitespaces)
+        if !t.isEmpty && t != "session" { return t }
+        return s.goal.isEmpty ? "เซสชัน #\(s.id)" : s.goal
+    }
+
+    private func matches(_ s: Engine.SessionSummary) -> Bool {
+        let q = sessionQuery.trimmingCharacters(in: .whitespaces)
+        return q.isEmpty || displayTitle(s).localizedCaseInsensitiveContains(q)
+            || s.goal.localizedCaseInsensitiveContains(q)
+            || s.agents.contains { $0.localizedCaseInsensitiveContains(q) }
     }
 
     private func sessionLabel(_ s: Engine.SessionSummary, folder: String, showFolder: Bool) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(s.goal.isEmpty ? s.title : s.goal).lineLimit(2)
+            Text(displayTitle(s)).lineLimit(2)
             HStack(spacing: 4) {
                 if showFolder {
                     Text((folder as NSString).lastPathComponent).foregroundStyle(.secondary)

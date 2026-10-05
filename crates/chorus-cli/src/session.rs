@@ -1570,6 +1570,18 @@ pub struct SessionSummary {
 /// single pass. Opening a `Session` — and its shadow-git checkpoint, MCP
 /// listener — per row would make a picker screen the slowest thing in the
 /// app; this function exists so it never has to.
+/// Rename a session in a store, without opening it.
+pub fn rename_session(db: &Path, id: i64, title: &str) -> Result<()> {
+    let store = Store::open(db).context("open store")?;
+    Ok(ledger::rename_session(store.conn(), id, title)?)
+}
+
+/// Delete a session from a store (see [`ledger::delete_session`]).
+pub fn delete_session(db: &Path, id: i64) -> Result<()> {
+    let store = Store::open(db).context("open store")?;
+    Ok(ledger::delete_session(store.conn(), id)?)
+}
+
 pub fn list_sessions(db: &Path) -> Result<Vec<SessionSummary>> {
     let store = Store::open(db).context("open store")?;
     let c = store.conn();

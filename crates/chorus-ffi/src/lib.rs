@@ -977,6 +977,47 @@ pub unsafe extern "C" fn chorus_list_skills(cwd: *const c_char) -> *mut c_char {
     }
 }
 
+/// Rename a session. JSON: {"ok":true}
+///
+/// # Safety
+/// `db_path` and `title` must be valid NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_rename_session(
+    db_path: *const c_char,
+    id: i64,
+    title: *const c_char,
+) -> *mut c_char {
+    let (Some(db), Some(title)) = (borrow(db_path), borrow(title)) else {
+        return err("db_path/title must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        chorus_cli::session::rename_session(&PathBuf::from(db), id, title)
+    })) {
+        Ok(Ok(())) => out(serde_json::json!({ "ok": true }).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in rename_session"),
+    }
+}
+
+/// Delete a session and its events. Refused if another session forked from
+/// it. Close the session first if it is open. JSON: {"ok":true}
+///
+/// # Safety
+/// `db_path` must be a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_delete_session(db_path: *const c_char, id: i64) -> *mut c_char {
+    let Some(db) = borrow(db_path) else {
+        return err("db_path must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        chorus_cli::session::delete_session(&PathBuf::from(db), id)
+    })) {
+        Ok(Ok(())) => out(serde_json::json!({ "ok": true }).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in delete_session"),
+    }
+}
+
 /// Ask an agent for its current model list (opens a real ACP session in
 /// `cwd`, so it is slow — call off the UI thread) and refresh the cache that
 /// `chorus_list_agents` reads. JSON: {"ok":true,"count":N}

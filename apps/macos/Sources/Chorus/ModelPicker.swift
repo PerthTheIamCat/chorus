@@ -37,8 +37,12 @@ extension Engine.AgentInfo {
         for m in models {
             let b = ModelID(m.id).base
             guard seen.insert(b).inserted else { continue }
-            // "5.6 Luna (high)" → "5.6 Luna"
-            let label = m.label.replacingOccurrences(of: #"\s*\([^)]*\)$"#, with: "", options: .regularExpression)
+            // "5.6 Luna (high)" → "5.6 Luna", but keep "Opus (1M context)":
+            // only an effort suffix is redundant once effort has its own chip.
+            var label = m.label
+            if let e = ModelID(m.id).effort, label.hasSuffix("(\(e))") {
+                label = String(label.dropLast(e.count + 2)).trimmingCharacters(in: .whitespaces)
+            }
             out.append((b, label))
         }
         return out
@@ -117,6 +121,8 @@ struct ModelPicker: View {
 
     private var popover: some View {
         VStack(alignment: .leading, spacing: 0) {
+          ScrollView {
+           VStack(alignment: .leading, spacing: 0) {
             ForEach(engine.agents) { a in
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
@@ -141,12 +147,25 @@ struct ModelPicker: View {
                             model = ModelID.compose(m.id, keep ?? def ?? efforts.first)
                             open = false
                         } label: {
-                            HStack {
-                                Text(m.label)
+                            let efforts = a.efforts(for: m.id)
+                            let isDefault = a.models.contains { ModelID($0.id).base == m.id && $0.is_default }
+                            HStack(alignment: .firstTextBaseline) {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    HStack(spacing: 6) {
+                                        Text(m.label).font(.callout.weight(selected ? .semibold : .regular))
+                                        if isDefault {
+                                            Text("ค่าเริ่มต้น").font(.caption2)
+                                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                                .background(.quaternary, in: Capsule())
+                                        }
+                                    }
+                                    Text(efforts.isEmpty ? m.id : "\(m.id) · effort \(efforts.joined(separator: "/"))")
+                                        .font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                                        .lineLimit(1)
+                                }
                                 Spacer()
                                 if selected { Image(systemName: "checkmark").font(.caption) }
                             }
-                            .font(.callout)
                             .padding(.horizontal, 10).padding(.vertical, 5)
                             .background(selected ? Color.accentColor.opacity(0.15) : .clear,
                                         in: RoundedRectangle(cornerRadius: 5))
@@ -159,6 +178,9 @@ struct ModelPicker: View {
                 }
                 Divider().padding(.top, 6)
             }
+           }
+          }
+          .frame(maxHeight: 460)
             HStack {
                 Text("ถ้าตัวนี้ชนลิมิต Chorus ส่งงานต่อให้ตัวที่พร้อมเอง")
                     .font(.caption2).foregroundStyle(.secondary)
@@ -174,7 +196,7 @@ struct ModelPicker: View {
             }
             .padding(10)
         }
-        .frame(width: 280)
+        .frame(width: 340)
         .padding(.vertical, 4)
     }
 }
