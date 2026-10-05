@@ -1186,6 +1186,12 @@ fn parse_reason(s: &str) -> HandoffReason {
     }
 }
 
+/// Kill the running agent and its process tree. For app quit.
+#[no_mangle]
+pub extern "C" fn chorus_shutdown() {
+    chorus_cli::shutdown();
+}
+
 /// Stop the turn that is running right now (the shell's Stop button).
 /// Safe to call from any thread, with or without a live engine.
 /// JSON: {"ok":true,"was_running":bool}

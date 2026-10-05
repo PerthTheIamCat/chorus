@@ -5,4 +5,4 @@ pub mod accounts;
 pub mod agents;
 pub mod limits;
 pub mod session;
-pub use chorus_acp::{cancel_active, set_progress_sink};
+pub use chorus_acp::{cancel_active, set_progress_sink, shutdown};

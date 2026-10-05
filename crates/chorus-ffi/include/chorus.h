@@ -132,6 +132,9 @@ char *chorus_working_diff(const ChorusEngine *e);
 /* Stop the running turn; callable from any thread. {"ok":true,"was_running":bool} */
 char *chorus_cancel(void);
 
+/* Kill the running agent and its whole process tree. Call from applicationWillTerminate. */
+void chorus_shutdown(void);
+
 /* Skills visible in a workspace (chorus/project/user). {"ok":true,"skills":[{name,description,path,source}]} */
 char *chorus_list_skills(const char *cwd);
 
