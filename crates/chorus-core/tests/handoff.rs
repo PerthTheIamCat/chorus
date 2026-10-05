@@ -166,6 +166,16 @@ fn failure_classification_routes_only_transient_agent_faults() {
     assert_eq!(R::from_failure("context length exceeded the model window"), Some(R::ContextExhausted));
     assert_eq!(R::from_failure("upstream overloaded, 503"), Some(R::Failover));
     // A real bug is not something the next agent should inherit.
+    // A dead, unreachable or silent agent is routed around too.
+    for m in [
+        "agent closed its output before answering request 3",
+        "spawn [\"npx\"]: No such file or directory (os error 2)",
+        "agent stalled: no output for 240s while waiting for request 4",
+        "error sending request for url: connection reset by peer",
+        "fetch failed: ETIMEDOUT",
+    ] {
+        assert_eq!(R::from_failure(m), Some(R::Failover), "{m}");
+    }
     assert_eq!(R::from_failure("panic: index out of bounds"), None);
     assert_eq!(R::from_failure("no such file or directory"), None);
 }
@@ -204,7 +214,6 @@ fn the_real_limit_messages_from_both_bridges_are_classified() {
     for msg in [
         "syntax error in repo.ts",
         "permission denied",
-        "agent closed its output before answering request 1",
     ] {
         assert_eq!(HandoffReason::from_failure(msg), None, "wrongly routed: {msg:?}");
     }

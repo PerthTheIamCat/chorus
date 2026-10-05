@@ -146,6 +146,46 @@ impl HandoffReason {
             return Some(Self::Failover);
         }
 
+        // The agent itself is gone or unreachable: its process died or never
+        // started, its pipe closed, the network dropped, or it went silent
+        // past the stall watchdog. None of these are the user's problem to
+        // see while another agent in the chain can still answer.
+        const INFRA: &[&str] = &[
+            // process crash / never started
+            "agent closed its output",
+            "broken pipe",
+            "unexpected eof",
+            "exited with",
+            "process exited",
+            // `Agent::spawn` wraps a failed launch as `spawn ["cmd", …]`
+            "spawn [",
+            "command not found",
+            // hang (see `Agent::wait_for` idle watchdog)
+            "agent stalled",
+            "timed out",
+            "timeout",
+            // network
+            "connection reset",
+            "connection refused",
+            "connection closed",
+            "econnreset",
+            "econnrefused",
+            "etimedout",
+            "enotfound",
+            "socket hang up",
+            "fetch failed",
+            "network error",
+            "network is unreachable",
+            "dns error",
+            "temporary failure in name resolution",
+            "tls handshake",
+            "error sending request",
+            "stream disconnected",
+        ];
+        if INFRA.iter().any(|k| m.contains(k)) {
+            return Some(Self::Failover);
+        }
+
         None
     }
 

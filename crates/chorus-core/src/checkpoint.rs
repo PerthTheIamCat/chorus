@@ -132,6 +132,28 @@ impl Checkpoint {
         self.git(&["diff", "--staged", &base, "--"])
     }
 
+    /// [`diff_since`] minus the agent files Chorus writes itself
+    /// (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`). What a person reviews, and
+    /// what a handoff brief carries: the agents' work, not our projection.
+    pub fn diff_since_user(&self, since: &str) -> Result<String> {
+        self.git(&["add", "-A"])?;
+        let base = if since.trim().is_empty() {
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
+        } else {
+            since.trim().to_string()
+        };
+        self.git(&[
+            "diff",
+            "--staged",
+            &base,
+            "--",
+            ".",
+            ":(exclude,top)CLAUDE.md",
+            ":(exclude,top)AGENTS.md",
+            ":(exclude,top)GEMINI.md",
+        ])
+    }
+
     /// Which files changed since `since`, without staging anything.
     ///
     /// [`diff_since`] runs `git add -A` so new files show up in the patch. That

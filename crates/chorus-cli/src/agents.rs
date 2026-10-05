@@ -398,7 +398,7 @@ pub fn auth_status(agent_id: &str) -> AgentInfo {
             "claude",
             "claude login",
             "npm install -g @anthropic-ai/claude-code",
-            claude_logged_in(&cred),
+            claude_logged_in(&cred) && !crate::limits::auth_failed("claude"),
             models_for("claude", "CHORUS_CLAUDE_MODELS", claude_models),
         )
     } else {
@@ -412,7 +412,7 @@ pub fn auth_status(agent_id: &str) -> AgentInfo {
             "codex",
             "codex login",
             "npm install -g @openai/codex",
-            cred.iter().any(|p| p.exists()),
+            cred.iter().any(|p| p.exists()) && !crate::limits::auth_failed("codex"),
             models_for("codex", "CHORUS_CODEX_MODELS", codex_models),
         )
     }

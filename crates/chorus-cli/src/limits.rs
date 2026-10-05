@@ -90,6 +90,83 @@ pub fn clear(agent: &str) {
     if m.remove(agent).is_some() {
         save(&m);
     }
+    clear_auth_failure(agent);
+}
+
+/// How long a rejected login is believed without asking the agent again.
+/// Short enough that a fresh `claude /login` is picked up on its own, long
+/// enough that a revoked token is not retried (and waited on) every turn.
+const AUTH_FAILURE_TTL_MS: i64 = 30 * 60 * 1000;
+
+fn auth_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".chorus/auth-failed.json"))
+}
+
+/// "claude-opus" and "claude" are the same login; so are the codex names.
+fn login_key(agent: &str) -> String {
+    let a = agent.to_lowercase();
+    if a.contains("claude") {
+        "claude".into()
+    } else if a.contains("codex") || a.contains("gpt") {
+        "codex".into()
+    } else {
+        a
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn auth_failures() -> BTreeMap<String, i64> {
+    auth_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_auth_failures(m: &BTreeMap<String, i64>) {
+    if let Some(p) = auth_path() {
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        if let Ok(s) = serde_json::to_string(m) {
+            let _ = std::fs::write(p, s);
+        }
+    }
+}
+
+/// The agent answered with a rejected login (401, revoked token). The CLI's
+/// own `auth status` can still say "logged in" in that state, so remember it.
+pub fn record_auth_failure(agent: &str) {
+    let mut m = auth_failures();
+    m.insert(login_key(agent), now_ms());
+    save_auth_failures(&m);
+}
+
+pub fn clear_auth_failure(agent: &str) {
+    let mut m = auth_failures();
+    if m.remove(&login_key(agent)).is_some() {
+        save_auth_failures(&m);
+    }
+}
+
+/// Does this failure text say the login itself was rejected?
+pub fn is_auth_failure(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    ["failed to authenticate", "authentication_error", "token has been revoked", "authentication required", "not logged in", "please run /login"]
+        .iter()
+        .any(|k| m.contains(k))
+}
+
+/// True while a recent turn on this agent's login was rejected.
+pub fn auth_failed(agent: &str) -> bool {
+    auth_failures()
+        .get(&login_key(agent))
+        .is_some_and(|at| now_ms() - at < AUTH_FAILURE_TTL_MS)
 }
 
 /// The newest `rate_limits` Codex wrote under `codex_home`.
@@ -261,5 +338,24 @@ mod tests {
         assert_eq!(r.primary.unwrap().used_percent, 6.0);
         assert_eq!(r.secondary.unwrap().window_minutes, Some(10080));
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+
+    #[test]
+    fn revoked_login_is_remembered_then_cleared_by_a_good_turn() {
+        let home = std::env::temp_dir().join(format!("chorus-auth-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+        assert!(!auth_failed("claude-opus"));
+        assert!(is_auth_failure("Failed to authenticate. API Error: 401 OAuth access token has been revoked."));
+        record_auth_failure("claude-opus");
+        assert!(auth_failed("claude"));
+        assert!(!auth_failed("codex"));
+        clear("claude");
+        assert!(!auth_failed("claude-opus"));
     }
 }

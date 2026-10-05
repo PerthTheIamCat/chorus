@@ -419,7 +419,7 @@ impl Session {
     pub fn working_diff(&self) -> String {
         self.checkpoint
             .as_ref()
-            .and_then(|ck| ck.diff_since(&self.base_ckpt).ok())
+            .and_then(|ck| ck.diff_since_user(&self.base_ckpt).ok())
             .unwrap_or_default()
     }
 
@@ -611,7 +611,7 @@ impl Session {
         let diff = if diff.trim().is_empty() {
             self.checkpoint
                 .as_ref()
-                .and_then(|ck| ck.diff_since(&self.base_ckpt).ok())
+                .and_then(|ck| ck.diff_since_user(&self.base_ckpt).ok())
                 .unwrap_or_default()
         } else {
             diff
@@ -760,6 +760,9 @@ impl Session {
                     ) {
                         crate::limits::record_hit(&first.name, &msg);
                     }
+                    if crate::limits::is_auth_failure(&msg) {
+                        crate::limits::record_auth_failure(&first.name);
+                    }
                     match HandoffReason::from_failure(&msg) {
                         None => Err(e).with_context(|| first.name.clone()),
                         Some(reason) => match self.relay_rest(
@@ -866,6 +869,9 @@ impl Session {
                     reason = HandoffReason::from_failure(&msg).unwrap_or(HandoffReason::Failover);
                     if matches!(reason, HandoffReason::RateLimit | HandoffReason::QuotaExhausted) {
                         crate::limits::record_hit(&spec.name, &msg);
+                    }
+                    if crate::limits::is_auth_failure(&msg) {
+                        crate::limits::record_auth_failure(&spec.name);
                     }
                     from = spec.name.clone();
                 }
