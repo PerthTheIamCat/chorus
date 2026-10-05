@@ -14,7 +14,7 @@
 use crate::Result;
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Create (or upgrade) the schema. Safe to call on every open.
 pub fn migrate(conn: &Connection) -> Result<()> {
@@ -99,6 +99,21 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_proposal_scope ON fact_proposal(scope, id);
+
+        -- v3: the warm tier of the compaction ladder (storage spec, rungs).
+        -- L1/L2 are *stored*, not recomputed: assembling a context must never
+        -- run a summariser, or every turn pays a model call per event. Rows
+        -- are filled in by `chorus compact`, off the turn's critical path.
+        -- Keyed by event seq rather than being events themselves: a summary is
+        -- metadata about a turn, not something anyone said, and keeping it out
+        -- of the ledger keeps `history()` and the dedup counts honest.
+        CREATE TABLE IF NOT EXISTS summary (
+            seq        INTEGER PRIMARY KEY REFERENCES event(seq) ON DELETE CASCADE,
+            l1         TEXT NOT NULL,
+            l2         TEXT NOT NULL,
+            model      TEXT NOT NULL,
+            created_ms INTEGER NOT NULL
+        );
 
         -- TODO(phase-1): vec0 table for embeddings
 

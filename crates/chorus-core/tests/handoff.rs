@@ -169,3 +169,61 @@ fn failure_classification_routes_only_transient_agent_faults() {
     assert_eq!(R::from_failure("panic: index out of bounds"), None);
     assert_eq!(R::from_failure("no such file or directory"), None);
 }
+
+#[test]
+fn the_real_limit_messages_from_both_bridges_are_classified() {
+    use chorus_core::handoff::HandoffReason;
+
+    // Verbatim from real runs recorded in evals/handoff/cases — these are the
+    // only two that matter today, and the old classifier matched neither.
+    for msg in [
+        "stream error: usageLimitExceeded",
+        "Error: you are out of extra usage",
+        "agent turn: usageLimitExceeded (plan limit reached)",
+    ] {
+        assert_eq!(
+            HandoffReason::from_failure(msg),
+            Some(HandoffReason::QuotaExhausted),
+            "did not classify: {msg:?}"
+        );
+    }
+
+    for msg in [
+        "Error: 429 rate limit exceeded",
+        "HTTP 429 Too Many Requests",
+        "rate_limit_error: please retry after 30s",
+    ] {
+        assert_eq!(
+            HandoffReason::from_failure(msg),
+            Some(HandoffReason::RateLimit),
+            "did not classify: {msg:?}"
+        );
+    }
+
+    // Still not routed around: a real fault belongs in front of the user.
+    for msg in [
+        "syntax error in repo.ts",
+        "permission denied",
+        "agent closed its output before answering request 1",
+    ] {
+        assert_eq!(HandoffReason::from_failure(msg), None, "wrongly routed: {msg:?}");
+    }
+}
+
+/// The first limit message this project ever saw in the wild, verbatim.
+///
+/// Caught on 12 Sep 2026 from `claude-agent-acp` during a skills test. Every
+/// key the classifier had at the time came from eval logs, and not one of them
+/// matched it — "usage limit" no, "rate limit" no, "429" no. Keep the exact
+/// string: a paraphrase would pass while the real message still failed.
+#[test]
+fn the_real_claude_limit_message_is_classified_as_exhausted() {
+    let observed =
+        "agent returned error: {\"code\":-32603,\"message\":\"Internal error: You've hit your \
+         limit · resets 9:50pm (Asia/Bangkok)\"}";
+    assert_eq!(
+        HandoffReason::from_failure(observed),
+        Some(HandoffReason::QuotaExhausted),
+        "the one message the product exists for must not fall through to a generic failover"
+    );
+}

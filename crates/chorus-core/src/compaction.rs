@@ -14,6 +14,12 @@ use serde_json::Value;
 /// carries the most meaning. Never returns more than the input.
 pub trait Summarizer: Send + Sync {
     fn summarize(&self, text: &str, target_chars: usize) -> String;
+
+    /// What produced this summary, recorded alongside it so a row written by
+    /// the cheap fallback can be told apart from a model-written one.
+    fn label(&self) -> String {
+        "extractive".into()
+    }
 }
 
 /// Model-free compaction. Ranks lines by how much they look like they
@@ -76,7 +82,7 @@ impl Summarizer for Extractive {
             .enumerate()
             .map(|(i, l)| (i, line_score(l)))
             .collect();
-        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        ranked.sort_by_key(|a| std::cmp::Reverse(a.1));
 
         let mut keep = vec![false; lines.len()];
         let mut used = 0usize;
@@ -174,6 +180,10 @@ impl Ollama {
 }
 
 impl Summarizer for Ollama {
+    fn label(&self) -> String {
+        format!("ollama:{}", self.model)
+    }
+
     fn summarize(&self, text: &str, target_chars: usize) -> String {
         if text.chars().count() <= target_chars {
             return text.trim().to_string();
@@ -222,4 +232,89 @@ pub fn rungs_for(s: &dyn Summarizer, text: &str) -> Rungs {
         l1: s.summarize(text, 250),
         l2: s.summarize(text, 90),
     }
+}
+
+// ---- the warm tier -------------------------------------------------------
+//
+// Everything above is pure. Everything below is the storage half of the
+// ladder: rungs are written once, off the turn's critical path, and read back
+// for free. Assembling a context must never reach for a `Summarizer`.
+
+use rusqlite::{params, Connection, OptionalExtension};
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Store the rungs for one event. Replaces any existing row.
+pub fn save_rungs(conn: &Connection, seq: i64, r: &Rungs, model: &str) -> crate::Result<()> {
+    conn.execute(
+        "INSERT INTO summary (seq, l1, l2, model, created_ms) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(seq) DO UPDATE SET l1 = ?2, l2 = ?3, model = ?4, created_ms = ?5",
+        params![seq, r.l1, r.l2, model, now_ms()],
+    )?;
+    Ok(())
+}
+
+/// The stored rungs for one event, if it has been compacted.
+pub fn load_rungs(conn: &Connection, seq: i64) -> crate::Result<Option<Rungs>> {
+    let row = conn
+        .query_row(
+            "SELECT l1, l2 FROM summary WHERE seq = ?1",
+            params![seq],
+            |r| Ok(Rungs { l1: r.get(0)?, l2: r.get(1)? }),
+        )
+        .optional()?;
+    Ok(row)
+}
+
+/// Events in this session that have no stored rungs yet, oldest first.
+/// `limit` bounds one compaction pass so a long session is caught up in
+/// batches instead of one unbounded run.
+pub fn uncompacted(conn: &Connection, sess: i64, limit: usize) -> crate::Result<Vec<i64>> {
+    let mut st = conn.prepare(
+        "SELECT e.seq FROM event e
+         LEFT JOIN summary s ON s.seq = e.seq
+         WHERE e.sess = ?1 AND s.seq IS NULL
+         ORDER BY e.seq LIMIT ?2",
+    )?;
+    let rows = st.query_map(params![sess, limit as i64], |r| r.get::<_, i64>(0))?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Every stored rung in this session, in one query. `assemble_context` runs
+/// on every turn, so it reads the whole warm tier at once rather than doing a
+/// point lookup per event.
+pub fn load_session_rungs(
+    conn: &Connection,
+    sess: i64,
+) -> crate::Result<std::collections::HashMap<i64, Rungs>> {
+    let mut st = conn.prepare(
+        "SELECT s.seq, s.l1, s.l2 FROM summary s
+         JOIN event e ON e.seq = s.seq
+         WHERE e.sess = ?1",
+    )?;
+    let rows = st.query_map(params![sess], |r| {
+        Ok((r.get::<_, i64>(0)?, Rungs { l1: r.get(1)?, l2: r.get(2)? }))
+    })?;
+    let mut map = std::collections::HashMap::new();
+    for row in rows {
+        let (seq, rungs) = row?;
+        map.insert(seq, rungs);
+    }
+    Ok(map)
+}
+
+/// How many events in this session still have no stored rungs.
+pub fn uncompacted_count(conn: &Connection, sess: i64) -> crate::Result<i64> {
+    Ok(conn.query_row(
+        "SELECT count(*) FROM event e
+         LEFT JOIN summary s ON s.seq = e.seq
+         WHERE e.sess = ?1 AND s.seq IS NULL",
+        params![sess],
+        |r| r.get(0),
+    )?)
 }

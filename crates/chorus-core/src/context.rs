@@ -281,7 +281,7 @@ impl<C: TokenCounter> Assembler<C> {
 
         // Render chronologically: oldest first, newest last.
         let mut ordered: Vec<&State> = states.iter().filter(|s| !s.dropped).collect();
-        ordered.sort_by(|a, b| b.turn.age.cmp(&a.turn.age));
+        ordered.sort_by_key(|a| std::cmp::Reverse(a.turn.age));
 
         let mut text = String::new();
         for s in &ordered {

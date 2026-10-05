@@ -42,24 +42,89 @@ impl HandoffReason {
     /// transient, agent-specific failure a relay chain should route around
     /// (rate limit, quota, context window), `None` when it's a real error
     /// the next agent would hit too.
+    /// Classify a failed turn into a reason to hand off — or `None`, meaning
+    /// the failure is the user's problem to see, not something to route around.
+    ///
+    /// The strings here are not guesses. They are what the bridges actually
+    /// emit, collected from real runs (see `evals/handoff/cases`):
+    ///
+    /// - Codex: `usageLimitExceeded`
+    /// - claude-agent-acp: `out of extra usage`
+    ///
+    /// Neither contains "rate limit", "429" or "quota", so a classifier built
+    /// only from the obvious words silently fails to fire on the one case the
+    /// whole product exists for. Whenever a new limit message turns up in the
+    /// wild, add it here *and* to `tests/handoff.rs`.
     pub fn from_failure(msg: &str) -> Option<Self> {
         let m = msg.to_lowercase();
-        if m.contains("rate limit") || m.contains("rate_limit") || m.contains("429") {
-            Some(Self::RateLimit)
-        } else if m.contains("quota") || m.contains("insufficient_quota") || m.contains("billing") {
-            Some(Self::QuotaExhausted)
-        } else if m.contains("context")
+
+        // Usage/quota exhaustion — the plan is spent. Checked first because
+        // several providers phrase it with the word "limit" too, and this is
+        // the more specific reading.
+        const EXHAUSTED: &[&str] = &[
+            "usagelimitexceeded",
+            "usage limit",
+            // Observed live from claude-agent-acp on 12 Sep 2026:
+            //   "Internal error: You've hit your limit · resets 9:50pm (Asia/Bangkok)"
+            // It matched none of the keys above — not "usage limit", not
+            // "rate limit", not "429". A classifier written from eval logs
+            // only knows the wordings those logs happened to contain, which
+            // is why every real limit message that turns up gets added here
+            // verbatim rather than paraphrased.
+            "hit your limit",
+            "out of extra usage",
+            "quota",
+            "insufficient_quota",
+            "billing",
+            "credit balance",
+            "payment required",
+            "402",
+        ];
+        if EXHAUSTED.iter().any(|k| m.contains(k)) {
+            return Some(Self::QuotaExhausted);
+        }
+
+        // Throttling — the plan is fine, we are going too fast.
+        const THROTTLED: &[&str] = &[
+            "rate limit",
+            "rate_limit",
+            "ratelimit",
+            "429",
+            "too many requests",
+            "slow down",
+            "retry after",
+        ];
+        if THROTTLED.iter().any(|k| m.contains(k)) {
+            return Some(Self::RateLimit);
+        }
+
+        // The window is full.
+        if (m.contains("context") || m.contains("token"))
             && (m.contains("exhaust")
                 || m.contains("length")
                 || m.contains("too long")
-                || m.contains("window"))
+                || m.contains("too large")
+                || m.contains("window")
+                || m.contains("maximum"))
         {
-            Some(Self::ContextExhausted)
-        } else if m.contains("overloaded") || m.contains("503") || m.contains("unavailable") {
-            Some(Self::Failover)
-        } else {
-            None
+            return Some(Self::ContextExhausted);
         }
+
+        // The provider is having a bad day.
+        const UPSTREAM: &[&str] = &[
+            "overloaded",
+            "503",
+            "502",
+            "unavailable",
+            "internal server error",
+            "upstream",
+            "gateway",
+        ];
+        if UPSTREAM.iter().any(|k| m.contains(k)) {
+            return Some(Self::Failover);
+        }
+
+        None
     }
 
     /// A short phrase for the resume divider ("switched to codex — rate limit").

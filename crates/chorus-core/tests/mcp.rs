@@ -97,3 +97,67 @@ fn an_agent_can_list_and_call_memory_propose() {
     drop(server);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+
+#[test]
+fn an_absurd_content_length_is_refused_not_allocated() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("s.db");
+    Store::open(&db).unwrap();
+    let server = McpServer::start(db.to_str().unwrap()).unwrap();
+    let addr = server
+        .url()
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap()
+        .to_string();
+
+    // Claim 8 GiB. The old code did `vec![0u8; content_length]` and died.
+    let mut s = TcpStream::connect(&addr).unwrap();
+    write!(
+        s,
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 8589934592\r\n\r\n"
+    )
+    .unwrap();
+    s.flush().unwrap();
+
+    let mut buf = String::new();
+    s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    let _ = s.read_to_string(&mut buf);
+    assert!(buf.contains("413"), "expected 413, got: {buf:?}");
+}
+
+#[test]
+fn a_browser_origin_is_turned_away() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("s.db");
+    Store::open(&db).unwrap();
+    let server = McpServer::start(db.to_str().unwrap()).unwrap();
+    let addr = server
+        .url()
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let body = b"{}";
+    let mut s = TcpStream::connect(&addr).unwrap();
+    write!(
+        s,
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nOrigin: https://evil.example\r\n\
+         Content-Length: {}\r\n\r\n",
+        body.len()
+    )
+    .unwrap();
+    s.write_all(body).unwrap();
+    s.flush().unwrap();
+
+    let mut buf = String::new();
+    s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    let _ = s.read_to_string(&mut buf);
+    assert!(buf.contains("403"), "expected 403, got: {buf:?}");
+}

@@ -107,6 +107,38 @@ impl Checkpoint {
         self.git(&["diff", "--staged", &base, "--"])
     }
 
+    /// Which files changed since `since`, without staging anything.
+    ///
+    /// [`diff_since`] runs `git add -A` so new files show up in the patch. That
+    /// is right for a patch and wrong for a question asked on the read path:
+    /// assembling context happens on every turn, and mutating the index to
+    /// answer "what changed" makes a cheap question expensive on a large repo.
+    /// Two plumbing calls answer it without writing anything.
+    pub fn files_since(&self, since: &str) -> Result<Vec<String>> {
+        let base = if since.trim().is_empty() {
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
+        } else {
+            since.trim().to_string()
+        };
+        let mut out: Vec<String> = self
+            .git(&["diff", "--name-only", &base, "--"])?
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+        for l in self
+            .git(&["ls-files", "--others", "--exclude-standard"])?
+            .lines()
+        {
+            let l = l.trim();
+            if !l.is_empty() && !out.iter().any(|o| o == l) {
+                out.push(l.to_string());
+            }
+        }
+        Ok(out)
+    }
+
     /// Roll the work tree back to `sha`. Destructive — the caller confirms.
     pub fn restore(&self, sha: &str) -> Result<()> {
         self.git(&["reset", "--hard", "--quiet", sha])?;

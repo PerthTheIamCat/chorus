@@ -1,4 +1,5 @@
 use chorus_core::types::EventKind;
+use chorus_core::compaction;
 use chorus_core::{actor, blob, ledger, memory, schema, store::Store, NewEvent};
 
 fn setup() -> Store {
@@ -284,6 +285,46 @@ fn schema_v1_database_upgrades_to_v2() {
     let v: i64 = store.conn().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
     assert_eq!(v, schema::SCHEMA_VERSION);
     assert!(memory::propose(store.conn(), 0, "works after upgrade", None).is_ok());
+}
+
+#[test]
+fn a_v2_database_gains_the_summary_table_without_losing_anything() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v2.sqlite3");
+
+    // Hand-build a v2 database: migrate, then drop the v3 table and stamp
+    // the version back, exactly as a build from before the warm tier left it.
+    let sess;
+    let seq;
+    {
+        let store = Store::open(&path).unwrap();
+        let c = store.conn();
+        let a = actor::intern(c, "codex", "openai").unwrap();
+        sess = ledger::new_session(c, "old", "/tmp").unwrap();
+        seq = ledger::append(c, &NewEvent::new(sess, EventKind::Msg, a, "said before upgrade"))
+            .unwrap();
+        c.execute_batch("DROP TABLE summary; PRAGMA user_version = 2;")
+            .unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    let c = store.conn();
+    let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    assert_eq!(v, schema::SCHEMA_VERSION);
+
+    // The old event survived, and the warm tier now works for it.
+    let e = ledger::get(c, seq).unwrap();
+    assert_eq!(ledger::body(c, &e).unwrap(), "said before upgrade");
+    assert_eq!(compaction::uncompacted_count(c, sess).unwrap(), 1);
+    compaction::save_rungs(
+        c,
+        seq,
+        &compaction::Rungs { l1: "one".into(), l2: "two".into() },
+        "test",
+    )
+    .unwrap();
+    assert_eq!(compaction::uncompacted_count(c, sess).unwrap(), 0);
+    assert_eq!(compaction::load_rungs(c, seq).unwrap().unwrap().l2, "two");
 }
 
 #[test]

@@ -23,6 +23,15 @@ pub enum AgentFile {
 }
 
 impl AgentFile {
+    /// Is `path` one of the memory files Chorus writes itself? Those are our
+    /// output, not the agent's work, and listing them as "edited" in a handoff
+    /// brief credits the agent with a file it never touched.
+    pub fn is_projected(path: &str) -> bool {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        matches!(name, "CLAUDE.md" | "AGENTS.md" | "GEMINI.md")
+            || crate::skills::is_projected(path)
+    }
+
     pub fn filename(self) -> &'static str {
         match self {
             Self::Claude => "CLAUDE.md",
@@ -48,6 +57,11 @@ pub struct Projection {
     pub facts: String,
     /// The live task state (goal / done / pending), or empty between tasks.
     pub task_state: String,
+    /// The skill index from [`crate::skills::index`]. Rendered only for
+    /// agents with no skill loader of their own — Claude gets the real
+    /// `.claude/skills/` files instead, and duplicating them here would pay
+    /// for the same content twice in the same prompt.
+    pub skills: String,
 }
 
 const MARKER: &str = "<!-- chorus:generated";
@@ -96,12 +110,68 @@ fn body(target: AgentFile, p: &Projection) -> String {
         s.push_str(p.facts.trim());
         s.push('\n');
     }
+    if target != AgentFile::Claude && !p.skills.trim().is_empty() {
+        s.push_str("\n## Skills\n\n");
+        s.push_str(p.skills.trim());
+        s.push('\n');
+    }
     if !p.task_state.trim().is_empty() {
         s.push_str("\n## Current task\n\n");
         s.push_str(p.task_state.trim());
         s.push('\n');
     }
     s.trim_end().to_string()
+}
+
+/// Wrap already-written content in the generated marker, unchanged.
+///
+/// [`render`] frames a [`Projection`] into sections; a skill file is already
+/// the exact text the agent must read, so framing it would corrupt it — its
+/// own frontmatter has to stay the first line for Claude's loader to parse it.
+/// What it still needs is the marker, so the next projection can tell our copy
+/// from one the user edited. The marker goes in an HTML comment *after* the
+/// frontmatter block for that reason.
+pub fn render_raw(content: &str) -> String {
+    let body = content.trim_end();
+    let hash = BlobId::of(body.as_bytes());
+    let note = format!(
+        "\n\n{MARKER} {hash} — copied by Chorus from .chorus/skills; edit it there, not here {CLOSE}\n"
+    );
+    format!("{body}{note}")
+}
+
+/// [`drift`] for files written by [`render_raw`], where the marker trails the
+/// content instead of leading it.
+///
+/// The two cannot share one function: `drift` finds the marker by
+/// `strip_prefix`, so a skill file — whose first line must be its own
+/// frontmatter — would read as `Foreign` forever and never be refreshed. That
+/// is a silent failure mode (skills simply stop updating), which is why it
+/// gets its own function and its own test rather than a flag.
+pub fn drift_raw(contents: Option<&str>) -> Drift {
+    let Some(text) = contents else {
+        return Drift::Missing;
+    };
+    let Some(at) = text.rfind(MARKER) else {
+        return Drift::Foreign;
+    };
+    let after = &text[at + MARKER.len()..];
+    let Some(close_at) = after.find(CLOSE) else {
+        return Drift::Foreign;
+    };
+    let claimed: Option<String> = after[..close_at]
+        .split_whitespace()
+        .find(|t| t.starts_with("b3:"))
+        .map(str::to_string);
+    let Some(claimed) = claimed else {
+        return Drift::Edited;
+    };
+    let body = text[..at].trim_end();
+    if BlobId::of(body.as_bytes()).to_string() == claimed {
+        Drift::Untouched
+    } else {
+        Drift::Edited
+    }
 }
 
 /// Classify a file's current contents relative to what we would generate.

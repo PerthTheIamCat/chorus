@@ -115,12 +115,24 @@ fn debug_log(dir: &str, what: &str) {
     }
 }
 
+/// Nothing this server accepts is large: a `memory_propose` call is a fact of
+/// at most 140 characters. Allocating whatever `Content-Length` claims is how
+/// a one-line header turns into an out-of-memory abort.
+const MAX_BODY: usize = 64 * 1024;
+
+/// A connection that opens and then says nothing must not pin a thread and an
+/// SQLite handle forever. Generous on purpose: a client legitimately holds a
+/// persistent connection idle across a long model turn, so this bounds the
+/// leak without ever being reached in normal use.
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
+
 fn handle_conn(
     mut stream: TcpStream,
     conn: &rusqlite::Connection,
     stop: &AtomicBool,
 ) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(IDLE_TIMEOUT))?;
     let mut reader = BufReader::new(stream.try_clone()?);
 
     // HTTP/1.1 persistent connection: the MCP client sends several requests
@@ -132,6 +144,7 @@ fn handle_conn(
             return Ok(()); // client hung up
         }
         let mut content_length = 0usize;
+        let mut has_origin = false;
         loop {
             let mut h = String::new();
             if reader.read_line(&mut h)? == 0 {
@@ -141,12 +154,29 @@ fn handle_conn(
             if h.is_empty() {
                 break;
             }
-            if let Some(v) = h.to_lowercase().strip_prefix("content-length:") {
+            let lower = h.to_lowercase();
+            if let Some(v) = lower.strip_prefix("content-length:") {
                 content_length = v.trim().parse().unwrap_or(0);
+            }
+            // A local MCP client never sends `Origin`; a browser always does.
+            // Refusing it is the DNS-rebinding guard the MCP spec asks for on
+            // loopback servers, and it costs no interop with the bridges.
+            if lower.starts_with("origin:") {
+                has_origin = true;
             }
         }
 
+        if has_origin {
+            write_http(
+                &mut stream,
+                403,
+                &json!({"error": "this endpoint does not serve browser origins"}),
+            )?;
+            return Ok(());
+        }
+
         if request_line.starts_with("GET") {
+            // (the Origin check above already rejected browser-initiated GETs)
             // The SSE stream. We never send server-initiated messages, but
             // the client keeps this request in flight and cancels its tool
             // calls if we close it — so hold it open with keep-alives.
@@ -180,6 +210,14 @@ fn handle_conn(
             return Ok(());
         }
 
+        if content_length > MAX_BODY {
+            write_http(
+                &mut stream,
+                413,
+                &json!({"error": format!("body too large (max {MAX_BODY} bytes)")}),
+            )?;
+            return Ok(());
+        }
         let mut body = vec![0u8; content_length];
         reader.read_exact(&mut body)?;
         debug_log("in", &String::from_utf8_lossy(&body));
