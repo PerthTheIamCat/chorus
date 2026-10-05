@@ -271,6 +271,7 @@ final class Engine: ObservableObject {
     /// Turn finished: keep the reasoning, drop the live view (the ledger now has the rest).
     private func endLive() {
         loadUsage()
+        loadAgents()
         if !live.thoughts.isEmpty { lastThoughts = live.thoughts }
         live = LiveTurn()
     }

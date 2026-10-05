@@ -227,3 +227,16 @@ fn the_real_claude_limit_message_is_classified_as_exhausted() {
         "the one message the product exists for must not fall through to a generic failover"
     );
 }
+
+/// Caught on 5 Oct 2026: a revoked Claude login. Both strings verbatim. The
+/// turn must move to the next agent, not stop the chain.
+#[test]
+fn the_real_claude_auth_failures_fail_over() {
+    let revoked = "agent returned error: {\"code\":-32603,\"message\":\"Internal error: Failed to \
+                   authenticate. API Error: 401 {\\\"type\\\":\\\"error\\\",\\\"error\\\":{\\\"type\\\":\\\"\
+                   authentication_error\\\",\\\"message\\\":\\\"OAuth access token has been revoked.\\\"},\\\"\
+                   request_id\\\":null}\"}";
+    let required = "agent returned error: {\"code\":-32000,\"message\":\"Authentication required\"}";
+    assert_eq!(HandoffReason::from_failure(revoked), Some(HandoffReason::Failover));
+    assert_eq!(HandoffReason::from_failure(required), Some(HandoffReason::Failover));
+}

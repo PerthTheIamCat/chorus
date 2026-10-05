@@ -686,7 +686,10 @@ struct ContentView: View {
             let own = usable.filter { $0.agent == agent }.map(\.name)
             return own.isEmpty ? [agent] : own
         }
-        var out = names(agentID)
+        // An agent with no logged-in account is skipped up front: a revoked
+        // Claude login used to cost ~3 minutes of retries before failing over.
+        let chosenReady = engine.agents.first { $0.id == agentID }?.ready ?? true
+        var out = chosenReady ? names(agentID) : []
         if let pick = UserDefaults.standard.string(forKey: "chorus.preferred.\(agentID)"),
            let i = out.firstIndex(of: pick) {
             out.insert(out.remove(at: i), at: 0)
@@ -698,12 +701,28 @@ struct ContentView: View {
         return out
     }
 
+    private func accounts_split(_ name: String) -> String {
+        String(name.split(separator: "@", maxSplits: 1).first ?? Substring(name))
+    }
+
     private func dispatch(_ target: String, _ text: String) {
         lastPrompt = text
         let agentID = agentFor(target)?.id ?? target
         // `@codex …` picked another agent's default model; pin it for the turn.
         if target != model { engine.setModel(agent: agentID, model: target) }
-        let names = chain(for: agentID)
+        var names = chain(for: agentID)
+        var notice: String?
+        if names.first.map({ accounts_split($0) }) != agentID {
+            let label = agentFor(target)?.label ?? agentID
+            if let next = names.first {
+                notice = "\(label) ยังไม่ได้ login หรือติดลิมิตทุกบัญชี — ส่งให้ \(next) แทน (login ได้ที่ ตั้งค่า → บัญชี)"
+            } else {
+                notice = "\(label) ยังไม่ได้ login — ไปที่ ตั้งค่า → บัญชี แล้วกด Login"
+                names = [agentID]
+            }
+        }
+        // After the send: starting a turn clears the banner.
+        defer { if let notice { engine.lastError = notice } }
         if permission == .ask {
             engine.sendInteractive(text, agent: names.first ?? agentID)
         } else {

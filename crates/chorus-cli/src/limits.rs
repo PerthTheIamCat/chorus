@@ -194,11 +194,7 @@ fn account_ready(agent: &str, account: Option<&str>, dir: &Path) -> bool {
         );
     }
     if agent.contains("claude") {
-        // Existence and one key only — never read or print a token.
-        dir.join(".credentials.json").exists()
-            || std::fs::read_to_string(dir.join(".claude.json"))
-                .map(|s| s.contains("\"oauthAccount\""))
-                .unwrap_or(false)
+        crate::agents::claude_auth_status(Some(dir)).unwrap_or_else(|| dir.join(".credentials.json").exists())
     } else {
         dir.join("auth.json").exists()
     }

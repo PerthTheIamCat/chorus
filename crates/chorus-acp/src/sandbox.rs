@@ -69,6 +69,17 @@ pub fn wrap(cmd: &[String], cwd: &Path, profile: Profile) -> Result<Vec<String>,
     Ok(out)
 }
 
+fn regex_escape(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        if "\\.^$|?*+()[]{}".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// The Seatbelt profile, as a single `-p` argument.
 ///
 /// `-p` rather than a temp file on purpose: a profile file is one more thing
@@ -117,6 +128,20 @@ pub fn policy(cwd: &Path, profile: Profile) -> String {
             continue; // no quoting rule in the profile grammar is worth guessing at
         }
         s.push_str(&format!("(allow file-write* (subpath \"{p}\"))\n"));
+    }
+    // Claude Code keeps its main config as a *file* beside its home dir
+    // (`~/.claude.json`, plus `.backup`/`.lock` siblings). It is not under
+    // `~/.claude`, so the subpath above misses it, and a denied write there
+    // made a failed login take minutes instead of seconds.
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let base = canonical(&home).join(".claude.json");
+        if let Some(b) = base.to_str().filter(|b| !b.contains('"')) {
+            s.push_str(&format!("(allow file-write* (literal \"{b}\"))\n"));
+            s.push_str(&format!(
+                "(allow file-write* (regex #\"^{}\\.[^/]*$\"))\n",
+                regex_escape(b)
+            ));
+        }
     }
     // Carve-outs *inside* the workspace. Seatbelt picks the last matching
     // rule, so these must come after the allows above.
