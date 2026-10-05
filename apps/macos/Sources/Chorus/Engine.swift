@@ -690,7 +690,7 @@ final class Engine: ObservableObject {
     func loadRouterModels() {
         routerChecking = true
         routerSetupQueue.async { [weak self] in
-            let json = "qwen2.5:3b".withCString { Self.string(from: chorus_router_models_json($0)) }
+            let json = "chorus-openthai-systemone:0.8b".withCString { Self.string(from: chorus_router_models_json($0)) }
             let result = Self.decode(RouterModelsResult.self, json)
             DispatchQueue.main.async {
                 self?.routerModels = result?.ok == true ? result?.models?.map(\.name) : nil

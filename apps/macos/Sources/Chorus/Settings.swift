@@ -185,7 +185,7 @@ struct GeneralSettings: View {
     @AppStorage("chorus.failoverAccounts") private var failoverAccounts = true
     @AppStorage("chorus.failoverProviders") private var failoverProviders = true
     @AppStorage("chorus.autoRoute") private var autoRoute = true
-    @AppStorage("chorus.routerModel") private var routerModel = "qwen2.5:3b"
+    @AppStorage("chorus.routerModel") private var routerModel = "chorus-openthai-systemone:0.8b"
     @AppStorage("chorus.dismissedSetupCards") private var dismissedSetupCards = ""
 
     var body: some View {
@@ -221,9 +221,9 @@ struct GeneralSettings: View {
                 Toggle("", isOn: $autoRoute).labelsHidden().toggleStyle(.switch)
             }
             Divider().padding(.leading, 12)
-            SettingsRow(title: "โมเดล router ใน Ollama", detail: "ต้องติดตั้งโมเดลนี้ใน Ollama บนเครื่องก่อน") {
-                TextField("เช่น qwen2.5:3b", text: $routerModel)
-                    .textFieldStyle(.roundedBorder).frame(width: 180)
+            SettingsRow(title: "โมเดล router ใน Ollama", detail: "ค่าเริ่มต้น OpenThai System One ประมาณ 812 MB; ต้องติดตั้งใน Ollama บนเครื่องก่อน") {
+                TextField("เช่น chorus-openthai-systemone:0.8b", text: $routerModel)
+                    .textFieldStyle(.roundedBorder).frame(width: 260)
             }
             Divider().padding(.leading, 12)
             SettingsRow(title: "คำแนะนำการตั้งค่าที่ปิดไว้", detail: "แสดงการ์ดสำหรับ agent, Auto และเครื่องมือเสริมอีกครั้ง") {

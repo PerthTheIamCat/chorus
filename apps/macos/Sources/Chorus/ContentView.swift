@@ -79,7 +79,7 @@ struct ContentView: View {
     @State private var permission = PermissionLevel.ask
     @State private var model = ""
     @AppStorage("chorus.autoRoute") private var autoRoute = true
-    @AppStorage("chorus.routerModel") private var routerModel = "qwen2.5:3b"
+    @AppStorage("chorus.routerModel") private var routerModel = "chorus-openthai-systemone:0.8b"
     @AppStorage("chorus.autoCatalogUpdates") private var autoCatalogUpdates = true
     @AppStorage("chorus.dismissedSetupCards") private var dismissedSetupCards = ""
     @State private var routingInProgress = false
