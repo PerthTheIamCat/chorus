@@ -29,6 +29,24 @@ const ALWAYS_EXCLUDE: &[&str] = &[
     ".venv/",
     "dist/",
     "build/",
+    // Framework/tool caches that are huge and never the agent's work. Every
+    // file here is hashed and copied on the first snapshot, which is what made
+    // "start session" take minutes on a web project.
+    ".next/",
+    ".nuxt/",
+    ".svelte-kit/",
+    ".turbo/",
+    ".parcel-cache/",
+    ".cache/",
+    ".gradle/",
+    ".build/",
+    "Pods/",
+    "DerivedData/",
+    "coverage/",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".idea/",
+    "*.log",
     // The ledger store, in case a caller keeps it inside the workspace.
     "*.db",
     "*.db-wal",
@@ -63,6 +81,13 @@ impl Checkpoint {
             this.git(&["init", "--quiet"])?;
             this.git(&["config", "user.email", "checkpoint@chorus.local"])?;
             this.git(&["config", "user.name", "Chorus Checkpoint"])?;
+            // Every turn runs `git add -A` over the whole tree. These make the
+            // repeat runs stat-only instead of rescanning untracked dirs, and
+            // stop git from spending turn time on housekeeping.
+            this.git(&["config", "core.untrackedCache", "true"])?;
+            this.git(&["config", "core.preloadindex", "true"])?;
+            this.git(&["config", "gc.auto", "0"])?;
+            this.git(&["config", "core.autocrlf", "false"])?;
             // Our exclude list goes in the shadow repo's private exclude
             // file, so it never appears in the user's tree.
             let exclude = this.git_dir.join("info").join("exclude");

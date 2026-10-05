@@ -49,7 +49,10 @@ struct ContentView: View {
     @State private var workspace = ""
     @State private var recents: [String] =
         UserDefaults.standard.stringArray(forKey: "chorus.recentWorkspaces") ?? []
-    @State private var draft = ""
+    /// Holds the composer text outside `ContentView`'s own state: a `@State`
+    /// string here re-evaluated this 1000-line body on every keystroke, which
+    /// is what made typing lag. Only `ComposerField` observes the box.
+    @StateObject private var draftBox = DraftBox()
     @State private var agent = "codex"
     @State private var permission = PermissionLevel.ask
     @State private var model = ""
@@ -507,10 +510,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             if let hint { Text(hint).font(.caption).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading) }
-            TextEditor(text: $draft)
-                .font(.body)
-                .frame(minHeight: 44, maxHeight: 140)
-                .scrollContentBackground(.hidden)
+            ComposerField(box: draftBox)
             HStack(spacing: 8) {
                 // Agent chip: who answers the next turn. `@codex …` at the start
                 // of a message overrides it for that turn only.
@@ -557,7 +557,7 @@ struct ContentView: View {
     }
 
     private func submit() {
-        let raw = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let raw = draftBox.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let (target, text) = route(raw)
         guard engine.sessionID >= 0, !raw.isEmpty else { return }
         guard !text.isEmpty else {
@@ -565,7 +565,7 @@ struct ContentView: View {
             return
         }
         hint = nil
-        draft = ""
+        draftBox.text = ""
         // Busy: line it up behind the running turn (Cursor-style queue)
         // instead of dropping the keystroke on a disabled button.
         if engine.busy { queued.append((target, text)); return }
@@ -1301,5 +1301,20 @@ struct MarkdownText: View {
                 }
             }
         }
+    }
+}
+
+
+final class DraftBox: ObservableObject {
+    @Published var text = ""
+}
+
+struct ComposerField: View {
+    @ObservedObject var box: DraftBox
+    var body: some View {
+        TextEditor(text: $box.text)
+            .font(.body)
+            .frame(minHeight: 44, maxHeight: 140)
+            .scrollContentBackground(.hidden)
     }
 }
