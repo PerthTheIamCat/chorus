@@ -130,3 +130,20 @@ fn apply_reverse_undoes_the_hunks_in_a_patch() {
 
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+#[test]
+fn user_diff_leaves_out_files_chorus_generates() {
+    let dir = std::env::temp_dir().join(format!("chorus-ckpt-gen-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let ck = chorus_core::checkpoint::Checkpoint::open(&dir).unwrap();
+    let base = ck.snapshot("base").unwrap();
+    std::fs::write(dir.join("AGENTS.md"), "generated").unwrap();
+    std::fs::write(dir.join("CLAUDE.md"), "generated").unwrap();
+    std::fs::write(dir.join("real.txt"), "work").unwrap();
+    let d = ck.diff_since_user(&base).unwrap();
+    assert!(d.contains("real.txt"));
+    assert!(!d.contains("AGENTS.md") && !d.contains("CLAUDE.md"), "{d}");
+    // the revert guard still sees everything
+    assert!(ck.diff_since(&base).unwrap().contains("AGENTS.md"));
+}
