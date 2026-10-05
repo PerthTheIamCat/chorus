@@ -1,0 +1,29 @@
+{
+  "id": "07-sidebar-layout-visual",
+  "task": "fix macOS sidebar Form's two-column layout truncating/overlapping labels and controls — a purely visual bug, verified by actually building and screenshotting the result rather than trusting the diff alone",
+  "brief_thickness": "medium — symptom + root cause diagnosis (Form's 2-column layout in a narrow sidebar) but no prescribed solution, no code shown",
+  "from": "claude-sonnet-5 (chat)",
+  "to": "claude-code-acp default model (via @zed-industries/claude-code-acp)",
+  "run": {
+    "date": "2026-09-11",
+    "method": "git worktree at parent commit e921822, brief prompt via acp-probe --allow",
+    "diff": "ContentView.swift +58/-44, 1 file (all within the sidebar constraint)",
+    "verify": "swift build clean; ACTUALLY LAUNCHED the built app and screenshotted the sidebar (had to patch ChorusApp.swift with the activation-policy fix from earlier this session just to get a window — that patch is NOT part of the scored diff) — visually confirmed: no truncation, no overlap, checkbox label fits on one line, hint text wraps cleanly across 3 lines"
+  },
+  "brief": {
+    "goal": "sidebar labels get full width to wrap in instead of fighting a control for space; widen sidebar if still cramped",
+    "done": ["diagnosed cause: Form's macOS 2-column (label|control) layout doesn't fit in a ~240pt sidebar alongside a text field"],
+    "pending": ["restructure sidebar layout", "keep every control's behavior identical — layout fix only, not a feature change"],
+    "constraints": ["Swift-only, ContentView.swift", "don't change what any control does, only how it's laid out", "cargo test stays green"],
+    "files": ["apps/macos/Sources/Chorus/ContentView.swift"],
+    "diff": ""
+  },
+  "result": {
+    "understood_goal": 2,
+    "no_repeat_work": 2,
+    "respected_constraints": 2,
+    "proceeded_unaided": 2,
+    "output_usable": 2
+  },
+  "failure_note": "ไม่ตก 10/10 — เคสแรกที่ตรวจด้วยตาจริงแทนอ่านแค่ diff (เพราะเป็น visual bug ที่ agent headless มองไม่เห็นหน้าจอตัวเอง เดาจาก diff อย่างเดียวไม่พอ). claude-code-acp เลือกวิธีต่างจากของจริงโดยสิ้นเชิง: ของจริงเลิกใช้ Form/label-control pairing ไปเลย เปลี่ยนเป็น plain VStack + sidebarSection helper (label บนสุด เสมอ); เคสนี้ใช้ GroupBox + LabeledContent แทน (label ซ้าย content ขวาในแถวเดียวกันตาม SwiftUI ปกติ) — ทฤษฎีตอนแรกคือ LabeledContent อาจยังบีบเหมือน Form เพราะเป็น label-control pairing เหมือนกัน. แต่ build แล้ว screenshot จริง (ต้อง patch ChorusApp.swift ชั่วคราวด้วย activation-policy fix จาก session นี้เองเพื่อให้ window โผล่ — patch นั้นไม่นับเป็นส่วนของ diff ที่ให้คะแนน) พบว่า LabeledContent ที่ความกว้างนี้ render โอเค ไม่บีบ ไม่ล้น checkbox label 'Allow file writes / commands' อยู่บรรทัดเดียวพอดี hint text wrap 3 บรรทัดสะอาด. สัญญาณสำคัญ: วิธีแก้ที่ต่างจากของจริงโดยสิ้นเชิงยังแก้บั๊กได้จริง (มีมากกว่าทางเดียวที่ถูก) — และการันตีเรื่อง visual bug ต้อง 'ตรวจด้วยตาจริง' ไม่ใช่เชื่อ diff/transcript อย่างเดียว ถ้าไม่ build+screenshot รอบนี้จะให้คะแนนสูงแบบไม่มีหลักฐานจริง"
+}

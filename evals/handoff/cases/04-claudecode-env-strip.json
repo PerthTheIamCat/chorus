@@ -1,0 +1,29 @@
+{
+  "id": "04-claudecode-env-strip",
+  "task": "claude-code-acp bridge refuses to start because it inherits CLAUDECODE from Chorus's own launch environment",
+  "brief_thickness": "medium — symptom + confirmed root cause, no exact line, no code shown",
+  "from": "claude-sonnet-5 (chat)",
+  "to": "claude-code-acp default model (via @zed-industries/claude-code-acp)",
+  "run": {
+    "date": "2026-09-11",
+    "method": "git worktree at parent commit 187c0a8, brief prompt via acp-probe --allow",
+    "diff": "crates/chorus-acp/src/lib.rs +16 -2, 1 file",
+    "verify": "cargo test -p chorus-acp = 4/5 suites passed, clippy -p chorus-acp = 0 warnings (both re-run independently after the probe)"
+  },
+  "brief": {
+    "goal": "a bridge spawned by Chorus must never see CLAUDECODE / CLAUDE_CODE_* markers, so claude-code-acp doesn't refuse thinking it's nested",
+    "done": ["confirmed the failure is env-based: Claude Code sets CLAUDECODE (and related CLAUDE_CODE_* vars) in its subprocess environment, inherited by whatever Chorus spawns"],
+    "pending": ["strip those vars when spawning any bridge, harmless for codex/gemini too"],
+    "constraints": ["only touch crates/chorus-acp", "no new dependency", "cargo test and clippy must stay green"],
+    "files": ["crates/chorus-acp/src/lib.rs"],
+    "diff": ""
+  },
+  "result": {
+    "understood_goal": 2,
+    "no_repeat_work": 2,
+    "respected_constraints": 2,
+    "proceeded_unaided": 2,
+    "output_usable": 2
+  },
+  "failure_note": "ไม่ตก 10/10. บรีฟบอกแค่ 3 ชื่อ env var ที่ 'ยืนยันแล้ว' (CLAUDECODE + related CLAUDE_CODE_*) โดยไม่ให้โค้ด — claude-code-acp เขียนเป็น prefix match `key == \"CLAUDECODE\" || key.starts_with(\"CLAUDE_CODE_\")` แทนที่จะ hardcode 3 ชื่อตามของจริง กว้างกว่าฉบับจริงแต่ยังตรง scope/constraint ทุกข้อ และรัน cargo test + cargo clippy เองก่อนจบเทิร์นโดยไม่ต้องบอก (เห็นใน transcript: 'Run cargo test' / 'Run cargo clippy' เป็น tool call จริง ไม่ใช่แค่พูดว่าจะรัน). โน้ตสำคัญกว่าคะแนน: นี่เป็นเคสแรกที่ยิงผ่าน claude-code-acp แทน codex (codex ชน usageLimitExceeded ระหว่างรัน) — เคสนี้เลยพิสูจน์ทั้ง 2 อย่างพร้อมกัน: brief ระดับกลางพอสำหรับ bug fix ที่ root cause ชัดแล้ว, และ claude-code-acp adapter ใช้งานจริงได้ไม่ใช่แค่ auth ผ่าน"
+}

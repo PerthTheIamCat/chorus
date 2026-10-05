@@ -1,0 +1,29 @@
+{
+  "id": "06-ui-thread-checkpoint-calls",
+  "task": "every checkpoint-touching call in the macOS shell's Engine must move off the main thread — brief described the symptom + general principle, deliberately did NOT enumerate the exact 5 call sites the real fix touched",
+  "brief_thickness": "thin — symptom, root cause principle ('same class of bug likely affects other checkpoint-touching actions'), and 2 files named, but no list of which functions or how many",
+  "from": "claude-sonnet-5 (chat)",
+  "to": "claude-code-acp default model (via @zed-industries/claude-code-acp)",
+  "run": {
+    "date": "2026-09-11",
+    "method": "git worktree at parent commit 3667ace, brief prompt via acp-probe --allow",
+    "diff": "Engine.swift +54/-25, ContentView.swift +13/-4",
+    "verify": "cargo build -p chorus-ffi clean (Rust untouched, confirmed via git diff --stat -- crates/ empty); did not run swift build in this pass"
+  },
+  "brief": {
+    "goal": "every checkpoint-touching Engine method dispatches off the main thread, hops back only to assign @Published state; give real busy feedback instead of a UI that looks frozen",
+    "done": ["root cause confirmed: open() ran chorus_engine_open synchronously on the calling (main) thread, which does git init + git add -A under the hood — minutes on a large/iCloud folder"],
+    "pending": ["fix open() and any other checkpoint-touching path the same way", "add busy/spinner feedback", "reconsider the workspace field's default value if it's something huge"],
+    "constraints": ["Swift-only, don't touch Rust", "cargo test stays green", "don't change what checkpoint operations do, just where they run"],
+    "files": ["apps/macos/Sources/Chorus/Engine.swift", "apps/macos/Sources/Chorus/ContentView.swift"],
+    "diff": ""
+  },
+  "result": {
+    "understood_goal": 2,
+    "no_repeat_work": 2,
+    "respected_constraints": 2,
+    "proceeded_unaided": 2,
+    "output_usable": 1
+  },
+  "failure_note": "9/10 — ตกจุดเดียวแต่เป็นจุดสำคัญที่สุด. claude-code-acp fix ครบ open/snapshot/rejectHunks/revertToStart ตรงกับของจริง แถมโบนัส review() ที่ของจริงไม่ได้แตะ (ไม่ผิด ไม่เกิน scope) — แต่ 'ไม่ได้' แตะ refresh() เอง ซึ่งยังเรียก chorus_working_diff (git add -A) แบบ synchronous บน thread ที่เรียก, และ refresh() ถูกเรียกจาก main thread หลัง 'ทุกเทิร์น' (เช็คแล้ว: เรียกจาก 9 จุดใน Engine.swift รวมถึงใน DispatchQueue.main.async ของ send()) นั่นคือบั๊กตัวที่หนักกว่า 'Start session ค้างครั้งแรก' เพราะเกิดซ้ำทุกเทิร์น ไม่ใช่แค่ตอนเปิด session — ของจริง (commit message) พูดถึงจุดนี้ตรงๆ ว่าเป็นสาเหตุหลักที่สอง ('which was calling chorus_working_diff on main after every turn, not just at open'). ข้อมูลที่ขาดจาก brief: ไม่ได้ระบุชื่อ refresh() หรือบอกว่ามันถูกเรียกจากไหนบ้าง ปล่อยให้ agent ไล่หาเอง — agent ไล่เจอ 4 จาก 5 จุดที่แท้จริง (open/snapshot/rejectHunks/revertToStart) แต่พลาดจุดที่ 5 ที่ไม่มีคำว่า 'checkpoint' ในชื่อฟังก์ชันให้ grep เจอง่ายๆ (chorus_working_diff ซ่อนอยู่ใน refresh() ซึ่งฟังดูเหมือนแค่ refresh ข้อมูล ไม่ใช่ checkpoint operation ชัดเจน). สัญญาณ: brief แบบ 'บอกหลักการ ให้ไปหาเอง' เสี่ยงพลาด call site ที่ 'ชื่อไม่บอกใบ้' แม้ agent จะกวาดได้ส่วนใหญ่ก็ตาม — บรีฟที่ระบุชื่อฟังก์ชันตรงๆ (เหมือนเคส 04/05) จะกันจุดนี้ได้"
+}

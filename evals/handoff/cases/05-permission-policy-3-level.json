@@ -1,0 +1,29 @@
+{
+  "id": "05-permission-policy-3-level",
+  "task": "extend Policy from 2-level bool to 3-level (deny/read-only/allow) across 3 files: session.rs (the type), ffi/lib.rs (4 call sites), main.rs (CLI flag ×3 subcommands)",
+  "brief_thickness": "medium — full design decision spelled out (variant name, from_level int mapping, decide() matching rule) but no code shown, no line numbers, just named files",
+  "from": "claude-sonnet-5 (chat)",
+  "to": "claude-code-acp default model (via @zed-industries/claude-code-acp)",
+  "run": {
+    "date": "2026-09-11",
+    "method": "git worktree at parent commit d7e0f76, brief prompt via acp-probe --allow",
+    "diff": "3 files: chorus-cli/src/main.rs +5/-2, chorus-cli/src/session.rs +25/-0, chorus-ffi/src/lib.rs +4/-20",
+    "verify": "cargo test = 60/60 (20 suites), clippy = 0 warnings (both re-run independently after the probe)"
+  },
+  "brief": {
+    "goal": "3-level Policy (deny/read-only/allow): read-only auto-approves read/fetch/search tool kinds, denies writes/commands/network",
+    "done": ["design settled: ReadOnly variant + Policy::from_level(i32) mapping 0=deny/1=read-only/2+=allow, replacing the old if/else at every FFI call site"],
+    "pending": ["add ReadOnly variant + from_level + decide() matching to Policy", "convert all 4 chorus-ffi entry points (turn/handoff/relay/compare) to call from_level", "add --read-only CLI flag alongside --yes in every subcommand that parses --yes"],
+    "constraints": ["don't change --yes (still AllowAll) or deny-by-default", "cargo test and clippy must stay green", "no new dependency"],
+    "files": ["crates/chorus-cli/src/session.rs", "crates/chorus-ffi/src/lib.rs", "crates/chorus-cli/src/main.rs"],
+    "diff": ""
+  },
+  "result": {
+    "understood_goal": 2,
+    "no_repeat_work": 2,
+    "respected_constraints": 2,
+    "proceeded_unaided": 2,
+    "output_usable": 2
+  },
+  "failure_note": "ไม่ตก 10/10 — เคสแรกที่ทดสอบ brief ข้ามหลายไฟล์พร้อมกัน (3 ไฟล์, งาน mechanical แต่กระจาย). ผลตรงกับของจริงแทบทุกจุด: from_level mapping เป๊ะ (0/1/2+), is_read_kind ใช้ contains(\"read\"/\"fetch\"/\"search\") ตรงกับที่บรีฟบอก, ครบทั้ง 4 จุดใน ffi/lib.rs, ครบทั้ง 3 subcommand ใน main.rs. ส่วนเกินบรีฟที่ดี: อัปเดต usage-string error message ให้บอก --read-only ด้วย (บรีฟไม่ได้สั่ง แต่สมเหตุผล ไม่ผิด constraint). สัญญาณสำคัญ: บรีฟระดับกลางที่ 'สเปกดีไซน์ไว้ครบแล้วแต่ไม่ให้โค้ด' เพียงพอสำหรับงานที่กระจายหลายไฟล์ ไม่ใช่แค่งานไฟล์เดียว — ตอบคำถามหลักของ README ข้อ 'brief บางลงได้แค่ไหนก่อนพัง' ว่าอย่างน้อยระดับนี้ยังไม่พัง แม้ scope กว้างขึ้น. รันครั้งแรกช่วงนี้ทั้ง codex และ claude-code-acp ชน usage limit พร้อมกัน (เคส 04-05 เจอ 'usageLimitExceeded' / 'out of extra usage') — รอ reset แล้วรันซ้ำสำเร็จ ไม่ใช่ปัญหาที่ brief หรือ adapter"
+}
