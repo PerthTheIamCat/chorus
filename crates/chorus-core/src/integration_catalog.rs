@@ -96,6 +96,11 @@ pub struct CatalogState {
     pub projects: BTreeMap<String, BTreeSet<String>>,
     #[serde(default)]
     pub history: Vec<UpdateRecord>,
+    /// Homebrew formulae that were already on the Mac when Chorus first saw
+    /// them. Removing the integration must not uninstall what Chorus did not
+    /// install.
+    #[serde(default)]
+    pub adopted: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -468,13 +473,19 @@ pub fn install(id: &str) -> Result<InstallRecord, CatalogError> {
     let old = state.installed.get(id).map(|x| x.version.clone());
     if entry.recipe.method == InstallMethod::Homebrew {
         if let Some(record) = homebrew_installed(entry)? {
+            if !state.installed.contains_key(id) {
+                state.adopted.insert(id.into());
+            }
             state.installed.insert(id.into(), record.clone());
             save_state(&state)?;
             return Ok(record);
         }
         let mut command = installer_command("brew")?;
         command.args(["install", "--formula", entry.recipe.package]);
+        mark("fetch");
         run_install(&mut command)?;
+        mark("verify");
+        state.adopted.remove(id);
         let record = homebrew_installed(entry)?
             .ok_or_else(|| CatalogError::Health("Homebrew finished but the formula is not installed".into()))?;
         if !record.health.healthy {
@@ -497,6 +508,7 @@ pub fn install(id: &str) -> Result<InstallRecord, CatalogError> {
     {
         return Ok(record.clone());
     }
+    mark("fetch");
     let root = tools_path()?.join(id).join(entry.reviewed_version);
     if root.exists() {
         return Err(CatalogError::Install(format!(
@@ -668,6 +680,7 @@ pub fn install(id: &str) -> Result<InstallRecord, CatalogError> {
         InstallMethod::Bundled => bundled_skill
             .ok_or_else(|| CatalogError::Install("bundled skill file was not created".into()))?,
     };
+    mark("verify");
     let health = if entry.recipe.method == InstallMethod::Bundled {
         match std::fs::read_to_string(&installed_executable) {
             Ok(content) if content == CHORUS_REVIEW_SKILL => Health {
@@ -819,10 +832,11 @@ pub fn uninstall(id: &str) -> Result<(), CatalogError> {
     let mut state = load_state()?;
     let entry = get(id).ok_or_else(|| CatalogError::Unknown(id.into()))?;
     if entry.recipe.method == InstallMethod::Homebrew {
-        if homebrew_installed(entry)?.is_some() {
+        if !state.adopted.contains(id) && homebrew_installed(entry)?.is_some() {
             run_install(installer_command("brew")?
                 .args(["uninstall", "--formula", entry.recipe.package]))?;
         }
+        state.adopted.remove(id);
         if let Some(record) = state.installed.get(id).filter(|record| record.method != InstallMethod::Homebrew) {
             remove_owned_files(record)?;
         }
@@ -925,4 +939,183 @@ fn server_for(entry: &Integration, record: &InstallRecord, project: &Path) -> Va
         "headroom" => serde_json::json!({"name":"headroom","command":path,"args":["mcp"],"env":[]}),
         _ => serde_json::json!({}),
     }
+}
+
+
+// ---- install plan, progress and one-call actions ---------------------------
+
+/// One line of what an action will do, in the order it happens. `phase` ties
+/// the line to live progress: fetch, verify, enable, disable, remove.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlanItem {
+    pub kind: &'static str,
+    pub phase: &'static str,
+    pub title: String,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Plan {
+    pub id: String,
+    pub action: String,
+    pub items: Vec<PlanItem>,
+}
+
+fn item(kind: &'static str, phase: &'static str, title: impl Into<String>, detail: Option<String>) -> PlanItem {
+    PlanItem { kind, phase, title: title.into(), detail }
+}
+
+fn project_name(project: &Path) -> String {
+    project.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+fn display_path(path: &Path) -> String {
+    match home() {
+        Ok(h) => path.strip_prefix(&h).map(|p| format!("~/{}", p.display())).unwrap_or_else(|_| path.display().to_string()),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+fn agent_visibility(entry: &Integration) -> &'static str {
+    if entry.modes.contains(&Mode::Mcp) {
+        "ส่งให้ตอนเริ่มเซสชัน (ไม่แก้ไฟล์ตั้งค่าของ Claude/Codex)"
+    } else if entry.modes.contains(&Mode::Cli) {
+        "เพิ่มใน PATH ของเซสชัน (ไม่แก้ shell ของคุณ)"
+    } else {
+        "แนบเป็นคำแนะนำของโปรเจกต์"
+    }
+}
+
+/// What `action` would touch, computed from the same data the action itself
+/// uses, so the preview and the removal cannot drift apart.
+/// `action`: install, install_enable, update, remove, enable, disable.
+pub fn plan(id: &str, action: &str, project: &Path) -> Result<Plan, CatalogError> {
+    let entry = get(id).ok_or_else(|| CatalogError::Unknown(id.into()))?;
+    let state = load_state()?;
+    let state_file = display_path(&state_path()?);
+    let proj = project_name(project);
+    let has_project = !proj.is_empty();
+    let brew = entry.recipe.method == InstallMethod::Homebrew;
+    let mut items = Vec::new();
+    match action {
+        "install" | "install_enable" | "update" => {
+            let verb = if action == "update" { "อัปเดต" } else { "ติดตั้ง" };
+            if brew {
+                let already = homebrew_installed(entry).ok().flatten().is_some() && action != "update";
+                if already {
+                    items.push(item("keep", "fetch", "ใช้ตัวที่มีอยู่แล้วใน Homebrew",
+                        Some(format!("{} · ไม่ติดตั้งซ้ำ และจะไม่ถูกลบตอนเลิกใช้", entry.recipe.package))));
+                } else {
+                    items.push(item("package", "fetch", format!("{verb}แพ็กเกจ Homebrew"), Some(entry.recipe.package.into())));
+                }
+            } else {
+                let root = tools_path()?.join(id).join(entry.reviewed_version);
+                items.push(item("file", "fetch", "สร้างไฟล์ skill", Some(display_path(&root))));
+            }
+            items.push(item("check", "verify", "ตรวจว่าใช้งานได้",
+                (!entry.recipe.health_args.is_empty()).then(|| format!("{} {}", entry.recipe.executable, entry.recipe.health_args.join(" ")))));
+            if action != "update" {
+                items.push(item("state", "verify", "บันทึกการติดตั้ง", Some(state_file.clone())));
+            }
+            if action == "install_enable" && has_project {
+                items.push(item("project", "enable", format!("เปิดใช้กับโปรเจกต์ {proj}"), Some(agent_visibility(entry).into())));
+            }
+        }
+        "enable" => items.push(item("project", "enable", format!("เปิดใช้กับโปรเจกต์ {proj}"), Some(agent_visibility(entry).into()))),
+        "disable" => items.push(item("project", "disable", format!("เลิกใช้กับโปรเจกต์ {proj}"), None)),
+        "remove" => {
+            let projects: Vec<String> = state.projects.iter()
+                .filter(|(_, ids)| ids.contains(id))
+                .map(|(path, _)| project_name(Path::new(path)))
+                .collect();
+            if !projects.is_empty() {
+                items.push(item("project", "disable", format!("เลิกใช้กับ {} โปรเจกต์", projects.len()), Some(projects.join(", "))));
+            }
+            let owned: Vec<String> = state.installed.get(id)
+                .map(|r| r.owned_files.iter().map(|p| display_path(p)).collect())
+                .unwrap_or_default();
+            if brew {
+                if state.adopted.contains(id) {
+                    items.push(item("keep", "remove", "ไม่ลบแพ็กเกจ Homebrew",
+                        Some("มีอยู่ก่อนใช้ Chorus จึงเก็บไว้".into())));
+                } else {
+                    items.push(item("package", "remove", "ถอนแพ็กเกจ Homebrew", Some(entry.recipe.package.into())));
+                }
+            }
+            for path in owned {
+                items.push(item("file", "remove", "ลบไฟล์ที่ Chorus สร้าง", Some(path)));
+            }
+            items.push(item("state", "verify", "ลบบันทึกการติดตั้ง", Some(state_file)));
+        }
+        other => return Err(CatalogError::Install(format!("unknown catalog action: {other}"))),
+    }
+    Ok(Plan { id: id.into(), action: action.into(), items })
+}
+
+/// Live position of the running action, polled by the shell.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Progress {
+    pub id: String,
+    pub current: String,
+    pub done: Vec<String>,
+}
+
+static PROGRESS: std::sync::Mutex<Option<Progress>> = std::sync::Mutex::new(None);
+
+fn mark(phase: &str) {
+    if let Ok(mut guard) = PROGRESS.lock() {
+        if let Some(p) = guard.as_mut() {
+            if p.current != phase {
+                if !p.current.is_empty() {
+                    let finished = std::mem::take(&mut p.current);
+                    p.done.push(finished);
+                }
+                p.current = phase.into();
+            }
+        }
+    }
+}
+
+pub fn progress() -> Option<Progress> {
+    PROGRESS.lock().ok().and_then(|g| g.clone())
+}
+
+/// Run one user-visible action end to end, publishing progress as it goes.
+/// `install_enable` is install followed by enabling for the project.
+pub fn perform(action: &str, id: &str, project: &Path) -> Result<(), CatalogError> {
+    if let Ok(mut g) = PROGRESS.lock() {
+        *g = Some(Progress { id: id.into(), ..Default::default() });
+    }
+    let result = (|| match action {
+        "install" => install(id).map(|_| ()),
+        "install_enable" => {
+            install(id)?;
+            if !project.as_os_str().is_empty() {
+                mark("enable");
+                set_enabled(project, id, true)?;
+            }
+            Ok(())
+        }
+        "update" => update(id).map(|_| ()),
+        "remove" => {
+            mark("disable");
+            let owned = load_state()?.installed.get(id).map(|r| r.owned_files.clone()).unwrap_or_default();
+            mark("remove");
+            uninstall(id)?;
+            mark("verify");
+            let state = load_state()?;
+            let mut left: Vec<String> = owned.iter().filter(|p| p.exists()).map(|p| display_path(p)).collect();
+            if state.installed.contains_key(id) || state.projects.values().any(|ids| ids.contains(id)) {
+                left.push("บันทึกใน integrations.json".into());
+            }
+            if left.is_empty() { Ok(()) } else { Err(CatalogError::Install(format!("ยังเหลือ: {}", left.join(", ")))) }
+        }
+        "enable" => { mark("enable"); set_enabled(project, id, true) }
+        "disable" => { mark("disable"); set_enabled(project, id, false) }
+        other => Err(CatalogError::Install(format!("unknown catalog action: {other}"))),
+    })();
+    if let Ok(mut g) = PROGRESS.lock() {
+        *g = None;
+    }
+    result
 }

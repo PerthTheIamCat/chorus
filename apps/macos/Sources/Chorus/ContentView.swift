@@ -293,9 +293,13 @@ struct ContentView: View {
                     working: entry.isWorking,
                     onAction: {
                         if missing != nil, let url = entry.installerURL { NSWorkspace.shared.open(url) }
-                        else {
-                            engine.catalogAction(project: workspace, id: entry.id,
-                                                 action: entry.isInstalled ? "enable" : "installAndEnable")
+                        else if entry.isInstalled {
+                            engine.catalogAction(project: workspace, id: entry.id, action: "enable")
+                        } else {
+                            // Show what will be created before anything is installed.
+                            engine.requestedInstall = entry.id
+                            settingsSection = .integrations
+                            showSettings = true
                         }
                     },
                     onDismiss: { dismissSetup(need) },
