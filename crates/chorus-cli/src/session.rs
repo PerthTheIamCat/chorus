@@ -328,10 +328,14 @@ pub struct Session {
 fn open_checkpoint(cwd: &Path) -> (Option<Checkpoint>, String) {
     match Checkpoint::open_reporting(cwd) {
         Ok((ck, fresh)) => {
-            let base = if fresh {
+            // A shadow repo can exist without a single commit (opened earlier
+            // by something other than a session); treat that like a fresh one,
+            // otherwise the session has no base to diff against or restore to.
+            let head = ck.head().unwrap_or_default();
+            let base = if fresh || head.is_empty() {
                 ck.snapshot("session base").unwrap_or_default()
             } else {
-                ck.head().unwrap_or_default()
+                head
             };
             (Some(ck), base)
         }
