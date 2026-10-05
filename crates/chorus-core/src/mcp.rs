@@ -264,7 +264,11 @@ fn dispatch(req: &Value, conn: &rusqlite::Connection, session_scope: Option<i64>
         "initialize" => Ok(json!({
             "protocolVersion": "2025-06-18",
             "serverInfo": { "name": "chorus", "version": env!("CARGO_PKG_VERSION") },
-            "capabilities": { "tools": {} }
+            "capabilities": { "tools": {} },
+            // Without this an agent has the tool but no reason to reach for
+            // it: asked to "remember X" it answers "ok" and the fact never
+            // reaches the Memory pane.
+            "instructions": MEMORY_INSTRUCTIONS
         })),
         "notifications/initialized" | "notifications/cancelled" => return Value::Null,
         "tools/list" => {
@@ -288,11 +292,18 @@ fn dispatch(req: &Value, conn: &rusqlite::Connection, session_scope: Option<i64>
     }
 }
 
+const MEMORY_INSTRUCTIONS: &str = "When the user asks you to remember, note or keep something \
+for later, or states a durable fact about the project (a convention, a decision, a preference), \
+call `memory_propose` with that fact in one short sentence. Do this instead of your own memory \
+notes: Chorus shares this memory with every agent in the session. A person approves it afterwards.";
+
 fn propose_tool_schema() -> Value {
     json!({
         "name": "memory_propose",
-        "description": "Propose a durable fact for the human to review. Keep it under \
-                        140 characters. It is NOT remembered until a person approves it.",
+        "description": "Call this whenever the user asks you to remember something or states a \
+                        durable project fact. Proposes it for the human to review, shared with every \
+                        agent in this session. Keep it under 140 characters. It is NOT remembered \
+                        until a person approves it.",
         "inputSchema": {
             "type": "object",
             "properties": {
