@@ -82,6 +82,9 @@ char *chorus_cancel(void);
 /* Skills visible in a workspace (chorus/project/user). {"ok":true,"skills":[{name,description,path,source}]} */
 char *chorus_list_skills(const char *cwd);
 
+/* Re-ask an agent for its models and refresh the cache (slow: opens a session). {"ok":true,"count":N} */
+char *chorus_refresh_models(const char *agent_id, const char *cwd);
+
 /* Share memory across a project: facts/approve queue/MCP go to `path`. {"ok":true} */
 char *chorus_set_memory_db(ChorusEngine *e, const char *path);
 

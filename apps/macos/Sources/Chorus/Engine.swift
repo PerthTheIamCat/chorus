@@ -494,6 +494,32 @@ final class Engine: ObservableObject {
         }
     }
 
+    @Published var refreshingModels = false
+    private var modelsRefreshed = false
+
+    /// Re-ask each ready agent for its model list. The cache it reads is
+    /// otherwise only filled by `chorus models`, so a list from weeks ago
+    /// (missing Sonnet 1M, Fable…) was what the picker kept showing.
+    /// Spawns each bridge once, in a scratch dir, off every other queue.
+    func refreshModels(force: Bool = false) {
+        guard force || !modelsRefreshed, !refreshingModels else { return }
+        modelsRefreshed = true
+        let ids = agents.filter(\.ready).map(\.id)
+        guard !ids.isEmpty else { return }
+        refreshingModels = true
+        let dir = (NSTemporaryDirectory() as NSString).appendingPathComponent("chorus-model-probe")
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        ioQueue.async { [weak self] in
+            for id in ids {
+                _ = id.withCString { a in dir.withCString { d in Self.string(from: chorus_refresh_models(a, d)) } }
+            }
+            DispatchQueue.main.async {
+                self?.refreshingModels = false
+                self?.loadAgents()
+            }
+        }
+    }
+
     func loadAgents() {
         ioQueue.async { [weak self] in
             let json = Self.string(from: chorus_list_agents())

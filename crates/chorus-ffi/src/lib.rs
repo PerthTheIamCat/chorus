@@ -977,6 +977,30 @@ pub unsafe extern "C" fn chorus_list_skills(cwd: *const c_char) -> *mut c_char {
     }
 }
 
+/// Ask an agent for its current model list (opens a real ACP session in
+/// `cwd`, so it is slow — call off the UI thread) and refresh the cache that
+/// `chorus_list_agents` reads. JSON: {"ok":true,"count":N}
+///
+/// # Safety
+/// `agent_id` and `cwd` must be valid NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_refresh_models(
+    agent_id: *const c_char,
+    cwd: *const c_char,
+) -> *mut c_char {
+    let (Some(agent_id), Some(cwd)) = (borrow(agent_id), borrow(cwd)) else {
+        return err("agent_id/cwd must be valid UTF-8");
+    };
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        chorus_cli::agents::refresh_models(agent_id, std::path::Path::new(cwd))
+    }));
+    match r {
+        Ok(Ok(m)) => out(serde_json::json!({ "ok": true, "count": m.len() }).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in refresh_models"),
+    }
+}
+
 /// Every agent Chorus knows how to bridge to, with whether it can run right
 /// now. Cheap and non-blocking — no login, no network (see `chorus_cli::agents`).
 /// JSON: {"ok":true,"agents":[{"id":"...","label":"...",

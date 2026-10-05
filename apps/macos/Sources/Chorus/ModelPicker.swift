@@ -8,8 +8,13 @@ struct ModelID: Hashable {
     let base: String
     let effort: String?
 
+    /// Only these are reasoning levels. Claude's `opus[1m]` uses the same
+    /// brackets for context size — that is a different model, not an effort.
+    static let efforts: Set<String> = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+
     init(_ id: String) {
-        if let open = id.firstIndex(of: "["), id.hasSuffix("]") {
+        if let open = id.firstIndex(of: "["), id.hasSuffix("]"),
+           Self.efforts.contains(String(id[id.index(after: open)..<id.index(before: id.endIndex)])) {
             base = String(id[..<open])
             effort = String(id[id.index(after: open)..<id.index(before: id.endIndex)])
         } else {
@@ -98,7 +103,7 @@ struct ModelPicker: View {
                     // through the levels instead.
                     Button("") { cycleEffort(efforts) }
                         .keyboardShortcut("e", modifiers: [.command, .shift])
-                        .frame(width: 0, height: 0).opacity(0)
+                        .frame(width: 0, height: 0).opacity(0).allowsHitTesting(false)
                 }
             }
         }
@@ -154,9 +159,20 @@ struct ModelPicker: View {
                 }
                 Divider().padding(.top, 6)
             }
-            Text("ถ้าตัวนี้ชนลิมิต Chorus ส่งงานต่อให้ตัวที่พร้อมเอง")
-                .font(.caption2).foregroundStyle(.secondary)
-                .padding(10)
+            HStack {
+                Text("ถ้าตัวนี้ชนลิมิต Chorus ส่งงานต่อให้ตัวที่พร้อมเอง")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    engine.refreshModels(force: true)
+                } label: {
+                    if engine.refreshingModels { ProgressView().controlSize(.mini) }
+                    else { Image(systemName: "arrow.clockwise") }
+                }
+                .buttonStyle(.borderless)
+                .help("ถามรายการโมเดลล่าสุดจากแต่ละเอเจนต์")
+            }
+            .padding(10)
         }
         .frame(width: 280)
         .padding(.vertical, 4)

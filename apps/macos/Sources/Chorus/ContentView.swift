@@ -68,7 +68,7 @@ struct ContentView: View {
     @StateObject private var fileIndex = FileIndex()
     @State private var editing: ChorusProject?
     @State private var editingIsNew = false
-    @State private var hoveredRow: String?
+    @State private var sidebarSel: SidebarSel?
     @State private var queued: [(model: String, text: String)] = []
     @State private var hint: String?
     @State private var confirmRevert = false
@@ -138,7 +138,7 @@ struct ContentView: View {
             }
         }
         .onChange(of: engine.busy) { _, _ in flushQueue() }
-        .onChange(of: engine.agents) { _, _ in syncModelSelection() }
+        .onChange(of: engine.agents) { _, _ in syncModelSelection(); engine.refreshModels() }
         .onChange(of: model) { _, m in applyModel(m) }
         .sheet(isPresented: $showPalette) { palette }
         .sheet(item: $editing) { p in
@@ -161,7 +161,9 @@ struct ContentView: View {
                 }
                 .keyboardShortcut("n", modifiers: .command)
             }
+            .frame(width: 0, height: 0)
             .opacity(0)
+            .allowsHitTesting(false)
         )
         .sheet(isPresented: $showSettings) {
             SettingsSheet(workspace: workspace).environmentObject(engine)
@@ -201,18 +203,53 @@ struct ContentView: View {
     // there just isn't enough width in a sidebar for a label column plus a
     // control column plus a text field. Every label sits above its control
     // instead, and gets the sidebar's full width to wrap in.
+    /// A native `List`: hand-rolled rows in a ScrollView drew in one place
+    /// and took clicks in another, and a sidebar is exactly what `List` exists
+    /// for — system selection, hover, keyboard navigation, hit-testing.
     private var sidebar: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                projectsSection
-
-                Spacer(minLength: 0)
+        List(selection: $sidebarSel) {
+            Section {
+                if projects.projects.isEmpty {
+                    Button { editing = ChorusProject(name: "", folders: []); editingIsNew = true } label: {
+                        Label("สร้างโปรเจกต์แรก", systemImage: "square.stack.3d.up.badge.plus")
+                    }
+                    .buttonStyle(.borderless)
+                }
+                ForEach(projects.projects) { p in projectRow(p) }
+            } header: {
+                HStack {
+                    Text("โปรเจกต์")
+                    Spacer()
+                    Button { editing = ChorusProject(name: "", folders: []); editingIsNew = true } label: {
+                        Image(systemName: "plus")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("สร้างโปรเจกต์ใหม่ (⌘N เมื่อยังไม่ได้เลือกโฟลเดอร์)")
+                }
             }
-            .padding(16)
+        }
+        .listStyle(.sidebar)
+        .onChange(of: sidebarSel) { _, sel in select(sel) }
+        .onChange(of: engine.sessionID) { _, id in
+            sidebarSel = id >= 0 && !workspace.isEmpty ? .session(workspace, id) : nil
         }
         .safeAreaInset(edge: .bottom) { agentFooter }
         .navigationTitle("Chorus")
-        .frame(minWidth: 260, idealWidth: 290)
+        .frame(minWidth: 240, idealWidth: 280)
+    }
+
+    enum SidebarSel: Hashable { case session(String, Int64) }
+
+    private func select(_ sel: SidebarSel?) {
+        guard case let .session(folder, id)? = sel else { return }
+        if folder == workspace && id == engine.sessionID { return }
+        // Switching frees the engine handle; never under a running turn.
+        guard !engine.busy else {
+            sidebarSel = engine.sessionID >= 0 ? .session(workspace, engine.sessionID) : nil
+            return
+        }
+        workspace = folder
+        engine.reopen(db: dbPath(for: folder), sessionID: id)
     }
 
     /// Which agents can answer right now — the relay depends on it, so it
@@ -758,40 +795,8 @@ struct ContentView: View {
         (project as NSString).appendingPathComponent(".chorus/store.db")
     }
 
-    private var projectsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("โปรเจกต์").font(.subheadline.bold())
-                Spacer()
-                Button { editing = ChorusProject(name: "", folders: []); editingIsNew = true } label: {
-                    Image(systemName: "plus")
-                }
-                .buttonStyle(.borderless)
-                .help("สร้างโปรเจกต์ใหม่")
-            }
-            if projects.projects.isEmpty {
-                Button { editing = ChorusProject(name: "", folders: []); editingIsNew = true } label: {
-                    VStack(spacing: 8) {
-                        Image(systemName: "square.stack.3d.up.badge.plus")
-                            .font(.system(size: 26)).foregroundStyle(.secondary)
-                        Text("สร้างโปรเจกต์แรก").font(.callout.weight(.medium))
-                        Text("รวมหลายโฟลเดอร์ไว้ด้วยกันได้").font(.caption2).foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity).padding(.vertical, 18)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [5]))
-                        .foregroundStyle(.tertiary))
-            }
-            ForEach(projects.projects) { p in projectRow(p) }
-        }
-    }
-
-    private func sessions(of p: ChorusProject) -> [(folder: String, s: Engine.SessionSummary)] {
-        p.folders.flatMap { f in (engine.sessionsByDB[dbPath(for: f)] ?? []).map { (f, $0) } }
+    private func sessions(of p: ChorusProject) -> [(folder: String, s: Engine.SessionSummary, key: String)] {
+        p.folders.flatMap { f in (engine.sessionsByDB[dbPath(for: f)] ?? []).map { (f, $0, "\(f)#\($0.id)") } }
             .sorted { ($0.s.started_ms + $0.s.last_ms) > ($1.s.started_ms + $1.s.last_ms) }
     }
 
@@ -799,32 +804,36 @@ struct ContentView: View {
         for f in p.folders { engine.loadSessions(db: dbPath(for: f)) }
     }
 
+    private func expandedBinding(_ p: ChorusProject) -> Binding<Bool> {
+        Binding(
+            get: { expanded.contains(p.id.uuidString) },
+            set: { open in
+                if open { expanded.insert(p.id.uuidString); loadSessions(of: p) }
+                else { expanded.remove(p.id.uuidString) }
+            })
+    }
+
     private func projectRow(_ p: ChorusProject) -> some View {
-        let open = expanded.contains(p.id.uuidString)
-        let isCurrent = p.folders.contains(workspace) && engine.sessionID >= 0
         let rows = sessions(of: p)
-        return VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 6) {
-                Image(systemName: open ? "chevron.down" : "chevron.right")
-                    .font(.caption2.weight(.semibold)).foregroundStyle(.secondary).frame(width: 10)
-                Image(systemName: "square.stack.3d.up.fill").foregroundStyle(Color.accentColor)
-                Text(p.name).font(.callout.weight(.medium)).lineLimit(1)
-                Spacer(minLength: 0)
-                if isCurrent { Circle().fill(.green).frame(width: 6, height: 6) }
-                Text("\(p.folders.count)").font(.caption2).foregroundStyle(.tertiary)
-                    .help("\(p.folders.count) โฟลเดอร์")
+        return DisclosureGroup(isExpanded: expandedBinding(p)) {
+            newSessionRow(p)
+            if p.folders.isEmpty {
+                Button("เพิ่มโฟลเดอร์ให้โปรเจกต์นี้…") { editing = p; editingIsNew = false }
+                    .buttonStyle(.link).font(.caption)
+            } else if rows.isEmpty {
+                Text("ยังไม่มีเซสชัน").font(.caption).foregroundStyle(.tertiary)
             }
-            .padding(.vertical, 5).padding(.horizontal, 6)
-            .background(hoveredRow == p.id.uuidString ? Color.secondary.opacity(0.1) : .clear,
-                        in: RoundedRectangle(cornerRadius: 6))
-            .contentShape(Rectangle())
-            .onHover { hoveredRow = $0 ? p.id.uuidString : (hoveredRow == p.id.uuidString ? nil : hoveredRow) }
-            .onTapGesture {
-                withAnimation(.easeOut(duration: 0.15)) {
-                    if open { expanded.remove(p.id.uuidString) } else {
-                        expanded.insert(p.id.uuidString)
-                        loadSessions(of: p)
-                    }
+            ForEach(rows, id: \.key) { r in
+                sessionLabel(r.s, folder: r.folder, showFolder: p.folders.count > 1)
+                    .tag(SidebarSel.session(r.folder, r.s.id))
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "square.stack.3d.up.fill").foregroundStyle(Color.accentColor)
+                Text(p.name).lineLimit(1)
+                Spacer(minLength: 0)
+                if p.folders.contains(workspace) && engine.sessionID >= 0 {
+                    Circle().fill(.green).frame(width: 6, height: 6)
                 }
             }
             .contextMenu {
@@ -839,77 +848,43 @@ struct ContentView: View {
                 Divider()
                 Button("ลบโปรเจกต์ (ไฟล์ไม่หาย)", role: .destructive) { projects.remove(p) }
             }
-
-            if open {
-                newSessionButton(p).padding(.leading, 22)
-                if p.folders.isEmpty {
-                    Button("เพิ่มโฟลเดอร์ให้โปรเจกต์นี้…") { editing = p; editingIsNew = false }
-                        .buttonStyle(.link).font(.caption).padding(.leading, 22)
-                } else if rows.isEmpty {
-                    Text("ยังไม่มีเซสชัน").font(.caption2).foregroundStyle(.tertiary).padding(.leading, 22)
-                }
-                ForEach(rows, id: \.s.id) { r in sessionRow(r.s, folder: r.folder, showFolder: p.folders.count > 1) }
-            }
         }
-        .onAppear { if open { loadSessions(of: p) } }
+        .onAppear { if expanded.contains(p.id.uuidString) { loadSessions(of: p) } }
     }
 
     @ViewBuilder
-    private func newSessionButton(_ p: ChorusProject) -> some View {
-        let label = Label(engine.busy && p.folders.contains(workspace) ? "กำลังเตรียมโฟลเดอร์…" : "เซสชันใหม่",
-                          systemImage: "square.and.pencil").font(.caption)
+    private func newSessionRow(_ p: ChorusProject) -> some View {
+        let title = engine.busy && p.folders.contains(workspace) ? "กำลังเตรียมโฟลเดอร์…" : "เซสชันใหม่"
         if p.folders.count > 1 {
             Menu {
                 ForEach(p.folders, id: \.self) { f in
                     Button((f as NSString).lastPathComponent) { workspace = f; startSession() }
                 }
-            } label: { label }
-            .menuStyle(.borderlessButton).fixedSize()
+            } label: { Label(title, systemImage: "square.and.pencil") }
+            .menuStyle(.borderlessButton)
             .disabled(engine.busy)
         } else if let f = p.folders.first {
-            Button { workspace = f; startSession() } label: { label }
-                .buttonStyle(.borderless)
-                .disabled(engine.busy)
+            Button { workspace = f; startSession() } label: {
+                Label(title, systemImage: "square.and.pencil")
+            }
+            .buttonStyle(.borderless)
+            .disabled(engine.busy)
         }
     }
 
-    private func sessionRow(_ s: Engine.SessionSummary, folder: String, showFolder: Bool) -> some View {
-        let selected = folder == workspace && s.id == engine.sessionID
-        let key = folder + "#\(s.id)"
-        return Button {
-            guard !selected else { return }
-            workspace = folder
-            engine.reopen(db: dbPath(for: folder), sessionID: s.id)
-        } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(s.goal.isEmpty ? s.title : s.goal)
-                    .font(.caption.weight(selected ? .semibold : .regular)).lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                HStack(spacing: 4) {
-                    if showFolder {
-                        Text((folder as NSString).lastPathComponent).font(.caption2).foregroundStyle(.secondary)
-                    }
-                    ForEach(s.agents, id: \.self) { a in
-                        Text(a).font(.caption2)
-                            .padding(.horizontal, 4).padding(.vertical, 1)
-                            .background(.quaternary, in: Capsule())
-                    }
-                    if s.forked_from != nil {
-                        Image(systemName: "arrow.triangle.branch").font(.caption2).foregroundStyle(.tertiary)
-                    }
+    private func sessionLabel(_ s: Engine.SessionSummary, folder: String, showFolder: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(s.goal.isEmpty ? s.title : s.goal).lineLimit(2)
+            HStack(spacing: 4) {
+                if showFolder {
+                    Text((folder as NSString).lastPathComponent).foregroundStyle(.secondary)
                 }
+                Text(s.agents.joined(separator: " · ")).foregroundStyle(.secondary)
+                if s.forked_from != nil { Image(systemName: "arrow.triangle.branch") }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(6)
-            .background(selected ? Color.accentColor.opacity(0.18)
-                        : (hoveredRow == key ? Color.secondary.opacity(0.1) : .clear),
-                        in: RoundedRectangle(cornerRadius: 6))
-            .contentShape(Rectangle())
+            .font(.caption2)
         }
-        .buttonStyle(.plain)
-        .onHover { hoveredRow = $0 ? key : (hoveredRow == key ? nil : hoveredRow) }
-        .disabled(engine.busy)
-        .padding(.leading, 16)
+        .padding(.vertical, 2)
     }
 
     /// Delegated work, read back from the ledger: every tool call that looks
