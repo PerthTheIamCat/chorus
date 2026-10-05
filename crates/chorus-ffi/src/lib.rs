@@ -105,6 +105,38 @@ pub unsafe extern "C" fn chorus_catalog_plan_json(
     }
 }
 
+/// Dashboard data for one installed integration, scoped to `project`.
+///
+/// # Safety
+/// All pointers must point to valid NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_catalog_dashboard_json(project: *const c_char, id: *const c_char) -> *mut c_char {
+    let (Some(project), Some(id)) = (borrow(project), borrow(id)) else {
+        return err("dashboard arguments must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| integration_catalog::dashboard(id, Path::new(project)))) {
+        Ok(Ok(d)) => out(serde_json::json!({"ok":true,"dashboard":d}).to_string()),
+        Ok(Err(error)) => err(error),
+        Err(_) => err("panic in catalog dashboard"),
+    }
+}
+
+/// Start an integration's own dashboard command (`run` actions).
+///
+/// # Safety
+/// All pointers must point to valid NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_catalog_run_json(id: *const c_char, key: *const c_char) -> *mut c_char {
+    let (Some(id), Some(key)) = (borrow(id), borrow(key)) else {
+        return err("run arguments must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| integration_catalog::run_action(id, key))) {
+        Ok(Ok(())) => out("{\"ok\":true}".to_string()),
+        Ok(Err(error)) => err(error),
+        Err(_) => err("panic in catalog run"),
+    }
+}
+
 /// Position of the running catalog action, or `{"ok":true,"progress":null}`.
 #[no_mangle]
 pub extern "C" fn chorus_catalog_progress_json() -> *mut c_char {

@@ -1207,3 +1207,184 @@ pub fn perform(action: &str, id: &str, project: &Path) -> Result<(), CatalogErro
     }
     result
 }
+
+// ---- per-tool dashboard ------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Metric {
+    pub label: String,
+    pub value: String,
+}
+
+/// `kind`: `url` (open in browser), `reveal` (show in Finder) or `run`
+/// (`run_action` starts the tool's own command).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DashboardAction {
+    pub key: &'static str,
+    pub title: String,
+    pub kind: &'static str,
+    pub target: Option<String>,
+    pub hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Dashboard {
+    pub id: String,
+    pub title: String,
+    pub version: String,
+    pub healthy: bool,
+    pub location: String,
+    pub disk_bytes: Option<u64>,
+    pub projects: Vec<String>,
+    pub metrics: Vec<Metric>,
+    pub actions: Vec<DashboardAction>,
+    pub history: Vec<String>,
+}
+
+fn dir_size(path: &Path) -> u64 {
+    let Ok(meta) = std::fs::symlink_metadata(path) else { return 0 };
+    if meta.is_file() {
+        return meta.len();
+    }
+    if !meta.is_dir() {
+        return 0;
+    }
+    std::fs::read_dir(path)
+        .map(|rd| rd.flatten().map(|e| dir_size(&e.path())).sum())
+        .unwrap_or(0)
+}
+
+fn metric(label: &str, value: impl Into<String>) -> Metric {
+    Metric { label: label.into(), value: value.into() }
+}
+
+fn compact(n: f64) -> String {
+    if n >= 1e6 { format!("{:.1}M", n / 1e6) } else if n >= 1e3 { format!("{:.1}K", n / 1e3) } else { format!("{n:.0}") }
+}
+
+fn newest_and_count(dir: &Path) -> (usize, Option<std::time::SystemTime>) {
+    let mut count = 0;
+    let mut newest = None;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "md") {
+                count += 1;
+                if let Ok(m) = e.metadata().and_then(|m| m.modified()) {
+                    newest = newest.max(Some(m));
+                }
+            }
+        }
+    }
+    (count, newest)
+}
+
+/// Everything the dashboard page shows for one installed integration. Reads
+/// only: tool statistics come from the tool's own read-only output or from
+/// files it already wrote.
+pub fn dashboard(id: &str, project: &Path) -> Result<Dashboard, CatalogError> {
+    let entry = get(id).ok_or_else(|| CatalogError::Unknown(id.into()))?;
+    let state = load_state()?;
+    let record = if entry.recipe.method == InstallMethod::Homebrew {
+        homebrew_installed(entry).ok().flatten()
+    } else {
+        state.installed.get(id).cloned()
+    }
+    .ok_or_else(|| CatalogError::Install(format!("{id} is not installed")))?;
+
+    let managed = tools_path()?.join(id);
+    let disk_bytes = (entry.recipe.method != InstallMethod::Homebrew).then(|| dir_size(&managed));
+    let projects = state.projects.iter()
+        .filter(|(_, ids)| ids.contains(id))
+        .map(|(path, _)| project_name(Path::new(path)))
+        .collect();
+    let history = state.history.iter().rev().filter(|h| h.id == id).take(5)
+        .map(|h| match &h.from {
+            Some(from) => format!("{from} → {} · {}", h.to, h.outcome),
+            None => format!("ติดตั้ง {} · {}", h.to, h.outcome),
+        })
+        .collect();
+
+    let mut metrics = Vec::new();
+    let mut actions = Vec::new();
+    match id {
+        "rtk" => {
+            if let Ok(out) = Command::new(&record.runtime_path).args(["gain", "--format", "json"]).output() {
+                if let Ok(v) = serde_json::from_slice::<Value>(&out.stdout) {
+                    let s = &v["summary"];
+                    if let Some(n) = s["total_commands"].as_f64() { metrics.push(metric("คำสั่งที่ย่อผลลัพธ์", compact(n))); }
+                    if let Some(n) = s["total_saved"].as_f64() { metrics.push(metric("Token ที่ประหยัดได้", compact(n))); }
+                    if let Some(n) = s["avg_savings_pct"].as_f64() { metrics.push(metric("ประหยัดเฉลี่ย", format!("{n:.0}%"))); }
+                }
+            }
+        }
+        "graft" => {
+            let graph = project.join("graft");
+            if graph.is_dir() {
+                let (count, newest) = newest_and_count(&graph);
+                metrics.push(metric("โหนดใน graph", count.to_string()));
+                if let Some(t) = newest.and_then(|t| t.elapsed().ok()) {
+                    let mins = t.as_secs() / 60;
+                    metrics.push(metric("อัปเดตล่าสุด", if mins < 60 { format!("{mins} นาทีก่อน") } else if mins < 2880 { format!("{} ชม.ก่อน", mins / 60) } else { format!("{} วันก่อน", mins / 1440) }));
+                }
+                actions.push(DashboardAction { key: "reveal", title: "เปิดโฟลเดอร์ graph".into(), kind: "reveal", target: Some(graph.to_string_lossy().into_owned()), hint: None });
+            } else {
+                metrics.push(metric("graph ของโปรเจกต์นี้", "ยังไม่ได้สร้าง"));
+            }
+        }
+        "headroom" => {
+            actions.push(DashboardAction { key: "dashboard", title: "เปิด dashboard ของ Headroom".into(), kind: "run", target: None,
+                hint: Some("Headroom เปิดหน้าสถิติในเบราว์เซอร์".into()) });
+        }
+        "serena" => {
+            actions.push(DashboardAction { key: "dashboard", title: "เปิด dashboard ของ Serena".into(), kind: "url",
+                target: Some("http://localhost:24282/dashboard/index.html".into()),
+                hint: Some("เปิดได้เมื่อมีเซสชันที่กำลังใช้ Serena อยู่".into()) });
+        }
+        _ => {
+            if let Ok(meta) = std::fs::metadata(&record.runtime_path) {
+                metrics.push(metric("ขนาดไฟล์ skill", format!("{} ไบต์", meta.len())));
+            }
+        }
+    }
+
+    Ok(Dashboard {
+        id: id.into(),
+        title: entry.title.into(),
+        version: record.version,
+        healthy: record.health.healthy,
+        location: display_path(if entry.recipe.method == InstallMethod::Homebrew { &record.runtime_path } else { &managed }),
+        disk_bytes,
+        projects,
+        metrics,
+        actions,
+        history,
+    })
+}
+
+/// Start a tool's own `run` action (see [`DashboardAction`]) without waiting.
+pub fn run_action(id: &str, key: &str) -> Result<(), CatalogError> {
+    let entry = get(id).ok_or_else(|| CatalogError::Unknown(id.into()))?;
+    let state = load_state()?;
+    let record = if entry.recipe.method == InstallMethod::Homebrew {
+        homebrew_installed(entry).ok().flatten()
+    } else {
+        state.installed.get(id).cloned()
+    }
+    .ok_or_else(|| CatalogError::Install(format!("{id} is not installed")))?;
+    let args: &[&str] = match (id, key) {
+        ("headroom", "dashboard") => &["dashboard"],
+        _ => return Err(CatalogError::Install(format!("unknown action {key} for {id}"))),
+    };
+    use std::process::Stdio;
+    Command::new(&record.runtime_path)
+        .args(args)
+        .env("PATH", child_path())
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn()?;
+    Ok(())
+}

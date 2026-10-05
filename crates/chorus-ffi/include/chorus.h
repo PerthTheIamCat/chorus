@@ -48,6 +48,12 @@ char *chorus_catalog_action_json(const char *project, const char *id,
 char *chorus_catalog_plan_json(const char *project, const char *id,
                                const char *action);
 
+/* Per-integration dashboard: {"ok":true,"dashboard":{...}}. Read-only. */
+char *chorus_catalog_dashboard_json(const char *project, const char *id);
+
+/* Start an integration's own dashboard command ("run" actions). */
+char *chorus_catalog_run_json(const char *id, const char *key);
+
 /* Phase of the running catalog action: {"ok":true,"progress":null|{id,current,done}}. */
 char *chorus_catalog_progress_json(void);
 

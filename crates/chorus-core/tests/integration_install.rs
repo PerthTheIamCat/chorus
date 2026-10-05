@@ -30,6 +30,11 @@ fn bundled_skill_plan_install_remove_round_trip() {
     assert!(record.owned_files[0].exists());
     assert_eq!(cat::enabled_for(&project).unwrap().len(), 1);
 
+    let board = cat::dashboard("chorus-review", &project).unwrap();
+    assert_eq!(board.projects, ["demo"]);
+    assert!(board.disk_bytes.unwrap() > 0 && board.healthy);
+    assert!(board.location.ends_with("tools/chorus-review"));
+
     let removal = cat::plan("chorus-review", "remove", &project).unwrap();
     assert!(removal.items.iter().any(|i| i.kind == "file"
         && i.detail.as_deref().is_some_and(|d| created.starts_with(d))));

@@ -68,6 +68,12 @@ private struct CatalogPlanResult: Decodable {
     let plan: InstallPlan?
 }
 
+private struct DashboardResult: Decodable {
+    let ok: Bool
+    let error: String?
+    let dashboard: ToolDashboard?
+}
+
 private struct CatalogProgressResult: Decodable {
     let progress: CatalogProgress?
 }
@@ -579,6 +585,26 @@ final class Engine: ObservableObject {
                         : "อัปเดต \(updateFailures.joined(separator: ", ")) ไม่สำเร็จ"
                 } else { self.catalogError = result?.error ?? "โหลดรายการเครื่องมือไม่ได้" }
             }
+        }
+    }
+
+    func loadDashboard(project: String, id: String, completion: @escaping (ToolDashboard?, String?) -> Void) {
+        catalogQueue.async {
+            let json = project.withCString { path in
+                id.withCString { Self.string(from: chorus_catalog_dashboard_json(path, $0)) }
+            }
+            let result = Self.decode(DashboardResult.self, json)
+            DispatchQueue.main.async { completion(result?.dashboard, result?.ok == true ? nil : (result?.error ?? "โหลดแดชบอร์ดไม่ได้")) }
+        }
+    }
+
+    func runCatalogAction(id: String, key: String, completion: @escaping (String?) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let json = id.withCString { identifier in
+                key.withCString { Self.string(from: chorus_catalog_run_json(identifier, $0)) }
+            }
+            let result = Self.decode(SimpleResult.self, json)
+            DispatchQueue.main.async { completion(result?.ok == true ? nil : (result?.error ?? "เปิดไม่ได้")) }
         }
     }
 

@@ -16,6 +16,7 @@ struct SettingsSheet: View {
         case agents = "เอเจนต์และโมเดล"
         case skills = "Skills"
         case integrations = "เครื่องมือเสริม"
+        case dashboards = "แดชบอร์ด"
         var id: String { rawValue }
         var icon: String {
             switch self {
@@ -24,6 +25,7 @@ struct SettingsSheet: View {
             case .agents: "cpu"
             case .skills: "sparkles"
             case .integrations: "puzzlepiece.extension"
+            case .dashboards: "chart.bar.xaxis"
             }
         }
     }
@@ -63,6 +65,7 @@ struct SettingsSheet: View {
                     case .accounts: AccountsSettings()
                     case .agents: AgentsSettings()
                     case .skills: SkillsSettings(workspace: workspace)
+                    case .dashboards: DashboardsSettings(workspace: workspace)
                     case .integrations:
                         CatalogView(projectName: workspace.isEmpty ? "" : URL(fileURLWithPath: workspace).lastPathComponent,
                                     entries: engine.catalog,
