@@ -6,9 +6,13 @@
 //!   session log (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl`): a 5-hour
 //!   window and a weekly one, each with `used_percent` and `resets_at`. We read
 //!   only those two objects from the newest log, nothing else in the file.
-//! - **Claude does not.** No file or ACP message carries its usage, so all we
-//!   can know is the last time it refused a turn for hitting a limit, and the
-//!   reset time it printed ("resets 9:50pm"). The relay records that here.
+//! - **Claude is asked.** No file or ACP message carries its usage (the ACP
+//!   bridge drops the SDK's `rate_limit_event`), but the CLI's own headless
+//!   `claude -p "/usage"` prints the 5-hour and weekly percentages. We run
+//!   that, cache the answer for a couple of minutes, and parse the text. No
+//!   token is read. When that fails we still know the last time it refused a
+//!   turn for hitting a limit, and the reset time it printed ("resets
+//!   9:50pm"). The relay records that here.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -19,6 +23,10 @@ pub struct Window {
     pub window_minutes: Option<i64>,
     /// Unix seconds.
     pub resets_at: Option<i64>,
+    /// The reset time as the agent printed it, when it gave no timestamp
+    /// ("Oct 5 at 9:30pm (Asia/Bangkok)").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -263,6 +271,137 @@ pub struct AccountUsage {
     pub hit: Option<Hit>,
 }
 
+/// `Current session: 18% used · resets Oct 5 at 9:30pm (Asia/Bangkok)` and
+/// `Current week (all models): 20% used · resets Oct 7 at 6pm (Asia/Bangkok)`
+/// from `claude -p "/usage"`. Session = the 5-hour window, "week (all
+/// models)" = the weekly one; per-model weekly lines are ignored.
+pub fn parse_claude_usage(text: &str) -> Option<RateLimits> {
+    let mut out = RateLimits::default();
+    for line in text.lines() {
+        let l = line.trim();
+        let Some(rest) = l.strip_prefix("Current ") else {
+            continue;
+        };
+        let Some((label, tail)) = rest.split_once(':') else {
+            continue;
+        };
+        let label = label.trim().to_lowercase();
+        let Some((pct, after)) = tail.split_once("% used") else {
+            continue;
+        };
+        let Ok(used_percent) = pct.trim().parse::<f64>() else {
+            continue;
+        };
+        let resets_label = after
+            .split_once("resets")
+            .map(|(_, r)| r.trim().to_string())
+            .filter(|r| !r.is_empty());
+        let (slot, minutes) = if label == "session" {
+            (&mut out.primary, 300)
+        } else if label == "week (all models)" || label == "week" {
+            (&mut out.secondary, 10080)
+        } else {
+            continue;
+        };
+        *slot = Some(Window {
+            used_percent,
+            window_minutes: Some(minutes),
+            resets_at: None,
+            resets_label,
+        });
+    }
+    (out.primary.is_some() || out.secondary.is_some()).then_some(out)
+}
+
+/// How long a `/usage` answer is reused. Each call spawns the CLI (a couple
+/// of seconds with the user's hooks), and the settings pane asks often.
+const USAGE_TTL_MS: i64 = 2 * 60 * 1000;
+
+fn usage_cache_path(dir: &Path) -> Option<PathBuf> {
+    let tag: String = dir
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(format!(".chorus/cache/claude-usage-{tag}.json")))
+}
+
+/// Claude's 5-hour / weekly usage for the login in `dir` (`custom` = a
+/// Chorus-made account that needs `CLAUDE_CONFIG_DIR`; otherwise the CLI's
+/// own default). Cached; `None` if the CLI is missing, logged out or slow.
+pub fn claude_rate_limits(dir: &Path, custom: bool) -> Option<RateLimits> {
+    #[derive(serde::Deserialize, serde::Serialize)]
+    struct Cached {
+        at_ms: i64,
+        limits: RateLimits2,
+    }
+    #[derive(serde::Deserialize, serde::Serialize)]
+    struct RateLimits2 {
+        primary: Option<Window>,
+        secondary: Option<Window>,
+    }
+    let cache = usage_cache_path(dir);
+    if let Some(c) = cache
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<Cached>(&s).ok())
+    {
+        if now_ms() - c.at_ms < USAGE_TTL_MS {
+            return Some(RateLimits {
+                primary: c.limits.primary,
+                secondary: c.limits.secondary,
+            });
+        }
+    }
+    let mut cmd = std::process::Command::new("claude");
+    cmd.args(["-p", "/usage"])
+        .current_dir(std::env::temp_dir())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    if custom {
+        cmd.env("CLAUDE_CONFIG_DIR", dir);
+    }
+    let mut child = cmd.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut stdout, &mut s);
+        s
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
+            }
+        }
+    }
+    let r = parse_claude_usage(&reader.join().ok()?)?;
+    if let Some(p) = cache {
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let c = Cached {
+            at_ms: now_ms(),
+            limits: RateLimits2 {
+                primary: r.primary.clone(),
+                secondary: r.secondary.clone(),
+            },
+        };
+        if let Ok(s) = serde_json::to_string(&c) {
+            let _ = std::fs::write(p, s);
+        }
+    }
+    Some(r)
+}
+
 fn account_ready(agent: &str, account: Option<&str>, dir: &Path) -> bool {
     if account.is_none() {
         return matches!(
@@ -294,11 +433,14 @@ pub fn usage_report() -> Vec<AccountUsage> {
                 Some(x) => format!("{agent}@{x}"),
                 None => agent.to_string(),
             };
+            let ready = account_ready(agent, a, &dir);
             out.push(AccountUsage {
-                ready: account_ready(agent, a, &dir),
+                ready,
                 login: crate::accounts::login_command(agent, a),
                 rate_limits: if agent == "codex" {
                     codex_rate_limits(&dir)
+                } else if ready {
+                    claude_rate_limits(&dir, a.is_some())
                 } else {
                     None
                 },
@@ -322,6 +464,18 @@ mod tests {
         let m = "Internal error: You've hit your limit · resets 9:50pm (Asia/Bangkok)";
         assert_eq!(parse_reset(m).as_deref(), Some("9:50pm (Asia/Bangkok)"));
         assert_eq!(parse_reset("rate limit exceeded"), None);
+    }
+
+    #[test]
+    fn parses_the_real_claude_usage_output() {
+        let t = "You are currently using your subscription\n\nCurrent session: 18% used · resets Oct 5 at 9:30pm (Asia/Bangkok)\nCurrent week (all models): 20% used · resets Oct 7 at 6pm (Asia/Bangkok)\nCurrent week (Sonnet only): 3% used · resets Oct 7 at 6pm\n\nWhat's contributing";
+        let r = parse_claude_usage(t).unwrap();
+        let p = r.primary.unwrap();
+        assert_eq!(p.used_percent, 18.0);
+        assert_eq!(p.window_minutes, Some(300));
+        assert_eq!(p.resets_label.as_deref(), Some("Oct 5 at 9:30pm (Asia/Bangkok)"));
+        assert_eq!(r.secondary.unwrap().used_percent, 20.0);
+        assert!(parse_claude_usage("Not logged in").is_none());
     }
 
     #[test]

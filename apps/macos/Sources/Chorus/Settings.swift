@@ -302,7 +302,7 @@ struct AccountRow: View {
                 Text(label).font(.caption)
                 Spacer()
                 Text("\(Int(w.used_percent))%").font(.caption.monospacedDigit().weight(.semibold))
-                Text(resetText(w.resets_at)).font(.caption2).foregroundStyle(.secondary)
+                Text(w.resets_at == nil ? (w.resets_label.map { "รีเซ็ต " + $0 } ?? "") : resetText(w.resets_at)).font(.caption2).foregroundStyle(.secondary)
             }
             UsageBar(fraction: w.used_percent / 100)
         }

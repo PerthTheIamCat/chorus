@@ -578,6 +578,7 @@ final class Engine: ObservableObject {
         let used_percent: Double
         let window_minutes: Int64?
         let resets_at: Int64?
+        let resets_label: String?
     }
     struct RateLimits: Codable, Hashable { let primary: UsageWindow?; let secondary: UsageWindow? }
     struct LimitHit: Codable, Hashable { let at_ms: Int64; let resets: String? }
