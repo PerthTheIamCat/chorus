@@ -738,6 +738,7 @@ struct EventJson {
     kind: &'static str,
     actor: String,
     body: String,
+    model_id: Option<String>,
 }
 
 /// The whole session so far as a JSON array of events.
@@ -764,11 +765,12 @@ pub unsafe extern "C" fn chorus_events_since(e: *const ChorusEngine, after: i64)
         Ok(Ok(rows)) => {
             let events: Vec<EventJson> = rows
                 .into_iter()
-                .map(|(seq, kind, actor, body)| EventJson {
+                .map(|(seq, kind, actor, body, model_id)| EventJson {
                     seq,
                     kind,
                     actor,
                     body,
+                    model_id,
                 })
                 .collect();
             out(serde_json::to_string(&events).unwrap())

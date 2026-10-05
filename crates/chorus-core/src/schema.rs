@@ -14,7 +14,7 @@
 use crate::Result;
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Create (or upgrade) the schema. Safe to call on every open.
 pub fn migrate(conn: &Connection) -> Result<()> {
@@ -66,7 +66,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             blob     TEXT,
             tok_in   INTEGER,
             tok_out  INTEGER,
-            cost_usd REAL
+            cost_usd REAL,
+            model_id TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_event_sess_seq ON event(sess, seq);
@@ -179,6 +180,17 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if fts_result.is_err() {
         // FTS5 unavailable in this sqlite build — degrade gracefully.
         // `ledger::search` probes for `ev_fts` itself and falls back to LIKE.
+    }
+
+    // v5: preserve the model the bridge reports for each assistant message.
+    // Check the column so fresh databases and interrupted upgrades are both safe.
+    let has_model_id: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info('event') WHERE name = 'model_id')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_model_id {
+        conn.execute_batch("ALTER TABLE event ADD COLUMN model_id TEXT")?;
     }
 
     conn.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), [])?;

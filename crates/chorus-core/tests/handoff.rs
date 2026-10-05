@@ -17,6 +17,7 @@ fn ev(seq: i64, kind: EventKind, body: &str) -> (Event, String) {
             tok_in: None,
             tok_out: None,
             cost_usd: None,
+            model_id: None,
         },
         body.to_string(),
     )

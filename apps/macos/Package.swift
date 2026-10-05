@@ -15,6 +15,7 @@ let package = Package(
         .executableTarget(
             name: "Chorus",
             dependencies: ["CChorus"],
+            resources: [.process("Resources")],
             linkerSettings: [
                 .unsafeFlags([
                     "-L../../target/\(target)",

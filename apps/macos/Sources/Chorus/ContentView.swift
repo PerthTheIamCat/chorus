@@ -61,6 +61,7 @@ enum PermissionLevel: Int32, CaseIterable {
 /// which forwards to Rust.
 struct ContentView: View {
     @EnvironmentObject var engine: Engine
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // Empty on purpose: defaulting to the home directory made "Start
     // session" look hung — it snapshots the whole tree (checkpoint.rs does
@@ -833,8 +834,12 @@ struct ContentView: View {
                             ForEach(engine.events) { ev in
                                 EventRow(event: ev,
                                          attachments: engine.attachments.filter { $0.event_seq == ev.seq },
+                                         agents: engine.agents,
                                          onDeleteAttachment: engine.deleteAttachment)
                                     .id(ev.seq)
+                                    .transition(reduceMotion ? .opacity :
+                                        .asymmetric(insertion: .move(edge: ev.actor == "user" ? .trailing : .leading)
+                                            .combined(with: .opacity), removal: .opacity))
                             }
                             if engine.busy { workingRow.id("working") }
                             else if !engine.lastThoughts.isEmpty {
@@ -844,9 +849,13 @@ struct ContentView: View {
                         .frame(maxWidth: 820)
                         .frame(maxWidth: .infinity)
                         .padding(.horizontal, 20).padding(.vertical, 16)
+                        .animation(reduceMotion ? nil : .snappy(duration: 0.24), value: engine.events.count)
                     }
                     .onChange(of: engine.events.count) { _, _ in
-                        if let last = engine.events.last { proxy.scrollTo(last.seq, anchor: .bottom) }
+                        if let last = engine.events.last {
+                            if reduceMotion { proxy.scrollTo(last.seq, anchor: .bottom) }
+                            else { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(last.seq, anchor: .bottom) } }
+                        }
                     }
                     .onChange(of: engine.live.message.count + engine.live.thoughts.count / 200 + engine.live.tools.count) { _, _ in
                         if engine.busy { proxy.scrollTo("working", anchor: .bottom) }
@@ -1942,9 +1951,22 @@ struct FileChanges: View {
 struct EventRow: View {
     let event: LedgerEvent
     var attachments: [SessionAttachment] = []
+    var agents: [Engine.AgentInfo] = []
     var onDeleteAttachment: (Int64) -> Void = { _ in }
 
     private var isUser: Bool { event.actor == "user" }
+    private var agent: Engine.AgentInfo? {
+        agents.first { event.actor == $0.id || event.actor.hasPrefix("\($0.id):") }
+    }
+    private var providerID: String {
+        agent?.id ?? String(event.actor.split(separator: ":", maxSplits: 1).first ?? Substring(event.actor))
+    }
+    private var modelLabel: String? {
+        guard let modelID = event.model_id else { return nil }
+        let model = ModelID(modelID)
+        let name = agent?.baseModels.first(where: { $0.id == model.base })?.label ?? model.base
+        return [name, model.effort].compactMap { $0 }.joined(separator: " · ")
+    }
 
     var body: some View {
         switch event.kind {
@@ -1963,20 +1985,29 @@ struct EventRow: View {
         }
     }
 
-    // User: right-aligned bubble. Agent: plain text under its name, like the
-    // chat panes people already know from Claude / Codex / Cursor.
+    // Keep role and provider identity visible for every turn, even when an
+    // agent changes during a handoff.
     private var message: some View {
         VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
-            if !isUser {
-                HStack(spacing: 5) {
-                    Circle().fill(agentColor).frame(width: 7, height: 7)
-                    Text(event.actor).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                if isUser {
+                    Image(systemName: "person.crop.circle.fill")
+                        .foregroundStyle(Color.accentColor)
+                    Text("คุณ").foregroundStyle(.secondary)
+                } else {
+                    ProviderIcon(provider: providerID, size: 15)
+                    Text(agent?.label ?? event.actor).foregroundStyle(.secondary)
+                    if let modelLabel {
+                        Text(modelLabel).font(.caption2).foregroundStyle(.tertiary)
+                    }
                 }
             }
+            .font(.caption.weight(.semibold))
+            .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
             MarkdownText(text: event.body)
-                .padding(.horizontal, isUser ? 12 : 0).padding(.vertical, isUser ? 8 : 0)
-                .background(isUser ? Color.accentColor.opacity(0.14) : .clear,
-                            in: RoundedRectangle(cornerRadius: 12))
+                .padding(.horizontal, 12).padding(.vertical, 9)
+                .background(isUser ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.045),
+                            in: RoundedRectangle(cornerRadius: 13, style: .continuous))
             if !attachments.isEmpty {
                 ForEach(attachments) { file in
                     HStack(spacing: 6) {
@@ -2065,11 +2096,6 @@ struct EventRow: View {
     private func card<C: View>(tint: Color, @ViewBuilder _ c: () -> C) -> some View {
         c().padding(10)
             .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
-    }
-
-    private var agentColor: Color {
-        let palette: [Color] = [.green, .orange, .teal, .pink, .indigo]
-        return palette[abs(event.actor.hashValue) % palette.count]
     }
 
     /// The handoff is the product's whole argument, so it gets read as a

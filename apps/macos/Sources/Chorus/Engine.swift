@@ -10,6 +10,7 @@ struct LedgerEvent: Codable, Identifiable, Hashable {
     let kind: String
     let actor: String
     let body: String
+    let model_id: String?
     var id: Int64 { seq }
 }
 
@@ -327,7 +328,7 @@ final class Engine: ObservableObject {
         echoCounter += 1
         live = LiveTurn()
         lastThoughts = ""
-        events.append(LedgerEvent(seq: Int64.min + echoCounter, kind: "msg", actor: "user", body: text))
+        events.append(LedgerEvent(seq: Int64.min + echoCounter, kind: "msg", actor: "user", body: text, model_id: nil))
         turnStartedAt = Date()
     }
 

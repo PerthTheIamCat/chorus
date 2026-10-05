@@ -110,7 +110,8 @@ char *chorus_run_turn_interactive_with_attachments(
     ChorusPermissionCallback callback, void *ctx);
 
 /* The whole session as a JSON array:
- * [{"seq":N,"kind":"msg","actor":"...","body":"..."}, ...] */
+ * [{"seq":N,"kind":"msg","actor":"...","body":"...",
+ *   "model_id":"..."}, ...]; model_id is null when unavailable. */
 char *chorus_transcript_json(const ChorusEngine *e);
 
 /* Only events with seq > `after` (0 = whole session). Same JSON shape.

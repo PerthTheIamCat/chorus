@@ -81,6 +81,8 @@ pub struct Event {
     pub tok_in: Option<i64>,
     pub tok_out: Option<i64>,
     pub cost_usd: Option<f64>,
+    /// Model reported by the agent for this message, when the bridge provides it.
+    pub model_id: Option<String>,
 }
 
 /// What to append. `body` is routed to inline storage or the blob store by size.
@@ -94,14 +96,19 @@ pub struct NewEvent {
     pub tok_in: Option<i64>,
     pub tok_out: Option<i64>,
     pub cost_usd: Option<f64>,
+    pub model_id: Option<String>,
 }
 
 impl NewEvent {
     pub fn new(sess: i64, kind: EventKind, actor: i64, body: impl Into<String>) -> Self {
-        Self { sess, parent: None, kind, actor, body: body.into(), tok_in: None, tok_out: None, cost_usd: None }
+        Self { sess, parent: None, kind, actor, body: body.into(), tok_in: None, tok_out: None, cost_usd: None, model_id: None }
     }
     pub fn parent(mut self, p: i64) -> Self {
         self.parent = Some(p);
+        self
+    }
+    pub fn model(mut self, model_id: Option<String>) -> Self {
+        self.model_id = model_id;
         self
     }
 }

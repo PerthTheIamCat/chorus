@@ -118,6 +118,8 @@ pub struct TurnOutcome {
     pub message: String,
     pub thoughts: String,
     pub events: Vec<AgentEvent>,
+    /// The model selected and reported for this ACP session, when available.
+    pub model: Option<String>,
     pub context_used: Option<i64>,
     pub context_window: Option<i64>,
     pub stop_reason: String,
@@ -407,7 +409,9 @@ impl CodexAgent {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        Ok(acc.finish())
+        let mut outcome = acc.finish();
+        outcome.model = self.model.clone();
+        Ok(outcome)
     }
 
     // ---- internals ----------------------------------------------------
@@ -876,6 +880,7 @@ impl Accumulator {
             message,
             thoughts: self.thoughts.trim().to_string(),
             events: self.events,
+            model: None,
             context_used: self.context_used,
             context_window: self.context_window,
             stop_reason: self.stop_reason,

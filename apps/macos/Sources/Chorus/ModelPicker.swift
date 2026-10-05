@@ -72,10 +72,12 @@ struct ModelPicker: View {
         HStack(spacing: 4) {
             Button { open.toggle() } label: {
                 HStack(spacing: 5) {
-                    Circle().fill(agent?.ready == true ? Color.green : .orange).frame(width: 6, height: 6)
+                    if let agent { ProviderIcon(provider: agent.id, size: 14) }
                     Text(agent?.label ?? "เลือกโมเดล").fontWeight(.medium)
                     if let a = agent, let l = a.baseModels.first(where: { $0.id == current.base })?.label {
                         Text(l).foregroundStyle(.secondary)
+                    } else if agent == nil, !model.isEmpty {
+                        Text(current.base).foregroundStyle(.secondary)
                     }
                     Image(systemName: "chevron.up.chevron.down").font(.system(size: 8))
                 }
@@ -115,7 +117,7 @@ struct ModelPicker: View {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(engine.agents) { a in
                         HStack(spacing: 6) {
-                            Circle().fill(a.ready ? Color.green : .orange).frame(width: 7, height: 7)
+                            ProviderIcon(provider: a.id, size: 14)
                             Text(a.label).font(.caption.bold()).foregroundStyle(.secondary)
                             Spacer()
                             if !a.ready {
