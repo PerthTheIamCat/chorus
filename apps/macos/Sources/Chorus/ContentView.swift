@@ -121,19 +121,23 @@ struct ContentView: View {
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: showSidebar)
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: showInspector)
         .toolbar {
-            ToolbarItem(placement: .principal) {
-                Text(engine.sessionID < 0 ? "ยังไม่ได้เปิดเซสชัน"
-                     : (engine.sessionsByDB[dbPath]?.first { $0.id == engine.sessionID }).map(displayTitle)
-                        ?? "เซสชัน \(engine.sessionID)")
-                    .lineLimit(1)
-                    .font(.headline)
-            }
             ToolbarItem(placement: .navigation) {
                 Button { showSidebar.toggle() } label: {
                     Label("แถบโปรเจกต์", systemImage: "sidebar.left")
                 }
                 .keyboardShortcut("s", modifiers: [.command, .control])
                 .help("เปิด/ปิดแถบโปรเจกต์ (⌃⌘S)")
+            }
+            ToolbarItem(placement: .navigation) {
+                Text(engine.sessionID < 0 ? "ยังไม่ได้เปิดเซสชัน"
+                     : (engine.sessionsByDB[dbPath]?.first { $0.id == engine.sessionID }).map(displayTitle)
+                        ?? "เซสชัน \(engine.sessionID)")
+                    .lineLimit(1)
+                    .font(.headline)
+            }
+            // Push everything after this to the window's trailing edge.
+            if #available(macOS 26, *) {
+                ToolbarSpacer(.flexible)
             }
             ToolbarItemGroup(placement: .primaryAction) {
                 // Handing over is one click per agent. Everything the next
