@@ -716,11 +716,14 @@ impl Session {
 
         let result: Result<RelayReport> =
             match self.run_turn(&first.name, &first.provider, user_text, policy) {
-                Ok(turn) if !is_transient_stop(&turn.stop_reason) => Ok(RelayReport {
-                    answered_by: first.name.clone(),
-                    turn,
-                    handoffs,
-                }),
+                Ok(turn) if !is_transient_stop(&turn.stop_reason) => {
+                    crate::limits::clear(&first.name);
+                    Ok(RelayReport {
+                        answered_by: first.name.clone(),
+                        turn,
+                        handoffs,
+                    })
+                }
                 Ok(turn) => {
                     // Answered but stopped short — relay from here.
                     let reason = HandoffReason::ContextExhausted;
@@ -750,7 +753,14 @@ impl Session {
                 Err(e) => {
                     // `{e:#}` flattens anyhow's context chain so the classifier
                     // sees the underlying "…rate limit…" message.
-                    match HandoffReason::from_failure(&format!("{e:#}")) {
+                    let msg = format!("{e:#}");
+                    if matches!(
+                        HandoffReason::from_failure(&msg),
+                        Some(HandoffReason::RateLimit | HandoffReason::QuotaExhausted)
+                    ) {
+                        crate::limits::record_hit(&first.name, &msg);
+                    }
+                    match HandoffReason::from_failure(&msg) {
                         None => Err(e).with_context(|| first.name.clone()),
                         Some(reason) => match self.relay_rest(
                             &chain[1..],
@@ -832,6 +842,7 @@ impl Session {
             );
             match h {
                 Ok(hr) if !is_transient_stop(&hr.stop_reason) => {
+                    crate::limits::clear(&spec.name);
                     let turn = TurnReport {
                         user_seq: hr.handoff_seq,
                         agent_seqs: hr.agent_seqs,
@@ -851,8 +862,11 @@ impl Session {
                     from = spec.name.clone();
                 }
                 Err(e) => {
-                    reason = HandoffReason::from_failure(&format!("{e:#}"))
-                        .unwrap_or(HandoffReason::Failover);
+                    let msg = format!("{e:#}");
+                    reason = HandoffReason::from_failure(&msg).unwrap_or(HandoffReason::Failover);
+                    if matches!(reason, HandoffReason::RateLimit | HandoffReason::QuotaExhausted) {
+                        crate::limits::record_hit(&spec.name, &msg);
+                    }
                     from = spec.name.clone();
                 }
             }
@@ -1158,6 +1172,15 @@ impl Session {
         }
     }
 
+    /// The pin for `agent_name`, falling back to its agent without the
+    /// account (`claude@work` uses the model picked for `claude`).
+    fn model_pin(&self, agent_name: &str) -> Option<String> {
+        self.models
+            .get(agent_name)
+            .or_else(|| self.models.get(crate::accounts::split(agent_name).0))
+            .cloned()
+    }
+
     /// What model is pinned for `agent_name`, if any.
     pub fn model_for(&self, agent_name: &str) -> Option<&str> {
         self.models.get(agent_name).map(String::as_str)
@@ -1213,14 +1236,16 @@ impl Session {
             command,
             mcp_servers,
             mode: Some(mode.to_string()),
-            model: self.models.get(agent_name).cloned(),
+            model: self.model_pin(agent_name),
             log: acp_log(),
+            // `codex@work` runs the same CLI with its own CODEX_HOME.
+            env: crate::accounts::env_for(agent_name),
         };
         let mut agent =
             CodexAgent::start(&self.cwd, cfg).with_context(|| format!("start {agent_name}"))?;
         note_mode(agent_name, agent.mode(), self.log_permissions);
         if self.log_permissions {
-            match (self.models.get(agent_name), agent.model()) {
+            match (self.model_pin(agent_name).as_ref(), agent.model()) {
                 // Asked for one and the agent confirmed a different one: the
                 // pick did not take. Say so — the alternative is a user who
                 // thinks they switched models and is reading output from the

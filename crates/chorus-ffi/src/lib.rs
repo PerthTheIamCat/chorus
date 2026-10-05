@@ -977,6 +977,64 @@ pub unsafe extern "C" fn chorus_list_skills(cwd: *const c_char) -> *mut c_char {
     }
 }
 
+/// Every account of every agent with what is known about its usage: Codex's
+/// own 5-hour/weekly percentages, and for Claude the last limit it hit.
+/// JSON: {"ok":true,"accounts":[{name,agent,account,dir,ready,login,rate_limits,hit}]}
+#[no_mangle]
+pub extern "C" fn chorus_usage_report() -> *mut c_char {
+    match catch_unwind(chorus_cli::limits::usage_report) {
+        Ok(rows) => out(serde_json::json!({ "ok": true, "accounts": rows }).to_string()),
+        Err(_) => err("panic in usage_report"),
+    }
+}
+
+/// Add an extra account (`name` = a-z0-9-_) for `agent`. Creates its config
+/// dir; the user then logs in with the returned command.
+/// JSON: {"ok":true,"dir":"…","login":"…"}
+///
+/// # Safety
+/// `agent` and `name` must be valid NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_add_account(
+    agent: *const c_char,
+    name: *const c_char,
+) -> *mut c_char {
+    let (Some(agent), Some(name)) = (borrow(agent), borrow(name)) else {
+        return err("agent/name must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| chorus_cli::accounts::add(agent, name))) {
+        Ok(Ok(dir)) => out(serde_json::json!({
+            "ok": true,
+            "dir": dir.to_string_lossy(),
+            "login": chorus_cli::accounts::login_command(agent, Some(name)),
+        })
+        .to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in add_account"),
+    }
+}
+
+/// Remove an extra account and its config dir (its login). JSON: {"ok":true}
+///
+/// # Safety
+/// `agent` and `name` must be valid NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_remove_account(
+    agent: *const c_char,
+    name: *const c_char,
+) -> *mut c_char {
+    let (Some(agent), Some(name)) = (borrow(agent), borrow(name)) else {
+        return err("agent/name must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        chorus_cli::accounts::remove(agent, name)
+    })) {
+        Ok(Ok(())) => out(serde_json::json!({ "ok": true }).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in remove_account"),
+    }
+}
+
 /// Rename a session. JSON: {"ok":true}
 ///
 /// # Safety

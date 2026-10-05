@@ -270,6 +270,7 @@ final class Engine: ObservableObject {
 
     /// Turn finished: keep the reasoning, drop the live view (the ledger now has the rest).
     private func endLive() {
+        loadUsage()
         if !live.thoughts.isEmpty { lastThoughts = live.thoughts }
         live = LiveTurn()
     }
@@ -570,6 +571,70 @@ final class Engine: ObservableObject {
         }
     }
 
+    // MARK: accounts & usage
+
+    struct UsageWindow: Codable, Hashable {
+        let used_percent: Double
+        let window_minutes: Int64?
+        let resets_at: Int64?
+    }
+    struct RateLimits: Codable, Hashable { let primary: UsageWindow?; let secondary: UsageWindow? }
+    struct LimitHit: Codable, Hashable { let at_ms: Int64; let resets: String? }
+    struct Account: Codable, Identifiable, Hashable {
+        let name: String        // what goes in a relay chain: codex, claude@work
+        let agent: String
+        let account: String     // "" = the CLI's own login
+        let dir: String
+        let ready: Bool
+        let login: String
+        let rate_limits: RateLimits?
+        let hit: LimitHit?
+        var id: String { name }
+        var title: String { account.isEmpty ? "ค่าเริ่มต้น" : account }
+        /// Limited right now, as far as we know.
+        var limited: Bool {
+            if let hit, Date().timeIntervalSince1970 * 1000 - Double(hit.at_ms) < 5 * 3600 * 1000 { return true }
+            return (rate_limits?.primary?.used_percent ?? 0) >= 100 || (rate_limits?.secondary?.used_percent ?? 0) >= 100
+        }
+        /// The fullest window, 0…1, for a one-bar summary.
+        var worst: Double? {
+            let v = [rate_limits?.primary?.used_percent, rate_limits?.secondary?.used_percent].compactMap { $0 }.max()
+            return v.map { min($0 / 100, 1) } ?? (limited ? 1 : nil)
+        }
+    }
+    @Published var accounts: [Account] = []
+
+    func loadUsage() {
+        ioQueue.async { [weak self] in
+            let json = Self.string(from: chorus_usage_report())
+            struct R: Codable { let accounts: [Account]? }
+            let r = Self.decode(R.self, json)
+            DispatchQueue.main.async { if let a = r?.accounts { self?.accounts = a } }
+        }
+    }
+
+    /// Create an account dir, then open Terminal on its login command.
+    func addAccount(agent: String, name: String) {
+        ioQueue.async { [weak self] in
+            let json = agent.withCString { a in name.withCString { Self.string(from: chorus_add_account(a, $0)) } }
+            struct R: Codable { let ok: Bool?; let login: String?; let error: String? }
+            let r = Self.decode(R.self, json)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let login = r?.login, r?.ok == true { self.runLoginCommand(login) }
+                else { self.lastError = "เพิ่มบัญชีไม่ได้: \(r?.error ?? "unknown")" }
+                self.loadUsage()
+            }
+        }
+    }
+
+    func removeAccount(agent: String, name: String) {
+        ioQueue.async { [weak self] in
+            _ = agent.withCString { a in name.withCString { Self.string(from: chorus_remove_account(a, $0)) } }
+            DispatchQueue.main.async { self?.loadUsage() }
+        }
+    }
+
     func loadAgents() {
         ioQueue.async { [weak self] in
             let json = Self.string(from: chorus_list_agents())
@@ -614,7 +679,11 @@ final class Engine: ObservableObject {
     /// not complete an OAuth flow itself, and pretending otherwise would just
     /// hide the one step the user has to take.
     func runLoginCommand(_ command: String) {
-        let script = "tell application \"Terminal\"\nactivate\ndo script \"\(command)\"\nend tell"
+        // Account logins carry a quoted path (CODEX_HOME="…"); escape it for
+        // the AppleScript string it is embedded in.
+        let escaped = command.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let script = "tell application \"Terminal\"\nactivate\ndo script \"\(escaped)\"\nend tell"
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         p.arguments = ["-e", script]

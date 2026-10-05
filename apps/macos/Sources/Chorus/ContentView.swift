@@ -64,6 +64,9 @@ struct ContentView: View {
     @State private var rightTab = RightTab.context
     @State private var showPalette = false
     @State private var showInspector = true
+    @AppStorage("chorus.failoverAccounts") private var failoverAccounts = true
+    @AppStorage("chorus.failoverProviders") private var failoverProviders = true
+
     @State private var showSidebar = true
     @State private var expanded: Set<String> = []
     @StateObject private var projects = ProjectStore()
@@ -190,7 +193,7 @@ struct ContentView: View {
                 if engine.sessionID >= 0 {
                     ForEach(engine.agents.filter { $0.ready && $0.id != currentAgentID }) { a in
                         Button {
-                            engine.handoffAuto(to: a.defaultModel, level: max(permission.rawValue, 0))
+                            engine.handoffAuto(to: a.id, level: max(permission.rawValue, 0))
                         } label: {
                             Label("ส่งต่อให้ \(a.label)", systemImage: "arrow.left.arrow.right")
                         }
@@ -208,7 +211,11 @@ struct ContentView: View {
                 .help("เปิด/ปิดแผงคอนเท็กซ์ ที่แก้ไป ความจำ (⌘⌥I)")
             }
         }
-        .onAppear { engine.loadAgents(); engine.registerProgress() }
+        .onAppear {
+            engine.loadAgents(); engine.registerProgress(); engine.loadUsage()
+            if let raw = UserDefaults.standard.object(forKey: "chorus.defaultPermission") as? Int,
+               let p = PermissionLevel(rawValue: Int32(raw)) { permission = p }
+        }
         .onChange(of: workspace) { _, w in fileIndex.load(w); engine.loadSkills(cwd: w) }
         .onChange(of: engine.sessionID) { _, id in
             guard !workspace.isEmpty else { return }
@@ -362,11 +369,24 @@ struct ContentView: View {
                     Text("กำลังตรวจเอเจนต์…").font(.caption2).foregroundStyle(.secondary)
                 }
                 ForEach(engine.agents) { a in
-                    HStack(spacing: 4) {
-                        Circle().fill(a.ready ? Color.green : .orange).frame(width: 6, height: 6)
-                        Text(a.label).font(.caption2)
+                    let accs = engine.accounts.filter { $0.agent == a.id }
+                    let limited = !accs.isEmpty && accs.filter(\.ready).allSatisfy(\.limited)
+                    let worst = accs.compactMap(\.worst).min()
+                    Button { showSettings = true } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 4) {
+                                Circle().fill(!a.ready ? Color.orange : limited ? .red : .green).frame(width: 6, height: 6)
+                                Text(a.label).font(.caption2)
+                                if accs.count > 1 {
+                                    Text("×\(accs.count)").font(.caption2).foregroundStyle(.tertiary)
+                                }
+                            }
+                            if let worst { UsageBar(fraction: worst, height: 3).frame(width: 54) }
+                        }
                     }
-                    .help(a.ready ? "\(a.label) พร้อมใช้" : a.detail)
+                    .buttonStyle(InteractiveStyle(cornerRadius: 6, padding: .init(top: 3, leading: 5, bottom: 3, trailing: 5)))
+                    .help(limited ? "\(a.label): ทุกบัญชีติดลิมิต"
+                          : worst.map { "\(a.label): บัญชีที่ว่างที่สุดใช้ไป \(Int($0 * 100))%" } ?? (a.ready ? "\(a.label) พร้อมใช้" : a.detail))
                 }
                 Spacer()
                 Button { showSettings = true } label: { Image(systemName: "gearshape") }
@@ -412,17 +432,6 @@ struct ContentView: View {
 
 
     private var currentAgentID: String { agentFor(model)?.id ?? "" }
-
-    /// The chosen agent first, then every other agent that could actually take
-    /// over. Built here rather than typed by the user — that text field was the
-    /// single most confusing control in the old window.
-    private var relayChain: String {
-        var chain = [model]
-        for a in engine.agents where a.ready && a.id != currentAgentID {
-            chain.append(a.defaultModel)
-        }
-        return chain.joined(separator: ",")
-    }
 
     private func pickFolder() {
         let panel = NSOpenPanel()
@@ -666,19 +675,42 @@ struct ContentView: View {
         dispatch(target, text)
     }
 
+    /// The relay chain for a turn, as *agent names* (with accounts), never
+    /// model ids: the engine picks the bridge from the name, so sending
+    /// "opus" or "default" used to start the Codex bridge for a Claude pick.
+    /// Order: the chosen agent's accounts (chosen one first), then every
+    /// other ready agent's accounts.
+    private func chain(for agentID: String) -> [String] {
+        let usable = engine.accounts.filter { $0.ready && !$0.limited }
+        func names(_ agent: String) -> [String] {
+            let own = usable.filter { $0.agent == agent }.map(\.name)
+            return own.isEmpty ? [agent] : own
+        }
+        var out = names(agentID)
+        if let pick = UserDefaults.standard.string(forKey: "chorus.preferred.\(agentID)"),
+           let i = out.firstIndex(of: pick) {
+            out.insert(out.remove(at: i), at: 0)
+        }
+        if !failoverAccounts { out = Array(out.prefix(1)) }
+        if failoverProviders {
+            for a in engine.agents where a.ready && a.id != agentID { out += names(a.id) }
+        }
+        return out
+    }
+
     private func dispatch(_ target: String, _ text: String) {
         lastPrompt = text
+        let agentID = agentFor(target)?.id ?? target
+        // `@codex …` picked another agent's default model; pin it for the turn.
+        if target != model { engine.setModel(agent: agentID, model: target) }
+        let names = chain(for: agentID)
         if permission == .ask {
-            engine.sendInteractive(text, agent: target)
+            engine.sendInteractive(text, agent: names.first ?? agentID)
         } else {
             // Always the relay path, even for one agent: a chain of one
             // behaves exactly like a single turn, and the user never has
             // to know the word "relay" to get failover.
-            var chain = [target]
-            for a in engine.agents where a.ready && a.defaultModel != target && a.id != agentFor(target)?.id {
-                chain.append(a.defaultModel)
-            }
-            engine.sendRelay(text, agents: chain.joined(separator: ","), level: permission.rawValue)
+            engine.sendRelay(text, agents: names.joined(separator: ","), level: permission.rawValue)
         }
     }
 
@@ -706,7 +738,7 @@ struct ContentView: View {
         var out: [Suggestion] = []
         for a in engine.agents where a.ready && a.id != currentAgentID && engine.sessionID >= 0 {
             out.append(.init(title: "/handoff \(a.id)", detail: "ส่งงานต่อให้ \(a.label) พร้อม brief", icon: "arrow.left.arrow.right") {
-                engine.handoffAuto(to: a.defaultModel, level: max(permission.rawValue, 0))
+                engine.handoffAuto(to: a.id, level: max(permission.rawValue, 0))
             })
         }
         for a in engine.agents where a.ready {
@@ -741,7 +773,7 @@ struct ContentView: View {
     }
 
     private func runCompare() {
-        let others = engine.agents.filter(\.ready).map(\.defaultModel)
+        let others = engine.agents.filter(\.ready).map(\.id)
         guard others.count > 1, engine.sessionID >= 0 else { return }
         engine.compare(
             lastPrompt.isEmpty ? "ทบทวนงานที่ค้างอยู่แล้วเสนอขั้นต่อไป" : lastPrompt,
@@ -765,7 +797,7 @@ struct ContentView: View {
             items.append(.init(title: "สลับไปใช้ \(a.label)", icon: "person.crop.circle") { model = a.defaultModel })
             if engine.sessionID >= 0 && a.id != currentAgentID {
                 items.append(.init(title: "ส่งต่องานให้ \(a.label)", icon: "arrow.left.arrow.right") {
-                    engine.handoffAuto(to: a.defaultModel, level: max(permission.rawValue, 0))
+                    engine.handoffAuto(to: a.id, level: max(permission.rawValue, 0))
                 })
             }
         }
@@ -1620,146 +1652,6 @@ struct HandoffBrief {
     }
 }
 
-/// Everything that decides *whether Chorus can run at all* in one place:
-/// which agents are installed, which are logged in, and the one command that
-/// fixes each. The app cannot complete an OAuth flow for you, so it does the
-/// next most useful thing — opens Terminal on the exact command and then lets
-/// you re-check without restarting.
-struct SettingsSheet: View {
-    @EnvironmentObject var engine: Engine
-    @Environment(\.dismiss) private var dismiss
-    let workspace: String
-    @State private var tab = Tab.agents
-    @State private var skillQuery = ""
-
-    enum Tab: String, CaseIterable { case agents = "เอเจนต์", skills = "Skills" }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("ตั้งค่า").font(.title3.bold())
-                    Text("Chorus เรียก CLI ของแต่ละเจ้าผ่าน ACP — ต้อง login ที่ CLI นั้น ไม่ใช่ที่นี่")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("เสร็จ") { dismiss() }.keyboardShortcut(.defaultAction)
-            }
-
-            Picker("", selection: $tab) {
-                ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented).labelsHidden()
-
-            if tab == .skills { skillsTab } else { agentsTab }
-        }
-        .padding(18)
-        .frame(width: 560, height: 560)
-        .onAppear { engine.loadAgents(); engine.loadSkills(cwd: workspace) }
-    }
-
-    private var skillsTab: some View {
-        let q = skillQuery.trimmingCharacters(in: .whitespaces)
-        let shown = engine.skills.filter {
-            q.isEmpty || $0.name.localizedCaseInsensitiveContains(q) || $0.description.localizedCaseInsensitiveContains(q)
-        }
-        let titles = ["chorus": "Chorus — ส่งให้ทุกเอเจนต์", "project": "โปรเจกต์นี้ (.claude/skills)", "user": "ของคุณ (~/.claude/skills)"]
-        return VStack(alignment: .leading, spacing: 8) {
-            TextField("ค้นหา skill…", text: $skillQuery).textFieldStyle(.roundedBorder)
-            Text("\(engine.skills.count) skill ที่เอเจนต์ในโฟลเดอร์นี้มองเห็น")
-                .font(.caption).foregroundStyle(.secondary)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    ForEach(["chorus", "project", "user"], id: \.self) { src in
-                        let group = shown.filter { $0.source == src }
-                        if !group.isEmpty {
-                            Text(titles[src] ?? src).font(.subheadline.bold())
-                            ForEach(group) { sk in
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(sk.name).font(.callout.weight(.medium))
-                                    Text(sk.description).font(.caption).foregroundStyle(.secondary)
-                                        .lineLimit(3)
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(8)
-                                .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 6))
-                                .help(sk.path)
-                            }
-                        }
-                    }
-                    if shown.isEmpty {
-                        Text("ไม่พบ skill — วางไว้ที่ .chorus/skills/<ชื่อ>/SKILL.md เพื่อให้ทุกเอเจนต์ใช้ร่วมกัน")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-    }
-
-    private var agentsTab: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            ForEach(engine.agents) { a in
-                VStack(alignment: .leading, spacing: 7) {
-                    HStack(spacing: 8) {
-                        Circle()
-                            .fill(a.ready ? Color.green : (a.auth == "needs_login" ? .orange : .red))
-                            .frame(width: 8, height: 8)
-                        Text(a.label).font(.headline)
-                        Spacer()
-                        Text(statusLabel(a.auth))
-                            .font(.caption)
-                            .foregroundStyle(a.ready ? .secondary : .primary)
-                    }
-                    Text(a.detail).font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    if !a.models.isEmpty {
-                        Text("โมเดลที่เลือกได้").font(.caption2).foregroundStyle(.tertiary)
-                        Text(a.models.map(\.label).joined(separator: " · "))
-                            .font(.caption.monospaced())
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-
-                    if !a.ready {
-                        HStack(spacing: 8) {
-                            Text(a.hint)
-                                .font(.caption.monospaced())
-                                .padding(.horizontal, 6).padding(.vertical, 3)
-                                .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
-                                .textSelection(.enabled)
-                            Button("เปิด Terminal แล้วรันให้") { engine.runLoginCommand(a.hint) }
-                                .controlSize(.small)
-                            Button("ตรวจใหม่") { engine.loadAgents() }
-                                .controlSize(.small)
-                            Spacer(minLength: 0)
-                        }
-                    }
-                }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
-            }
-
-            Text("เปลี่ยนรายการโมเดลเองได้ด้วย CHORUS_CLAUDE_MODELS / CHORUS_CODEX_MODELS "
-                 + "(รูปแบบ id=ชื่อ คั่นด้วยจุลภาค) — ACP ไม่มีวิธีถามรายการโมเดลจาก agent "
-                 + "รายการนี้เลยเป็นของที่เราดูแลเอง ไม่ใช่ของที่ provider บอกมา")
-                .font(.caption2).foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Spacer(minLength: 0)
-        }
-    }
-
-    private func statusLabel(_ auth: String) -> String {
-        switch auth {
-        case "ok": "พร้อมใช้"
-        case "needs_login": "ยังไม่ได้ login"
-        default: "ยังไม่ได้ติดตั้ง CLI"
-        }
-    }
-}
-
-
 /// ⌘K: type to filter, ↩ runs the first match.
 struct PaletteSheet: View {
     let items: [(title: String, icon: String, run: () -> Void)]
@@ -1844,9 +1736,10 @@ struct ThinkingBlock: View {
     let text: String
     let running: Bool
     @State private var open: Bool?
+    @AppStorage("chorus.thinkingOpen") private var thinkingOpen = true
 
     var body: some View {
-        let isOpen = open ?? running
+        let isOpen = open ?? (running && thinkingOpen)
         VStack(alignment: .leading, spacing: 6) {
             Button { open = !isOpen } label: {
                 HStack(spacing: 6) {

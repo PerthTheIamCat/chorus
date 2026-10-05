@@ -76,6 +76,7 @@ struct ComposerField: View {
     let onSubmit: () -> Void
     var placeholder = "ขอให้ทำอะไร… ( / คำสั่ง · @ ไฟล์หรือเอเจนต์ )"
 
+    @AppStorage("chorus.enterSends") private var enterSends = true
     @State private var selected = 0
     @State private var dismissed = false
     @FocusState private var focused: Bool
@@ -135,9 +136,9 @@ struct ComposerField: View {
             default: return .ignored
             }
         }
-        if press.key == .return && !press.modifiers.contains(.shift) {
-            onSubmit()
-            return .handled
+        if press.key == .return {
+            let send = enterSends ? !press.modifiers.contains(.shift) : press.modifiers.contains(.command)
+            if send { onSubmit(); return .handled }
         }
         return .ignored
     }

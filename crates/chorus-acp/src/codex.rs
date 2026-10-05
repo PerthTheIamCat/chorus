@@ -122,6 +122,8 @@ pub struct CodexConfig {
     pub model: Option<String>,
     /// Transcript sink. `None` discards every frame.
     pub log: Option<Log>,
+    /// Extra environment for the bridge process (account selection).
+    pub env: Vec<(String, String)>,
 }
 
 impl Default for CodexConfig {
@@ -132,6 +134,7 @@ impl Default for CodexConfig {
             mode: Some("read-only".into()),
             model: None,
             log: None,
+            env: Vec::new(),
         }
     }
 }
@@ -370,7 +373,7 @@ impl CodexAgent {
             .log
             .clone()
             .unwrap_or_else(|| Arc::new(Mutex::new(Box::new(sink()))));
-        let agent = Agent::spawn(&cfg.command, log)
+        let agent = Agent::spawn_env(&cfg.command, &cfg.env, log)
             .with_context(|| format!("spawn codex bridge: {}", cfg.command.join(" ")))?;
         let this = Self {
             agent,

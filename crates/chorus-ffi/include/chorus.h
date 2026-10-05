@@ -82,6 +82,12 @@ char *chorus_cancel(void);
 /* Skills visible in a workspace (chorus/project/user). {"ok":true,"skills":[{name,description,path,source}]} */
 char *chorus_list_skills(const char *cwd);
 
+/* Accounts & usage. Every account of every agent, with Codex's 5h/weekly
+   percentages and Claude's last limit hit. Accounts are config dirs. */
+char *chorus_usage_report(void);
+char *chorus_add_account(const char *agent, const char *name);
+char *chorus_remove_account(const char *agent, const char *name);
+
 /* Rename / delete a session by store path (no open engine needed). {"ok":true} */
 char *chorus_rename_session(const char *db_path, int64_t id, const char *title);
 char *chorus_delete_session(const char *db_path, int64_t id);

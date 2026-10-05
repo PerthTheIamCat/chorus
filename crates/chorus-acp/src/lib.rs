@@ -126,8 +126,15 @@ pub enum Inbound {
 
 impl Agent {
     pub fn spawn(cmd: &[String], log: Log) -> Result<Self> {
+        Self::spawn_env(cmd, &[], log)
+    }
+
+    /// Like [`spawn`], with extra environment variables — how an account is
+    /// chosen (`CODEX_HOME` / `CLAUDE_CONFIG_DIR` pointing at its own dir).
+    pub fn spawn_env(cmd: &[String], env: &[(String, String)], log: Log) -> Result<Self> {
         let (program, args) = cmd.split_first().ok_or_else(|| anyhow!("empty command"))?;
         let mut command = Command::new(program);
+        command.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         command
             .args(args)
             .stdin(Stdio::piped())

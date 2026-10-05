@@ -92,6 +92,8 @@ pub fn policy(cwd: &Path, profile: Profile) -> String {
         for rel in [
             ".codex", ".claude", ".config", ".cache", ".npm", ".local/share",
             ".local/state", "Library/Caches", "Library/Logs", ".bun/install/cache",
+            // Extra accounts: each one is a CODEX_HOME / CLAUDE_CONFIG_DIR here.
+            ".chorus/accounts",
         ] {
             allow.push(home.join(rel));
         }

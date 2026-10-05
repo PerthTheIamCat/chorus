@@ -78,6 +78,7 @@ dependencies = [
  "anyhow",
  "chorus-acp",
  "chorus-core",
+ "serde",
  "serde_json",
  "tempfile",
 ]
