@@ -3,7 +3,7 @@
 //! bytes twice — an agent re-reading the same file 5-10x per session — costs
 //! one row lookup and a `refs` bump, not a second copy.
 
-use crate::{ChorusError, BlobId, Result};
+use crate::{BlobId, ChorusError, Result};
 use rusqlite::{Connection, OptionalExtension};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,10 +21,15 @@ pub fn put(c: &Connection, bytes: &[u8]) -> Result<BlobId> {
     let id = BlobId::of(bytes);
 
     let existing: Option<i64> = c
-        .query_row("SELECT 1 FROM blob WHERE id = ?1", [id.as_str()], |r| r.get(0))
+        .query_row("SELECT 1 FROM blob WHERE id = ?1", [id.as_str()], |r| {
+            r.get(0)
+        })
         .optional()?;
     if existing.is_some() {
-        c.execute("UPDATE blob SET refs = refs + 1 WHERE id = ?1", [id.as_str()])?;
+        c.execute(
+            "UPDATE blob SET refs = refs + 1 WHERE id = ?1",
+            [id.as_str()],
+        )?;
         return Ok(id);
     }
 
@@ -67,12 +72,15 @@ pub fn get(c: &Connection, id: &BlobId) -> Result<Vec<u8>> {
 /// Like `get`, but interpret the bytes as UTF-8 text.
 pub fn get_text(c: &Connection, id: &BlobId) -> Result<String> {
     let bytes = get(c, id)?;
-    String::from_utf8(bytes).map_err(|e| ChorusError::Invalid(format!("blob {id} is not valid utf-8: {e}")))
+    String::from_utf8(bytes)
+        .map_err(|e| ChorusError::Invalid(format!("blob {id} is not valid utf-8: {e}")))
 }
 
 pub fn token_count(c: &Connection, id: &BlobId) -> Result<Option<i64>> {
     let tok: Option<i64> = c
-        .query_row("SELECT tok FROM blob WHERE id = ?1", [id.as_str()], |r| r.get(0))
+        .query_row("SELECT tok FROM blob WHERE id = ?1", [id.as_str()], |r| {
+            r.get(0)
+        })
         .optional()?
         .flatten();
     Ok(tok)
@@ -87,13 +95,17 @@ pub fn set_token_count(c: &Connection, id: &BlobId, n: i64) -> Result<()> {
     Ok(())
 }
 
-/// Delete blobs older than `older_than_ms` that no event references.
+/// Delete blobs older than `older_than_ms` that no event body or live
+/// attachment (original or prepared content) references.
 /// Returns how many rows were deleted.
 pub fn gc(c: &Connection, older_than_ms: i64) -> Result<usize> {
     let n = c.execute(
         "DELETE FROM blob
          WHERE created_ms < ?1
-           AND id NOT IN (SELECT DISTINCT blob FROM event WHERE blob IS NOT NULL)",
+           AND id NOT IN (SELECT DISTINCT blob FROM event WHERE blob IS NOT NULL)
+           AND id NOT IN (SELECT hash FROM attachment WHERE status != 'deleted'
+                          UNION SELECT prepared_hash FROM attachment
+                                WHERE status != 'deleted' AND prepared_hash IS NOT NULL)",
         [older_than_ms],
     )?;
     Ok(n)

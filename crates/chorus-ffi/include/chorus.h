@@ -11,6 +11,7 @@
 #define CHORUS_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,6 +37,45 @@ void chorus_engine_free(ChorusEngine *e);
 /* The session's numeric id, or -1 if `e` is NULL. */
 int64_t chorus_engine_session_id(const ChorusEngine *e);
 
+/* Curated integration catalog. JSON list includes reviewed entries and
+ * install/project state. Actions: install, update, remove, enable, disable. */
+char *chorus_catalog_list_json(const char *project);
+char *chorus_catalog_action_json(const char *project, const char *id,
+                                 const char *action);
+
+/* What an action would create or remove ({"ok":true,"plan":{items:[...]}}).
+ * Touches nothing. Same arguments as chorus_catalog_action_json. */
+char *chorus_catalog_plan_json(const char *project, const char *id,
+                               const char *action);
+
+/* Per-integration dashboard: {"ok":true,"dashboard":{...}}. Read-only. */
+char *chorus_catalog_dashboard_json(const char *project, const char *id);
+
+/* Start an integration's own dashboard command ("run" actions). */
+char *chorus_catalog_run_json(const char *id, const char *key);
+
+/* Phase of the running catalog action: {"ok":true,"progress":null|{id,current,done}}. */
+char *chorus_catalog_progress_json(void);
+
+/* Import original bytes and optional prepared text or normalized image.
+ * Pass NULL for absent strings/data. Prepared text and normalized image are
+ * mutually exclusive. JSON: {"ok":true,"attachment":{"id":N,"name":"...",
+ * "media_type":"...","size":N,"status":"staged","readable":bool}}. */
+char *chorus_import_attachment(ChorusEngine *e, const char *name,
+                               const char *media_type,
+                               const uint8_t *bytes, size_t bytes_len,
+                               const char *derived_text,
+                               const uint8_t *normalized_image,
+                               size_t normalized_image_len,
+                               const char *normalized_image_mime);
+
+/* List attachment metadata for this session.
+ * JSON: {"ok":true,"attachments":[{id,name,media_type,size,status,readable}]} */
+char *chorus_list_attachments(const ChorusEngine *e);
+
+/* Tombstone a session attachment. JSON: {"ok":true}. */
+char *chorus_delete_attachment(const ChorusEngine *e, int64_t attachment_id);
+
 /* Run one turn. `allow` != 0 approves permission requests.
  * JSON: {"ok":true,"user_seq":N,"agent_event_count":N,"message":"...",
  *        "context_used":N|null,"context_window":N|null,"stop_reason":"..."} */
@@ -43,6 +83,13 @@ char *chorus_run_turn(ChorusEngine *e,
                       const char *agent,
                       const char *prompt,
                       int allow);
+
+/* Attachment-aware turn; attachment_ids_json is a JSON integer array (use
+ * "[]" for no files). Same result shape as chorus_run_turn. */
+char *chorus_run_turn_with_attachments(ChorusEngine *e, const char *agent,
+                                       const char *prompt,
+                                       const char *attachment_ids_json,
+                                       int allow);
 
 /* A permission callback. `ask_json` is {"tool":"...","kind":"...","detail":"..."};
  * return non-zero to allow. Called on the calling thread — block here while
@@ -54,6 +101,12 @@ typedef int (*ChorusPermissionCallback)(void *ctx, const char *ask_json);
 char *chorus_run_turn_interactive(ChorusEngine *e, const char *agent,
                                   const char *prompt,
                                   ChorusPermissionCallback callback, void *ctx);
+
+/* Interactive attachment-aware turn; IDs use the same JSON array format. */
+char *chorus_run_turn_interactive_with_attachments(
+    ChorusEngine *e, const char *agent, const char *prompt,
+    const char *attachment_ids_json,
+    ChorusPermissionCallback callback, void *ctx);
 
 /* The whole session as a JSON array:
  * [{"seq":N,"kind":"msg","actor":"...","body":"..."}, ...] */
@@ -120,6 +173,26 @@ char *chorus_reject_hunks(const ChorusEngine *e, const char *patch);
  *        "handoffs":[["from","to","why"], ...]} */
 char *chorus_run_relay(ChorusEngine *e, const char *agents,
                        const char *prompt, int allow);
+
+/* Attachment-aware relay chain. attachment_ids_json is a JSON integer array. */
+char *chorus_run_relay_with_attachments(ChorusEngine *e, const char *agents,
+                                        const char *prompt,
+                                        const char *attachment_ids_json,
+                                        int allow);
+
+/* Ask the local-only router to propose among supplied candidate tuples.
+ * task_json and candidates_json must match chorus_core::router TaskSummary and
+ * CandidateSet JSON. JSON success: {"ok":true,"route":{"status":...,
+ * "result":...}}; routing unavailability is returned in route, not error. */
+char *chorus_route_json(const char *task_json, const char *candidates_json,
+                        const char *model);
+
+/* Local Ollama router setup. Inventory success:
+ * {"ok":true,"models":[{"name":"...","digest":...,"size_bytes":...}]}.
+ * Pull success: {"ok":true}; failures use the standard error shape.
+ * Pull may block for up to two hours; call off the UI thread. */
+char *chorus_router_models_json(const char *model);
+char *chorus_router_pull_json(const char *model);
 
 /* Compare mode: fork the session per agent, run `prompt` on each.
  * JSON: {"ok":true,"branches":[{"agent":"...","session_id":N,

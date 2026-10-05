@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use chorus_acp::codex::{AgentEvent, CodexAgent, CodexConfig, TurnOutcome};
 pub use chorus_acp::codex::{Permission, PermissionAsk};
 use chorus_core::checkpoint::Checkpoint;
+use chorus_core::attachments::{self, Attachment};
 use chorus_core::compaction;
 use chorus_core::context::{AssembleInput, Assembler, Budget, TurnItem};
 use chorus_core::handoff::{Brief, BriefInput, HandoffMeta, HandoffReason};
@@ -18,6 +19,7 @@ use chorus_core::mcp::McpServer;
 use chorus_core::projector::{self, AgentFile, Drift, Projection};
 use chorus_acp::sandbox;
 use chorus_core::mcp_config;
+use chorus_core::integration_catalog;
 use chorus_core::skills;
 use chorus_core::render::ContextItem;
 use chorus_core::tokens::{CachedCounter, HeuristicCounter};
@@ -345,7 +347,7 @@ impl Session {
         let user = actor::intern(store.conn(), "user", "human")?;
         let sess = ledger::new_session(store.conn(), title, &cwd.to_string_lossy())?;
         let (checkpoint, base_ckpt) = open_checkpoint(&cwd);
-        let mcp = McpServer::start(&db.to_string_lossy()).ok();
+        let mcp = McpServer::start_for_session(&db.to_string_lossy(), sess).ok();
         Ok(Self {
             store,
             sess,
@@ -376,7 +378,7 @@ impl Session {
         let user = actor::intern(store.conn(), "user", "human")?;
         let cwd = PathBuf::from(cwd);
         let (checkpoint, base_ckpt) = open_checkpoint(&cwd);
-        let mcp = McpServer::start(&db.to_string_lossy()).ok();
+        let mcp = McpServer::start_for_session(&db.to_string_lossy(), session_id).ok();
         Ok(Self {
             store,
             sess: session_id,
@@ -390,6 +392,33 @@ impl Session {
             mcp,
             memory: None,
         })
+    }
+
+    pub fn import_attachment(
+        &self,
+        name: &str,
+        media_type: Option<&str>,
+        bytes: &[u8],
+        derived_text: Option<&str>,
+        normalized_image: Option<(&str, &[u8])>,
+    ) -> Result<Attachment> {
+        Ok(attachments::import_staged_prepared(
+            self.store.conn(),
+            self.sess,
+            name,
+            media_type,
+            bytes,
+            derived_text,
+            normalized_image,
+        )?)
+    }
+
+    pub fn list_attachments(&self) -> Result<Vec<Attachment>> {
+        Ok(attachments::list(self.store.conn(), self.sess)?)
+    }
+
+    pub fn delete_attachment(&self, id: i64) -> Result<()> {
+        Ok(attachments::delete(self.store.conn(), self.sess, id)?)
     }
 
     /// Force one ACP command for every agent (tests, or a pinned install).
@@ -550,6 +579,19 @@ impl Session {
         user_text: &str,
         policy: Policy,
     ) -> Result<TurnReport> {
+        self.run_turn_with_attachments(agent_name, provider, user_text, policy, &[])
+    }
+
+    /// Submit a user turn with staged session attachments, preserving the
+    /// text-only entry point for existing callers.
+    pub fn run_turn_with_attachments(
+        &mut self,
+        agent_name: &str,
+        provider: &str,
+        user_text: &str,
+        policy: Policy,
+        attachment_ids: &[i64],
+    ) -> Result<TurnReport> {
         let agent_actor = actor::intern(self.store.conn(), agent_name, provider)?;
         let has_history = !ledger::history(self.store.conn(), self.sess, 1)?.is_empty();
 
@@ -565,12 +607,14 @@ impl Session {
             user_text.to_string()
         };
 
-        let user_seq = ledger::append(
-            self.store.conn(),
-            &NewEvent::new(self.sess, EventKind::Msg, self.user, user_text),
-        )?;
+        let event = NewEvent::new(self.sess, EventKind::Msg, self.user, user_text);
+        let user_seq = if attachment_ids.is_empty() {
+            ledger::append(self.store.conn(), &event)?
+        } else {
+            attachments::link_to_event(self.store.conn_mut(), self.sess, &event, attachment_ids)?
+        };
         let bridge = self.resolve_bridge(agent_name, &[]);
-        let outcome = self.one_turn(agent_name, &bridge, &prompt, policy)?;
+        let outcome = self.one_turn(agent_name, &bridge, &prompt, policy, attachment_ids)?;
         let agent_seqs = self.persist_outcome(&outcome, agent_actor, user_seq)?;
 
         Ok(TurnReport {
@@ -641,7 +685,7 @@ impl Session {
 
         // Verify + Resume: the incoming agent's first turn is the brief.
         let bridge = self.resolve_bridge(to, &[]);
-        let outcome = self.one_turn(to, &bridge, &brief.render_markdown(), policy)?;
+        let outcome = self.one_turn(to, &bridge, &brief.render_markdown(), policy, &[])?;
         let agent_seqs = self.persist_outcome(&outcome, to_actor, handoff_seq)?;
 
         Ok(HandoffResult {
@@ -707,6 +751,16 @@ impl Session {
         user_text: &str,
         policy: Policy,
     ) -> Result<RelayReport> {
+        self.run_relay_with_attachments(chain, user_text, policy, &[])
+    }
+
+    pub fn run_relay_with_attachments(
+        &mut self,
+        chain: &[AgentSpec],
+        user_text: &str,
+        policy: Policy,
+        attachment_ids: &[i64],
+    ) -> Result<RelayReport> {
         let first = chain.first().context("relay chain is empty")?;
         chorus_acp::reset_cancel();
         let saved_bridge = self.forced_bridge.clone();
@@ -715,7 +769,13 @@ impl Session {
         let mut handoffs = Vec::new();
 
         let result: Result<RelayReport> =
-            match self.run_turn(&first.name, &first.provider, user_text, policy) {
+            match self.run_turn_with_attachments(
+                &first.name,
+                &first.provider,
+                user_text,
+                policy,
+                attachment_ids,
+            ) {
                 Ok(turn) if !is_transient_stop(&turn.stop_reason) => {
                     crate::limits::clear(&first.name);
                     Ok(RelayReport {
@@ -1123,6 +1183,7 @@ impl Session {
         bridge: &[String],
         text: &str,
         policy: Policy,
+        attachment_ids: &[i64],
     ) -> Result<TurnOutcome> {
         let log = self.log_permissions;
         let mut decide = |ask: &PermissionAsk| {
@@ -1156,7 +1217,14 @@ impl Session {
             .restrictive()
             .then(|| self.snapshot("read-only guard").ok())
             .flatten();
-        let out = self.one_turn_decide(agent_name, bridge, text, policy.mode_id(), &mut decide);
+        let out = self.one_turn_decide(
+            agent_name,
+            bridge,
+            text,
+            policy.mode_id(),
+            attachment_ids,
+            &mut decide,
+        );
         if let Some(base) = guard {
             self.revert_if_touched(agent_name, &base)?;
         }
@@ -1203,6 +1271,7 @@ impl Session {
         bridge: &[String],
         text: &str,
         mode: &str,
+        attachment_ids: &[i64],
         decide: &mut dyn FnMut(&PermissionAsk) -> Permission,
     ) -> Result<TurnOutcome> {
         self.project_memory(agent_name);
@@ -1211,10 +1280,15 @@ impl Session {
         // `.chorus/mcp.json` rather than from each CLI's own config — that is
         // the whole point: declare a server once, and Claude and Codex both
         // have it, with no per-agent file to keep in step.
-        let mut servers: Vec<serde_json::Value> = mcp_config::load(&self.cwd)
-            .into_iter()
-            .map(|s| s.entry)
-            .collect();
+        let catalog_mcp = integration_catalog::project_mcp(&self.cwd)
+            .context("load enabled catalog MCP tools")?;
+        let composed = mcp_config::compose_catalog(&self.cwd, &catalog_mcp);
+        anyhow::ensure!(
+            composed.collisions.is_empty(),
+            "catalog MCP server name conflicts with project configuration: {}",
+            composed.collisions.join(", ")
+        );
+        let mut servers: Vec<serde_json::Value> = composed.servers.into_iter().map(|s| s.entry).collect();
         if let Some(m) = &self.mcp {
             servers.push(m.mcp_server_entry());
         }
@@ -1238,6 +1312,18 @@ impl Session {
             }
         };
 
+        let mut env = crate::accounts::env_for(agent_name);
+        let cli_paths = integration_catalog::cli_paths_for(&self.cwd)
+            .context("load enabled catalog CLI tools")?;
+        if !cli_paths.is_empty() {
+            let mut paths = cli_paths;
+            if let Some(existing) = std::env::var_os("PATH") {
+                paths.extend(std::env::split_paths(&existing));
+            }
+            let joined = std::env::join_paths(paths).context("compose managed tool PATH")?;
+            env.retain(|(name, _)| name != "PATH");
+            env.push(("PATH".to_string(), joined.to_string_lossy().into_owned()));
+        }
         let cfg = CodexConfig {
             command,
             mcp_servers,
@@ -1245,7 +1331,7 @@ impl Session {
             model: self.model_pin(agent_name),
             log: acp_log(),
             // `codex@work` runs the same CLI with its own CODEX_HOME.
-            env: crate::accounts::env_for(agent_name),
+            env,
         };
         let mut agent =
             CodexAgent::start(&self.cwd, cfg).with_context(|| format!("start {agent_name}"))?;
@@ -1266,7 +1352,77 @@ impl Session {
                 (None, None) => {}
             }
         }
-        agent.prompt(text, decide).context("agent turn")
+        let mut prompt_text = text.to_string();
+        let instructions = integration_catalog::project_instructions(&self.cwd)
+            .context("load enabled catalog instructions")?;
+        if !instructions.is_empty() {
+            prompt_text.push_str("\n\nEnabled Chorus tool guidance:\n");
+            for instruction in instructions {
+                prompt_text.push_str("- ");
+                prompt_text.push_str(&instruction);
+                prompt_text.push('\n');
+            }
+        }
+        let available: Vec<_> = attachments::list(self.store.conn(), self.sess)?
+            .into_iter()
+            .filter(|a| a.status == "sent")
+            .collect();
+        if !available.is_empty() {
+            prompt_text.push_str("\n\nSession files available through Chorus MCP tools attachment_list and attachment_read:\n");
+            for a in &available {
+                let safe_name: String = a.name.chars().filter(|c| !c.is_control()).collect();
+                prompt_text.push_str(&format!("- id {}: {} ({}, {} bytes)\n", a.id, safe_name, a.media_type, a.size));
+            }
+            prompt_text.push_str("Open older files only when needed; a listed name is not the file content.\n");
+        }
+        let mut blocks = vec![serde_json::json!({ "type": "text", "text": prompt_text })];
+        for id in attachment_ids {
+            let (meta, bytes, mime) =
+                attachments::get_for_agent(self.store.conn(), self.sess, *id)?;
+            if mime.starts_with("image/") {
+                anyhow::ensure!(
+                    agent.supports_image_prompt(),
+                    "{agent_name} does not advertise image input for {}",
+                    meta.name
+                );
+                blocks.push(serde_json::json!({
+                    "type": "image",
+                    "mimeType": mime,
+                    "data": attachments::encode_base64(&bytes),
+                }));
+            } else if mime.starts_with("text/")
+                || mime == "application/json"
+                || mime.ends_with("+json")
+                || mime.ends_with("+xml")
+            {
+                let content = String::from_utf8(bytes)
+                    .with_context(|| format!("attachment {} is not valid UTF-8", meta.name))?;
+                if content.chars().count() <= 12_000 && agent.supports_embedded_context() {
+                    blocks.push(serde_json::json!({
+                        "type": "resource",
+                        "resource": {
+                            "uri": format!("chorus://attachment/{}", meta.id),
+                            "mimeType": mime,
+                            "text": content,
+                        }
+                    }));
+                } else {
+                    let excerpt: String = content.chars().take(12_000).collect();
+                    let suffix = if excerpt.chars().count() < content.chars().count() {
+                        "\n[Excerpt only. Use Chorus attachment_read with offset_chars to read the rest.]"
+                    } else {
+                        ""
+                    };
+                    blocks.push(serde_json::json!({
+                        "type": "text",
+                        "text": format!("Attachment {} (id {}):\n{}{}", meta.name, meta.id, excerpt, suffix),
+                    }));
+                }
+            } else {
+                anyhow::bail!("attachment {} ({mime}) is not readable by this agent", meta.name);
+            }
+        }
+        agent.prompt_blocks(blocks, decide).context("agent turn")
     }
 
     /// Like [`run_turn`], but each permission request is put to `decide`
@@ -1277,6 +1433,17 @@ impl Session {
         agent_name: &str,
         provider: &str,
         user_text: &str,
+        decide: &mut dyn FnMut(&PermissionAsk) -> Permission,
+    ) -> Result<TurnReport> {
+        self.run_turn_decide_with_attachments(agent_name, provider, user_text, &[], decide)
+    }
+
+    pub fn run_turn_decide_with_attachments(
+        &mut self,
+        agent_name: &str,
+        provider: &str,
+        user_text: &str,
+        attachment_ids: &[i64],
         decide: &mut dyn FnMut(&PermissionAsk) -> Permission,
     ) -> Result<TurnReport> {
         let agent_actor = actor::intern(self.store.conn(), agent_name, provider)?;
@@ -1290,10 +1457,12 @@ impl Session {
         } else {
             user_text.to_string()
         };
-        let user_seq = ledger::append(
-            self.store.conn(),
-            &NewEvent::new(self.sess, EventKind::Msg, self.user, user_text),
-        )?;
+        let event = NewEvent::new(self.sess, EventKind::Msg, self.user, user_text);
+        let user_seq = if attachment_ids.is_empty() {
+            ledger::append(self.store.conn(), &event)?
+        } else {
+            attachments::link_to_event(self.store.conn_mut(), self.sess, &event, attachment_ids)?
+        };
         let bridge = self.resolve_bridge(agent_name, &[]);
 
         // A dialog the agent never opens protects nothing. Codex writes files
@@ -1324,6 +1493,7 @@ impl Session {
             &bridge,
             &prompt,
             Policy::ReadOnly.mode_id(),
+            attachment_ids,
             &mut watch,
         )?;
         // Two ways this turn breaks the promise the dialog makes. The user said

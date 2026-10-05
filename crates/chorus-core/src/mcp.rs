@@ -20,7 +20,7 @@
 //! the queue. In `read-only` mode the call is still gated through our
 //! permission engine first (`--yes` to allow) — that's the design working.
 
-use crate::{memory, Result, Store};
+use crate::{attachments, memory, Result, Store};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -39,6 +39,16 @@ impl McpServer {
     /// Bind to an ephemeral localhost port and start serving. `db_path` is
     /// the same store the session uses; the server opens its own connection.
     pub fn start(db_path: &str) -> Result<Self> {
+        Self::start_scoped(db_path, None)
+    }
+
+    /// Start an MCP server with an app-supplied attachment session scope.
+    /// Scope is never accepted from tool arguments.
+    pub fn start_for_session(db_path: &str, session_id: i64) -> Result<Self> {
+        Self::start_scoped(db_path, Some(session_id))
+    }
+
+    fn start_scoped(db_path: &str, session_scope: Option<i64>) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
@@ -47,6 +57,7 @@ impl McpServer {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
         let db = db_path.to_string();
+        let scope = session_scope;
 
         let handle = std::thread::spawn(move || {
             while !stop_thread.load(Ordering::Relaxed) {
@@ -59,7 +70,7 @@ impl McpServer {
                         let stop = stop_thread.clone();
                         std::thread::spawn(move || {
                             if let Ok(store) = Store::open(std::path::Path::new(&db)) {
-                                let _ = handle_conn(stream, store.conn(), &stop);
+                                let _ = handle_conn(stream, store.conn(), &stop, scope);
                             }
                         });
                     }
@@ -130,6 +141,7 @@ fn handle_conn(
     mut stream: TcpStream,
     conn: &rusqlite::Connection,
     stop: &AtomicBool,
+    session_scope: Option<i64>,
 ) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(IDLE_TIMEOUT))?;
@@ -223,7 +235,7 @@ fn handle_conn(
         debug_log("in", &String::from_utf8_lossy(&body));
 
         let req: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        let resp = dispatch(&req, conn);
+        let resp = dispatch(&req, conn, session_scope);
         if resp.is_null() {
             // A notification — no body, keep the connection open.
             write_raw(
@@ -244,7 +256,7 @@ fn write_raw(stream: &mut TcpStream, head: &str, body: &[u8]) -> std::io::Result
     stream.flush()
 }
 
-fn dispatch(req: &Value, conn: &rusqlite::Connection) -> Value {
+fn dispatch(req: &Value, conn: &rusqlite::Connection, session_scope: Option<i64>) -> Value {
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
 
@@ -255,8 +267,18 @@ fn dispatch(req: &Value, conn: &rusqlite::Connection) -> Value {
             "capabilities": { "tools": {} }
         })),
         "notifications/initialized" | "notifications/cancelled" => return Value::Null,
-        "tools/list" => Ok(json!({ "tools": [ propose_tool_schema() ] })),
-        "tools/call" => call_tool(req.get("params").unwrap_or(&Value::Null), conn),
+        "tools/list" => {
+            let mut tools = vec![propose_tool_schema()];
+            if session_scope.is_some() {
+                tools.extend([attachment_list_schema(), attachment_read_schema()]);
+            }
+            Ok(json!({ "tools": tools }))
+        }
+        "tools/call" => call_tool(
+            req.get("params").unwrap_or(&Value::Null),
+            conn,
+            session_scope,
+        ),
         other => Err(format!("unknown method {other}")),
     };
 
@@ -286,12 +308,64 @@ fn propose_tool_schema() -> Value {
     })
 }
 
-fn call_tool(params: &Value, conn: &rusqlite::Connection) -> std::result::Result<Value, String> {
+fn call_tool(
+    params: &Value,
+    conn: &rusqlite::Connection,
+    session_scope: Option<i64>,
+) -> std::result::Result<Value, String> {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+    let args = params.get("arguments").cloned().unwrap_or(Value::Null);
+    if name == "attachment_list" {
+        let sess = session_scope.ok_or("attachment access is unavailable")?;
+        let entries = attachments::list(conn, sess).map_err(|e| e.to_string())?;
+        let value: Vec<Value> = entries.iter().map(|a| json!({"id":a.id,"name":a.name,"mediaType":a.media_type,"size":a.size,"status":a.status,"messageEvent":a.event_seq})).collect();
+        return Ok(
+            json!({"content":[{"type":"text","text":serde_json::to_string_pretty(&value).unwrap_or_default()}]}),
+        );
+    }
+    if name == "attachment_read" {
+        let sess = session_scope.ok_or("attachment access is unavailable")?;
+        let id = args
+            .get("attachment_id")
+            .and_then(Value::as_i64)
+            .ok_or("attachment_id is required")?;
+        let limit = args
+            .get("max_chars")
+            .and_then(Value::as_u64)
+            .unwrap_or(12000)
+            .min(12000) as usize;
+        if limit == 0 {
+            return Err("max_chars must be at least 1".into());
+        }
+        let offset = match args.get("offset_chars").and_then(Value::as_i64) {
+            Some(value) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
+            Some(_) => return Err("offset_chars must be nonnegative".into()),
+            None => 0,
+        };
+        let (meta, bytes, mime) =
+            attachments::get_for_agent(conn, sess, id).map_err(|e| e.to_string())?;
+        let block = if mime.starts_with("image/") {
+            if offset != 0 {
+                return Err("offset_chars is only valid for text attachments".into());
+            }
+            json!({"type":"image","data":attachments::encode_base64(&bytes),"mimeType":mime})
+        } else {
+            let text = String::from_utf8(bytes)
+                .map_err(|_| "attachment is binary and cannot be returned as text")?;
+            let total = text.chars().count();
+            let start = offset.min(total);
+            let excerpt: String = text.chars().skip(start).take(limit).collect();
+            let end = start + excerpt.chars().count();
+            let next_offset = (end < total).then_some(end);
+            let next_offset =
+                next_offset.map_or_else(|| "none".to_string(), |value| value.to_string());
+            json!({"type":"text","text":format!("Attachment {} ({}); characters {}–{} of {}; next_offset_chars={}\n{}",meta.name,mime,start,end,total,next_offset,excerpt)})
+        };
+        return Ok(json!({"content":[block]}));
+    }
     if name != "memory_propose" {
         return Err(format!("no tool {name}"));
     }
-    let args = params.get("arguments").cloned().unwrap_or(Value::Null);
     let text = args
         .get("text")
         .and_then(Value::as_str)
@@ -307,6 +381,14 @@ fn call_tool(params: &Value, conn: &rusqlite::Connection) -> std::result::Result
         })),
         Err(e) => Err(e.to_string()),
     }
+}
+
+fn attachment_list_schema() -> Value {
+    json!({"name":"attachment_list","description":"List attachments belonging to this Chorus session. Deleted attachments are listed as tombstones and cannot be read.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}})
+}
+
+fn attachment_read_schema() -> Value {
+    json!({"name":"attachment_read","description":"Read prepared content or original content for one live attachment in this Chorus session. Text output is bounded to 12,000 characters per call; use offset_chars and next_offset_chars to continue. Images are returned as image content.","inputSchema":{"type":"object","properties":{"attachment_id":{"type":"integer"},"max_chars":{"type":"integer","minimum":1,"maximum":12000},"offset_chars":{"type":"integer","minimum":0}},"required":["attachment_id"],"additionalProperties":false}})
 }
 
 fn write_http(stream: &mut TcpStream, status: u16, body: &Value) -> std::io::Result<()> {

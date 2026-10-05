@@ -224,6 +224,14 @@ pub fn delete_session(c: &Connection, sess: i64) -> Result<()> {
     }
     c.execute_batch("BEGIN")?;
     let r = (|| -> Result<()> {
+        // Attachment links reference events, so clear this session's links
+        // and metadata before deleting the event rows they point at.
+        c.execute(
+            "DELETE FROM attachment_event WHERE attachment_id IN (SELECT id FROM attachment WHERE sess = ?1)",
+            [sess],
+        )?;
+        c.execute("DELETE FROM attachment_access WHERE sess = ?1", [sess])?;
+        c.execute("DELETE FROM attachment WHERE sess = ?1", [sess])?;
         c.execute(
             "DELETE FROM summary WHERE seq IN (SELECT seq FROM event WHERE sess = ?1)",
             [sess],

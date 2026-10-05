@@ -1,7 +1,17 @@
 import SwiftUI
+import UniformTypeIdentifiers
+
+struct DraftAttachment: Identifiable, Equatable {
+    let id: Int64
+    let name: String
+    let mediaType: String
+    let size: Int64
+    let agentReadable: Bool
+}
 
 final class DraftBox: ObservableObject {
     @Published var text = ""
+    @Published var attachments: [DraftAttachment] = []
 }
 
 /// One row of the `/` or `@` popup.
@@ -74,11 +84,16 @@ struct ComposerField: View {
     @ObservedObject var box: DraftBox
     let suggestions: (_ trigger: Character, _ query: String) -> [Suggestion]
     let onSubmit: () -> Void
+    var onImportURLs: ([URL]) -> Void = { _ in }
+    var onPasteImage: (Data, String) -> Void = { _, _ in }
+    var onRemoveAttachment: (Int64) -> Void = { _ in }
     var placeholder = "ขอให้ทำอะไร… ( / คำสั่ง · @ ไฟล์หรือเอเจนต์ )"
 
     @AppStorage("chorus.enterSends") private var enterSends = true
     @State private var selected = 0
     @State private var dismissed = false
+    @State private var showingImporter = false
+    @State private var dropTargeted = false
     @FocusState private var focused: Bool
 
     /// The token under completion: `/xyz` at the very start, or the last
@@ -105,6 +120,7 @@ struct ComposerField: View {
         let list = items
         VStack(alignment: .leading, spacing: 4) {
             if !list.isEmpty { popup(list) }
+            if !box.attachments.isEmpty { attachmentChips }
             ZStack(alignment: .topLeading) {
                 if box.text.isEmpty {
                     Text(placeholder).foregroundStyle(.tertiary)
@@ -121,9 +137,122 @@ struct ComposerField: View {
                         handle(press, list)
                     }
             }
+            .overlay {
+                if dropTargeted {
+                    RoundedRectangle(cornerRadius: 7)
+                        .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                        .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+                        .allowsHitTesting(false)
+                }
+            }
+            .onDrop(of: [UTType.fileURL, UTType.url, UTType.image], isTargeted: $dropTargeted, perform: receiveDrop)
+            .onPasteCommand(of: [.image, .fileURL, .url], perform: receivePaste)
+            HStack(spacing: 8) {
+                Button { showingImporter = true } label: {
+                    Label("Add attachment", systemImage: "paperclip")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Attach files or images")
+                .accessibilityHint("Choose files to attach to this message")
+                Spacer(minLength: 0)
+                if box.attachments.isEmpty {
+                    Text("Drop files or paste an image")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
+                }
+            }
+        }
+        .fileImporter(isPresented: $showingImporter, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+            if case let .success(urls) = result, !urls.isEmpty { onImportURLs(urls) }
         }
         .onChange(of: box.text) { _, _ in selected = 0; dismissed = false }
         .onAppear { focused = true }
+    }
+
+    private var attachmentChips: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 6) {
+                ForEach(box.attachments) { attachment in
+                    HStack(spacing: 6) {
+                        Image(systemName: attachment.mediaType.hasPrefix("image/") ? "photo" : "doc")
+                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(attachment.name).lineLimit(1)
+                            Text("\(ByteCountFormatter.string(fromByteCount: attachment.size, countStyle: .file)) · \(attachment.mediaType)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        if !attachment.agentReadable {
+                            Image(systemName: "exclamationmark.circle")
+                                .foregroundStyle(.secondary)
+                                .help("This file is stored with the session but is not currently readable by the agent")
+                        }
+                        Button {
+                            onRemoveAttachment(attachment.id)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.tertiary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Remove \(attachment.name)")
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel("\(attachment.name), \(ByteCountFormatter.string(fromByteCount: attachment.size, countStyle: .file)), \(attachment.mediaType), \(attachment.agentReadable ? "agent readable" : "not agent readable")")
+                }
+            }
+        }
+        .scrollIndicators(.hidden)
+        .frame(maxHeight: 48)
+    }
+
+    private func receiveDrop(_ providers: [NSItemProvider]) -> Bool {
+        var handled = false
+        for provider in providers {
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+                || provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
+                handled = true
+                let type = provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+                    ? UTType.fileURL.identifier : UTType.url.identifier
+                provider.loadItem(forTypeIdentifier: type, options: nil) { item, _ in
+                    let url = (item as? URL) ?? (item as? NSURL).map { $0 as URL } ?? (item as? Data).flatMap { URL(dataRepresentation: $0, relativeTo: nil) }
+                    if let url { DispatchQueue.main.async { self.onImportURLs([url]) } }
+                }
+            } else if let imageType = provider.registeredTypeIdentifiers.first(where: { UTType($0)?.conforms(to: .image) == true }) {
+                handled = true
+                provider.loadDataRepresentation(forTypeIdentifier: imageType) { data, _ in
+                    guard let data else { return }
+                    let mime = UTType(imageType)?.preferredMIMEType ?? "application/octet-stream"
+                    DispatchQueue.main.async { self.onPasteImage(data, mime) }
+                }
+            }
+        }
+        return handled
+    }
+
+    private func receivePaste(_ providers: [NSItemProvider]) {
+        for provider in providers {
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+                || provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
+                let type = provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+                    ? UTType.fileURL.identifier : UTType.url.identifier
+                provider.loadItem(forTypeIdentifier: type, options: nil) { item, _ in
+                    let url = (item as? URL) ?? (item as? NSURL).map { $0 as URL } ?? (item as? Data).flatMap { URL(dataRepresentation: $0, relativeTo: nil) }
+                    if let url { DispatchQueue.main.async { self.onImportURLs([url]) } }
+                }
+                continue
+            }
+            guard let imageType = provider.registeredTypeIdentifiers.first(where: { UTType($0)?.conforms(to: .image) == true }) else { continue }
+            provider.loadDataRepresentation(forTypeIdentifier: imageType) { data, _ in
+                guard let data else { return }
+                let mime = UTType(imageType)?.preferredMIMEType ?? "application/octet-stream"
+                DispatchQueue.main.async { self.onPasteImage(data, mime) }
+            }
+        }
     }
 
     private func handle(_ press: KeyPress, _ list: [Suggestion]) -> KeyPress.Result {

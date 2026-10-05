@@ -1,5 +1,8 @@
 import CChorus
+import AppKit
 import Foundation
+import PDFKit
+import UniformTypeIdentifiers
 
 /// A ledger event as the shell sees it. Mirrors the FFI JSON.
 struct LedgerEvent: Codable, Identifiable, Hashable {
@@ -8,6 +11,21 @@ struct LedgerEvent: Codable, Identifiable, Hashable {
     let actor: String
     let body: String
     var id: Int64 { seq }
+}
+
+struct SessionAttachment: Decodable, Identifiable, Hashable {
+    let id: Int64
+    let name: String
+    let media_type: String
+    let size: Int64
+    let status: String
+    let readable: Bool
+    let event_seq: Int64?
+}
+
+private struct SessionAttachmentList: Decodable {
+    let ok: Bool
+    let attachments: [SessionAttachment]?
 }
 
 struct TurnResult: Codable {
@@ -31,6 +49,74 @@ struct SimpleResult: Codable {
     let error: String?
 }
 
+private struct ImportedAttachmentResult: Decodable {
+    struct Item: Decodable {
+        let id: Int64
+        let name: String
+        let media_type: String
+        let size: Int64
+        let readable: Bool
+    }
+    let ok: Bool
+    let attachment: Item?
+    let error: String?
+}
+
+private struct CatalogPlanResult: Decodable {
+    let ok: Bool
+    let error: String?
+    let plan: InstallPlan?
+}
+
+private struct DashboardResult: Decodable {
+    let ok: Bool
+    let error: String?
+    let dashboard: ToolDashboard?
+}
+
+private struct CatalogProgressResult: Decodable {
+    let progress: CatalogProgress?
+}
+
+private struct CatalogListResult: Decodable {
+    struct Entry: Decodable {
+        struct Installed: Decodable {
+            struct Health: Decodable { let healthy: Bool; let detail: String }
+            let version: String
+            let artifact_integrity: String?
+            let health: Health
+        }
+        let id: String
+        let title: String
+        let source: String
+        let maintainer: String
+        let license: String
+        let reviewed_version: String
+        let modes: [String]
+        let required_runtimes: [String]
+        let actions: [String]
+        let project_access: [String]
+        let network: String
+        let secret_names: [String]
+        let installed: Installed?
+        let enabled: Bool
+        let can_remove: Bool
+        let missing_installer: String?
+        let brew_formula: String?
+        let installed_method: String?
+    }
+    let ok: Bool
+    let entries: [Entry]?
+    let error: String?
+}
+
+private struct RouterModelsResult: Decodable {
+    struct Item: Decodable { let name: String }
+    let ok: Bool
+    let models: [Item]?
+    let error: String?
+}
+
 struct HandoffResult: Codable {
     let ok: Bool
     let handoff_seq: Int64?
@@ -47,6 +133,7 @@ struct HandoffResult: Codable {
 @MainActor
 final class Engine: ObservableObject {
     @Published var events: [LedgerEvent] = []
+    @Published var attachments: [SessionAttachment] = []
     @Published var busy = false
     @Published var lastError: String?
     @Published var sessionID: Int64 = -1
@@ -86,6 +173,23 @@ final class Engine: ObservableObject {
     /// pickers stayed empty or stale until the agent finished — the main
     /// reason the window felt like it wasn't responding.
     private let ioQueue = DispatchQueue(label: "chorus.io", qos: .userInitiated, attributes: .concurrent)
+    private let catalogQueue = DispatchQueue(label: "chorus.catalog", qos: .utility)
+    private let routerSetupQueue = DispatchQueue(label: "chorus.routerSetup", qos: .utility)
+    @Published var catalog: [CatalogIntegration] = []
+    @Published var catalogError: String?
+    @Published var catalogActionError: String?
+    @Published var catalogActionResult: CatalogActionResult?
+    @Published var catalogWorking: Set<String> = []
+    @Published var catalogBackgroundStatus: String?
+    @Published var catalogProgress: CatalogProgress?
+    /// An integration another screen wants the install sheet opened for.
+    @Published var requestedInstall: String?
+    private var catalogProgressTimer: Timer?
+    @Published var routerModels: [String]?
+    @Published var routerChecking = false
+    @Published var routerDownloading = false
+    @Published var routerSetupError: String?
+    private var ollamaProcess: Process?
     /// Pending warm-tier pass; cancelled whenever the user sends something,
     /// so compaction never makes a new message wait.
     private var compactWork: DispatchWorkItem?
@@ -122,6 +226,7 @@ final class Engine: ObservableObject {
         queue.async { [weak self] in
             let h = make()
             let eventsJSON = h.map { Self.string(from: chorus_transcript_json($0)) } ?? ""
+            let attachmentsJSON = h.map { Self.string(from: chorus_list_attachments($0)) } ?? ""
             if let old { chorus_engine_free(old.raw) }
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -138,6 +243,7 @@ final class Engine: ObservableObject {
                 self.handle = Handle(raw: h)
                 self.sessionID = chorus_engine_session_id(h)
                 self.events = Self.decode([LedgerEvent].self, eventsJSON) ?? []
+                self.attachments = Self.decode(SessionAttachmentList.self, attachmentsJSON)?.attachments ?? []
                 self.refresh()
             }
         }
@@ -149,6 +255,7 @@ final class Engine: ObservableObject {
         handle = nil
         sessionID = -1
         events = []
+        attachments = []
         queue.async { chorus_engine_free(old.raw) }
     }
 
@@ -282,12 +389,349 @@ final class Engine: ObservableObject {
         _ = Self.string(from: chorus_cancel())
     }
 
+    /// Copy a selected file into the session immediately. PDF text and image
+    /// normalization stay local; the original bytes remain in the session.
+    func importFile(_ url: URL, completion: @escaping (DraftAttachment?, String?) -> Void) {
+        guard let h = handle else { completion(nil, "เปิดเซสชันก่อนแนบไฟล์"); return }
+        queue.async {
+            let access = url.startAccessingSecurityScopedResource()
+            defer { if access { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+                guard values.isRegularFile == true else { throw ImportError.message("เลือกได้เฉพาะไฟล์") }
+                guard (values.fileSize ?? 0) <= 20 * 1024 * 1024 else {
+                    throw ImportError.message("ไฟล์หนึ่งต้องไม่เกิน 20 MB")
+                }
+                let bytes = try Data(contentsOf: url, options: .mappedIfSafe)
+                let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+                let prepared = Self.prepareAttachment(bytes, mime: mime, filename: url.lastPathComponent)
+                let json = Self.callImport(h.raw, name: url.lastPathComponent, mime: mime,
+                                           bytes: bytes, derivedText: prepared.text,
+                                           normalized: prepared.image, normalizedMime: prepared.imageMime)
+                let result = Self.decode(ImportedAttachmentResult.self, json)
+                DispatchQueue.main.async {
+                    if let item = result?.attachment, result?.ok == true {
+                        completion(DraftAttachment(id: item.id, name: item.name, mediaType: item.media_type,
+                                                   size: item.size, agentReadable: item.readable), nil)
+                    } else { completion(nil, result?.error ?? "แนบไฟล์ไม่สำเร็จ") }
+                }
+            } catch {
+                DispatchQueue.main.async { completion(nil, error.localizedDescription) }
+            }
+        }
+    }
+
+    func importImage(_ data: Data, mime: String, completion: @escaping (DraftAttachment?, String?) -> Void) {
+        guard let h = handle else { completion(nil, "เปิดเซสชันก่อนแนบรูป"); return }
+        queue.async {
+            let prepared = Self.prepareAttachment(data, mime: mime, filename: "pasted-image.png")
+            let json = Self.callImport(h.raw, name: "pasted-image.png", mime: mime, bytes: data,
+                                       derivedText: nil, normalized: prepared.image, normalizedMime: prepared.imageMime)
+            let result = Self.decode(ImportedAttachmentResult.self, json)
+            DispatchQueue.main.async {
+                if let item = result?.attachment, result?.ok == true {
+                    completion(DraftAttachment(id: item.id, name: item.name, mediaType: item.media_type,
+                                               size: item.size, agentReadable: item.readable), nil)
+                } else { completion(nil, result?.error ?? "แนบรูปไม่สำเร็จ") }
+            }
+        }
+    }
+
+    func deleteAttachment(_ id: Int64) {
+        guard let h = handle else { return }
+        queue.async { [weak self] in
+            let json = Self.string(from: chorus_delete_attachment(h.raw, id))
+            let result = Self.decode(SimpleResult.self, json)
+            DispatchQueue.main.async {
+                if result?.ok != true { self?.lastError = result?.error ?? "ลบไฟล์ไม่ได้" }
+                self?.loadAttachments()
+            }
+        }
+    }
+
+    func loadAttachments() {
+        guard let h = handle else { return }
+        queue.async { [weak self] in
+            let json = Self.string(from: chorus_list_attachments(h.raw))
+            let rows = Self.decode(SessionAttachmentList.self, json)?.attachments
+            DispatchQueue.main.async { if let rows { self?.attachments = rows } }
+        }
+    }
+
+    private enum ImportError: LocalizedError {
+        case message(String)
+        var errorDescription: String? { if case .message(let value) = self { value } else { nil } }
+    }
+
+    nonisolated private static func prepareAttachment(_ bytes: Data, mime: String, filename: String)
+        -> (text: String?, image: Data?, imageMime: String?) {
+        if mime == "application/pdf" {
+            let text = PDFDocument(data: bytes)?.string
+            return (text?.isEmpty == false ? text : nil, nil, nil)
+        }
+        if mime.hasPrefix("image/") {
+            if mime == "image/png" || mime == "image/jpeg" { return (nil, nil, nil) }
+            let bitmap = NSBitmapImageRep(data: bytes)
+                ?? NSImage(data: bytes)?.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:))
+            return (nil, bitmap?.representation(using: .png, properties: [:]), "image/png")
+        }
+        let sourceExtensions: Set<String> = ["txt", "md", "json", "jsonl", "yaml", "yml", "toml", "xml", "csv", "tsv", "swift", "rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "kt", "c", "h", "cpp", "hpp", "css", "html", "sql", "sh", "zsh", "rb", "php", "svelte", "vue", "log"]
+        if mime.hasPrefix("text/") || sourceExtensions.contains(URL(fileURLWithPath: filename).pathExtension.lowercased()) {
+            return (String(data: bytes, encoding: .utf8), nil, nil)
+        }
+        return (nil, nil, nil)
+    }
+
+    nonisolated private static func callImport(_ h: OpaquePointer, name: String, mime: String,
+                                                bytes: Data, derivedText: String?, normalized: Data?,
+                                                normalizedMime: String?) -> String {
+        name.withCString { namePointer in
+            mime.withCString { mimePointer in
+                bytes.withUnsafeBytes { raw in
+                    let original = raw.bindMemory(to: UInt8.self).baseAddress
+                    return (derivedText ?? "").withCString { textPointer in
+                        (normalized ?? Data()).withUnsafeBytes { imageRaw in
+                            let image = imageRaw.bindMemory(to: UInt8.self).baseAddress
+                            return (normalizedMime ?? "").withCString { imageMimePointer in
+                                string(from: chorus_import_attachment(h, namePointer, mimePointer,
+                                    original, bytes.count, derivedText == nil ? nil : textPointer,
+                                    normalized == nil ? nil : image, normalized?.count ?? 0,
+                                    normalizedMime == nil ? nil : imageMimePointer))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    nonisolated private static func jsonIDs(_ ids: [Int64]) -> String {
+        guard let data = try? JSONEncoder().encode(ids), let text = String(data: data, encoding: .utf8) else { return "[]" }
+        return text
+    }
+
+    /// Router runs on the engine's independent I/O queue and receives only a
+    /// summary of this new message, never the session history or file bytes.
+    func proposeRoute(taskJSON: String, candidatesJSON: String, routerModel: String,
+                      completion: @escaping (String) -> Void) {
+        ioQueue.async {
+            let json = taskJSON.withCString { task in
+                candidatesJSON.withCString { candidates in
+                    routerModel.withCString { model in
+                        Self.string(from: chorus_route_json(task, candidates, model))
+                    }
+                }
+            }
+            DispatchQueue.main.async { completion(json) }
+        }
+    }
+
+    func loadCatalog(project: String, automaticUpdates: Bool = false) {
+        if automaticUpdates { catalogBackgroundStatus = "กำลังตรวจเวอร์ชันเครื่องมือผ่าน Homebrew…" }
+        catalogQueue.async { [weak self] in
+            func list() -> CatalogListResult? {
+                let json = project.withCString { Self.string(from: chorus_catalog_list_json($0)) }
+                return Self.decode(CatalogListResult.self, json)
+            }
+            var result = list()
+            var updateFailures: [String] = []
+            if automaticUpdates, let entries = result?.entries {
+                for entry in entries {
+                    guard let installed = entry.installed, entry.brew_formula != nil,
+                          installed.version.compare(entry.reviewed_version, options: .numeric) == .orderedAscending else { continue }
+                    DispatchQueue.main.async {
+                        self?.catalogBackgroundStatus = "Homebrew กำลังอัปเดต \(entry.title)…"
+                        self?.catalogWorking.insert(entry.id)
+                    }
+                    let json = project.withCString { path in
+                        entry.id.withCString { id in
+                            "update".withCString { action in
+                                Self.string(from: chorus_catalog_action_json(path, id, action))
+                            }
+                        }
+                    }
+                    if Self.decode(SimpleResult.self, json)?.ok != true {
+                        updateFailures.append(entry.title)
+                    }
+                    DispatchQueue.main.async { self?.catalogWorking.remove(entry.id) }
+                }
+                result = list()
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if automaticUpdates { self.catalogBackgroundStatus = nil }
+                if result?.ok == true, let entries = result?.entries {
+                    self.catalog = entries.compactMap { entry in
+                        guard let source = URL(string: entry.source) else { return nil }
+                        return CatalogIntegration(
+                            id: entry.id, title: entry.title, maintainer: entry.maintainer,
+                            license: entry.license, sourceURL: source,
+                            reviewedVersion: entry.reviewed_version, modes: entry.modes,
+                            requiredRuntimes: entry.required_runtimes, actions: entry.actions,
+                            projectAccess: entry.project_access, networkBehavior: entry.network,
+                            requiredSecretNames: entry.secret_names,
+                            installedVersion: entry.installed?.version,
+                            isHealthy: entry.installed?.health.healthy,
+                            healthMessage: entry.installed?.health.detail,
+                            integrity: entry.installed?.artifact_integrity,
+                            isEnabledForProject: entry.enabled,
+                            isWorking: self.catalogWorking.contains(entry.id),
+                            canRemove: entry.can_remove,
+                            missingInstaller: entry.missing_installer,
+                            brewFormula: entry.brew_formula,
+                            installedMethod: entry.installed_method)
+                    }
+                    self.catalogError = updateFailures.isEmpty ? nil
+                        : "อัปเดต \(updateFailures.joined(separator: ", ")) ไม่สำเร็จ"
+                } else { self.catalogError = result?.error ?? "โหลดรายการเครื่องมือไม่ได้" }
+            }
+        }
+    }
+
+    func loadDashboard(project: String, id: String, completion: @escaping (ToolDashboard?, String?) -> Void) {
+        catalogQueue.async {
+            let json = project.withCString { path in
+                id.withCString { Self.string(from: chorus_catalog_dashboard_json(path, $0)) }
+            }
+            let result = Self.decode(DashboardResult.self, json)
+            DispatchQueue.main.async { completion(result?.dashboard, result?.ok == true ? nil : (result?.error ?? "โหลดแดชบอร์ดไม่ได้")) }
+        }
+    }
+
+    func runCatalogAction(id: String, key: String, completion: @escaping (String?) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let json = id.withCString { identifier in
+                key.withCString { Self.string(from: chorus_catalog_run_json(identifier, $0)) }
+            }
+            let result = Self.decode(SimpleResult.self, json)
+            DispatchQueue.main.async { completion(result?.ok == true ? nil : (result?.error ?? "เปิดไม่ได้")) }
+        }
+    }
+
+    /// Ask the core what `action` would create or remove. Touches nothing.
+    func loadCatalogPlan(project: String, id: String, action: String,
+                         completion: @escaping (InstallPlan?, String?) -> Void) {
+        catalogQueue.async {
+            let json = project.withCString { path in
+                id.withCString { identifier in
+                    action.withCString { operation in
+                        Self.string(from: chorus_catalog_plan_json(path, identifier, operation))
+                    }
+                }
+            }
+            let result = Self.decode(CatalogPlanResult.self, json)
+            DispatchQueue.main.async { completion(result?.plan, result?.ok == true ? nil : (result?.error ?? "อ่านรายการไม่ได้")) }
+        }
+    }
+
+    private func pollCatalogProgress() {
+        catalogProgressTimer?.invalidate()
+        catalogProgressTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            // A separate queue: the action holds `catalogQueue` until it ends.
+            DispatchQueue.global(qos: .userInitiated).async {
+                let json = Self.string(from: chorus_catalog_progress_json())
+                let progress = Self.decode(CatalogProgressResult.self, json)?.progress
+                DispatchQueue.main.async { if progress != nil { self?.catalogProgress = progress } }
+            }
+        }
+    }
+
+    private func stopCatalogProgress() {
+        catalogProgressTimer?.invalidate()
+        catalogProgressTimer = nil
+        catalogProgress = nil
+    }
+
+    /// `action`: install, install_enable, update, remove, enable, disable.
+    func catalogAction(project: String, id: String, action: String) {
+        catalogActionError = nil
+        catalogActionResult = nil
+        catalogWorking.insert(id)
+        catalog = catalog.map { entry in
+            var entry = entry
+            if entry.id == id { entry.isWorking = true }
+            return entry
+        }
+        pollCatalogProgress()
+        catalogQueue.async { [weak self] in
+            let json = project.withCString { path in
+                id.withCString { identifier in
+                    action.withCString { operation in
+                        Self.string(from: chorus_catalog_action_json(path, identifier, operation))
+                    }
+                }
+            }
+            let result = Self.decode(SimpleResult.self, json)
+            DispatchQueue.main.async {
+                self?.stopCatalogProgress()
+                self?.catalogWorking.remove(id)
+                let failure = result?.ok == true ? nil : (result?.error ?? "จัดการเครื่องมือไม่สำเร็จ")
+                self?.catalogActionError = failure
+                self?.catalogActionResult = CatalogActionResult(id: id, action: action, error: failure)
+                self?.loadCatalog(project: project)
+            }
+        }
+    }
+
+    /// The router uses a local Ollama service. Inventory is a cheap readiness
+    /// check and avoids sending a real prompt merely to discover setup state.
+    func loadRouterModels() {
+        routerChecking = true
+        routerSetupQueue.async { [weak self] in
+            let json = "qwen2.5:3b".withCString { Self.string(from: chorus_router_models_json($0)) }
+            let result = Self.decode(RouterModelsResult.self, json)
+            DispatchQueue.main.async {
+                self?.routerModels = result?.ok == true ? result?.models?.map(\.name) : nil
+                self?.routerChecking = false
+            }
+        }
+    }
+
+    /// Download only after the user presses the setup card's button. The Rust
+    /// router uses the same loopback transport as normal routing, so macOS ATS
+    /// does not make the setup check disagree with actual routing.
+    func pullRouterModel(_ model: String) {
+        guard !routerDownloading, routerModels != nil,
+              !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        routerDownloading = true
+        routerSetupError = nil
+        routerSetupQueue.async { [weak self] in
+            let json = model.withCString { Self.string(from: chorus_router_pull_json($0)) }
+            let result = Self.decode(SimpleResult.self, json)
+            DispatchQueue.main.async {
+                self?.routerDownloading = false
+                self?.routerSetupError = result?.ok == true ? nil : (result?.error ?? "ดาวน์โหลดโมเดลไม่สำเร็จ")
+                if result?.ok == true { self?.loadRouterModels() }
+            }
+        }
+    }
+
+    func startOllama(executable: URL) {
+        guard ollamaProcess?.isRunning != true else { loadRouterModels(); return }
+        routerSetupError = nil
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["serve"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            ollamaProcess = process
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                self?.loadRouterModels()
+            }
+        } catch {
+            routerSetupError = "เปิด Ollama ไม่สำเร็จ: \(error.localizedDescription)"
+        }
+    }
+
     /// Run a turn where every permission request pops a dialog.
-    func sendInteractive(_ prompt: String, agent: String) {
+    func sendInteractive(_ prompt: String, agent: String, attachments: [Int64] = []) {
         guard let h = handle, !busy else { return }
         busy = true; lastError = nil
         echoUser(prompt)
         let ctx = CallbackContext(raw: Unmanaged.passUnretained(self).toOpaque())
+        let idsJSON = Self.jsonIDs(attachments)
         let cb: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Int32 = { ctx, ask in
             guard let ctx, let ask else { return 0 }
             let engine = Unmanaged<Engine>.fromOpaque(ctx).takeUnretainedValue()
@@ -296,7 +740,9 @@ final class Engine: ObservableObject {
         queue.async { [weak self] in
             let json = prompt.withCString { p in
                 agent.withCString { a in
-                    Self.string(from: chorus_run_turn_interactive(h.raw, a, p, cb, ctx.raw))
+                    idsJSON.withCString { ids in
+                        Self.string(from: chorus_run_turn_interactive_with_attachments(h.raw, a, p, ids, cb, ctx.raw))
+                    }
                 }
             }
             let r = Self.decode(TurnResult.self, json)
@@ -313,15 +759,18 @@ final class Engine: ObservableObject {
     /// Run one turn, then refresh the transcript.
     /// `level` mirrors `Policy::from_level` in chorus-cli/session.rs:
     /// 0 deny · 1 read-only (auto-allow reads, deny writes/commands/network) · 2 allow all.
-    func send(_ prompt: String, agent: String, level: Int32) {
+    func send(_ prompt: String, agent: String, level: Int32, attachments: [Int64] = []) {
         guard let h = handle, !busy else { return }
         busy = true
         echoUser(prompt)
         lastError = nil
+        let idsJSON = Self.jsonIDs(attachments)
         queue.async { [weak self] in
             let json = prompt.withCString { p in
                 agent.withCString { a in
-                    Self.string(from: chorus_run_turn(h.raw, a, p, level))
+                    idsJSON.withCString { ids in
+                        Self.string(from: chorus_run_turn_with_attachments(h.raw, a, p, ids, level))
+                    }
                 }
             }
             let result = Self.decode(TurnResult.self, json)
@@ -341,14 +790,17 @@ final class Engine: ObservableObject {
     }
 
     /// Run one turn against a relay chain (comma-separated agent names).
-    func sendRelay(_ prompt: String, agents: String, level: Int32) {
+    func sendRelay(_ prompt: String, agents: String, level: Int32, attachments: [Int64] = []) {
         guard let h = handle, !busy else { return }
         busy = true; lastError = nil
         echoUser(prompt)
+        let idsJSON = Self.jsonIDs(attachments)
         queue.async { [weak self] in
             let json = prompt.withCString { p in
                 agents.withCString { a in
-                    Self.string(from: chorus_run_relay(h.raw, a, p, level))
+                    idsJSON.withCString { ids in
+                        Self.string(from: chorus_run_relay_with_attachments(h.raw, a, p, ids, level))
+                    }
                 }
             }
             let obj = Self.decode(SimpleResult.self, json)
@@ -424,6 +876,7 @@ final class Engine: ObservableObject {
         guard let h = handle else { return }
         queue.async { [weak self] in
             let eventsJSON = Self.string(from: chorus_transcript_json(h.raw))
+            let attachmentsJSON = Self.string(from: chorus_list_attachments(h.raw))
             let diffJSON = Self.string(from: chorus_working_diff(h.raw))
             let memJSON = Self.string(from: chorus_memory_state(h.raw))
             let taskJSON = Self.string(from: chorus_task_state(h.raw))
@@ -432,6 +885,9 @@ final class Engine: ObservableObject {
                 guard let self else { return }
                 if let rows = Self.decode([LedgerEvent].self, eventsJSON) {
                     self.events = rows
+                }
+                if let rows = Self.decode(SessionAttachmentList.self, attachmentsJSON)?.attachments {
+                    self.attachments = rows
                 }
                 if let t = Self.decode(TaskStateResult.self, taskJSON) {
                     self.taskState = t.text ?? ""

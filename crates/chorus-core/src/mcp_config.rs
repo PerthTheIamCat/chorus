@@ -58,6 +58,14 @@ pub struct Redacted {
     pub secret_keys: Vec<String>,
 }
 
+/// Result of adding user-scope catalog MCP servers to project-authored config.
+/// A collision is returned explicitly; the user's entry always wins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Composition {
+    pub servers: Vec<Server>,
+    pub collisions: Vec<String>,
+}
+
 /// Read `<cwd>/.chorus/mcp.json`.
 ///
 /// Accepts both shapes people actually have: the Claude-Desktop object map
@@ -66,6 +74,44 @@ pub struct Redacted {
 /// stop a turn.
 pub fn load(cwd: &Path) -> Vec<Server> {
     read(&cwd.join(CONFIG))
+}
+
+/// Compose enabled catalog servers for this session without writing either
+/// `.chorus/mcp.json` or the catalog state. Project-authored entries take
+/// precedence, and collisions are surfaced to the caller.
+pub fn compose(cwd: &Path, catalog: impl IntoIterator<Item = Server>) -> Composition {
+    let mut servers = load(cwd);
+    let mut names = configured_names(&cwd.join(CONFIG));
+    names.extend(servers.iter().map(|s| s.name.clone()));
+    let mut collisions = Vec::new();
+    for server in catalog {
+        if names.contains(&server.name) {
+            collisions.push(server.name);
+        } else {
+            names.insert(server.name.clone());
+            servers.push(server);
+        }
+    }
+    servers.sort_by(|a,b| a.name.cmp(&b.name));
+    collisions.sort();
+    Composition { servers, collisions }
+}
+
+fn configured_names(path: &Path) -> std::collections::BTreeSet<String> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Default::default(); };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else { return Default::default(); };
+    if let Some(map) = value.get("mcpServers").and_then(Value::as_object) {
+        return map.keys().cloned().collect();
+    }
+    value.as_array().into_iter().flatten()
+        .filter_map(|item| item.get("name").and_then(Value::as_str).map(str::to_owned))
+        .collect()
+}
+
+/// Convenience adapter for catalog entries already expressed as ACP JSON.
+pub fn compose_catalog(cwd: &Path, catalog_entries: &[Value]) -> Composition {
+    let entries = from_value(&Value::Array(catalog_entries.to_vec()));
+    compose(cwd, entries)
 }
 
 fn read(path: &Path) -> Vec<Server> {
