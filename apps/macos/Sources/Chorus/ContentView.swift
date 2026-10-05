@@ -56,7 +56,15 @@ struct ContentView: View {
     @State private var agent = "codex"
     @State private var permission = PermissionLevel.ask
     @State private var model = ""
+    @AppStorage("chorus.autoRoute") private var autoRoute = true
+    @AppStorage("chorus.routerModel") private var routerModel = "qwen2.5:3b"
+    @AppStorage("chorus.autoCatalogUpdates") private var autoCatalogUpdates = true
+    @AppStorage("chorus.dismissedSetupCards") private var dismissedSetupCards = ""
+    @State private var routingInProgress = false
+    @State private var pendingRoute: PendingRoute?
+    @State private var reviewModel = ""
     @State private var showSettings = false
+    @State private var settingsSection = SettingsSheet.Section.accounts
     @State private var compareOutput: String?
     @State private var inspected: (text: String, tokens: Int64)?
     @State private var lastPrompt = ""
@@ -79,10 +87,223 @@ struct ContentView: View {
     @State private var renaming: (folder: String, s: Engine.SessionSummary)?
     @State private var renameText = ""
     @State private var deleting: (folder: String, s: Engine.SessionSummary)?
-    @State private var queued: [(model: String, text: String)] = []
+    @State private var queued: [PendingSend] = []
     @State private var hint: String?
+    @State private var importingFiles = 0
     @State private var confirmRevert = false
     @State private var rejected: Set<String> = []
+    @State private var suggestionsPaused = false
+
+    private struct PendingSend {
+        let model: String
+        let text: String
+        let attachments: [DraftAttachment]
+        let explicitAgent: Bool
+    }
+
+    private struct PendingRoute: Identifiable {
+        let id = UUID()
+        let send: PendingSend
+        let reason: String
+        var automatic: Bool
+        var agentID: String? = nil
+    }
+
+    private struct RouterEnvelope: Decodable {
+        struct Route: Decodable {
+            struct Result: Decodable {
+                let candidate_id: String?
+                let reason: String?
+                let message: String?
+            }
+            let status: String
+            let result: Result?
+        }
+        let ok: Bool
+        let route: Route?
+        let error: String?
+    }
+
+    private enum SetupNeed {
+        case agent(Engine.AgentInfo)
+        case routerService
+        case routerModel
+        case catalogUnavailable
+        case integration(CatalogIntegration)
+
+        var id: String {
+            switch self {
+            case .agent(let agent): "agent:\(agent.id)"
+            case .routerService: "router:service"
+            case .routerModel: "router:model"
+            case .catalogUnavailable: "catalog:unavailable"
+            case .integration(let entry): "integration:\(entry.id)"
+            }
+        }
+    }
+
+    private var setupNeed: SetupNeed? {
+        let dismissed = Set(dismissedSetupCards.split(separator: ",").map(String.init))
+        func visible(_ need: SetupNeed) -> Bool { !dismissed.contains(need.id) }
+
+        if !engine.agents.isEmpty && !engine.agents.contains(where: \.ready),
+           let missing = engine.agents.first(where: { !$0.ready }) {
+            let need = SetupNeed.agent(missing)
+            if visible(need) { return need }
+        }
+        if autoRoute && !engine.routerChecking {
+            if engine.routerModels == nil {
+                let need = SetupNeed.routerService
+                if visible(need) { return need }
+            } else if let models = engine.routerModels, !models.contains(routerModel) {
+                let need = SetupNeed.routerModel
+                if visible(need) { return need }
+            }
+        }
+        if !workspace.isEmpty && !suggestionsPaused {
+            if engine.catalog.isEmpty, engine.catalogError != nil {
+                let need = SetupNeed.catalogUnavailable
+                if visible(need) { return need }
+            }
+            let order = ["serena", "graft", "rtk", "headroom"]
+            for id in order {
+                if let entry = engine.catalog.first(where: { $0.id == id && (!$0.isInstalled || ($0.isHealthy == true && !$0.isEnabledForProject)) }) {
+                    let need = SetupNeed.integration(entry)
+                    if visible(need) { return need }
+                }
+            }
+        }
+        if let missing = engine.agents.first(where: { !$0.ready }) {
+            let need = SetupNeed.agent(missing)
+            if visible(need) { return need }
+        }
+        return nil
+    }
+
+    private func dismissSetup(_ need: SetupNeed) {
+        var ids = Set(dismissedSetupCards.split(separator: ",").map(String.init))
+        ids.insert(need.id)
+        dismissedSetupCards = ids.sorted().joined(separator: ",")
+        if case .integration = need { suggestionsPaused = true }
+    }
+
+    private func integrationDescription(_ id: String) -> String {
+        switch id {
+        case "serena": "ช่วย agent ค้นหาและแก้โค้ดในโปรเจกต์"
+        case "graft": "ช่วยหาโค้ดและดูความเชื่อมโยงของส่วนต่าง ๆ"
+        case "rtk": "ย่อผลลัพธ์จากคำสั่งให้ agent อ่านง่ายขึ้น"
+        case "headroom": "ช่วยจัดการข้อมูลที่ส่งให้ agent"
+        default: "เพิ่มความสามารถให้ agent ในโปรเจกต์นี้"
+        }
+    }
+
+    private var ollamaAppURL: URL? {
+        let roots = [URL(fileURLWithPath: "/Applications/Ollama.app"),
+                     FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Ollama.app")]
+        return roots.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    private var ollamaCLIURL: URL? {
+        let inherited = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":").map(String.init)
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let folders = inherited + ["/opt/homebrew/bin", "/usr/local/bin", "\(home)/.local/bin"]
+        return folders.lazy.map { URL(fileURLWithPath: $0).appendingPathComponent("ollama") }
+            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    }
+
+    @ViewBuilder
+    private var setupCard: some View {
+        if let need = setupNeed {
+            switch need {
+            case .agent(let agent):
+                SetupPromptCard(
+                    title: "\(agent.label) ยังไม่พร้อมใช้",
+                    detail: agent.auth == "needs_login"
+                        ? "เปิด Terminal เพื่อเข้าสู่ระบบ แล้ว Chorus จะตรวจสถานะให้อีกครั้ง"
+                        : "เริ่มคำสั่งติดตั้งใน Terminal แล้วกลับมาที่ Chorus เพื่อตรวจสถานะ",
+                    symbol: "person.crop.circle.badge.exclamationmark",
+                    actionTitle: agent.auth == "needs_login" ? "เริ่มเข้าสู่ระบบ" : "เริ่มติดตั้ง",
+                    onAction: { engine.runLoginCommand(agent.hint) },
+                    onDismiss: { dismissSetup(need) },
+                    secondaryTitle: "ดูสถานะ",
+                    onSecondary: { settingsSection = .agents; showSettings = true })
+            case .routerService:
+                let app = ollamaAppURL
+                let cli = ollamaCLIURL
+                SetupPromptCard(
+                    title: "Auto ยังรอ Ollama",
+                    detail: engine.routerSetupError
+                        ?? "เปิด Ollama ในเครื่องก่อน แล้ว Chorus จะตรวจว่าโมเดล router พร้อมหรือยัง",
+                    symbol: "cpu",
+                    actionTitle: app != nil ? "เปิด Ollama"
+                        : (cli != nil ? "เริ่ม Ollama" : "ดาวน์โหลด Ollama"),
+                    onAction: {
+                        if let app {
+                            NSWorkspace.shared.open(app)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { engine.loadRouterModels() }
+                        } else if let cli {
+                            engine.startOllama(executable: cli)
+                        } else if let url = URL(string: "https://ollama.com/download") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    },
+                    onDismiss: { dismissSetup(need) },
+                    secondaryTitle: "ตรวจใหม่",
+                    onSecondary: { engine.loadRouterModels() })
+            case .routerModel:
+                let configuredModel = routerModel.trimmingCharacters(in: .whitespacesAndNewlines)
+                SetupPromptCard(
+                    title: "ยังไม่มีโมเดลสำหรับ Auto",
+                    detail: engine.routerSetupError ?? (configuredModel.isEmpty
+                        ? "เลือกโมเดล router ในตั้งค่าก่อน"
+                        : "ดาวน์โหลด \(configuredModel) ลง Ollama ในเครื่องเพื่อให้ Auto เลือกผู้ทำงานได้"),
+                    symbol: "arrow.down.circle",
+                    actionTitle: configuredModel.isEmpty ? "เลือกโมเดล" : "ดาวน์โหลด \(configuredModel)",
+                    working: engine.routerDownloading,
+                    onAction: {
+                        if configuredModel.isEmpty { settingsSection = .general; showSettings = true }
+                        else { engine.pullRouterModel(configuredModel) }
+                    },
+                    onDismiss: { dismissSetup(need) },
+                    secondaryTitle: "เปลี่ยนโมเดล",
+                    onSecondary: { settingsSection = .general; showSettings = true })
+            case .catalogUnavailable:
+                SetupPromptCard(
+                    title: "ยังตรวจเครื่องมือเสริมไม่ได้",
+                    detail: engine.catalogError ?? "ลองโหลดรายการเครื่องมืออีกครั้ง",
+                    symbol: "puzzlepiece.extension",
+                    actionTitle: "ตรวจใหม่",
+                    onAction: { engine.loadCatalog(project: workspace) },
+                    onDismiss: { dismissSetup(need) },
+                    secondaryTitle: "เปิดเครื่องมือเสริม",
+                    onSecondary: { settingsSection = .integrations; showSettings = true })
+            case .integration(let entry):
+                let missing = entry.isInstalled ? nil : entry.missingInstaller
+                SetupPromptCard(
+                    title: "แนะนำ \(entry.title) สำหรับโปรเจกต์นี้",
+                    detail: engine.catalogActionError ?? (missing.map {
+                        "ต้องติดตั้ง \($0) ก่อนเพิ่มเครื่องมือนี้"
+                    } ?? (entry.isInstalled
+                        ? "ติดตั้งแล้ว แต่ยังไม่ได้เปิดใช้กับโปรเจกต์นี้"
+                        : "ยังไม่ได้เพิ่มผ่าน Chorus · \(integrationDescription(entry.id))")),
+                    symbol: "puzzlepiece.extension",
+                    actionTitle: missing.map { "วิธีติดตั้ง \($0)" }
+                        ?? (entry.isInstalled ? "เปิดใช้" : "ติดตั้งและเปิดใช้"),
+                    working: entry.isWorking,
+                    onAction: {
+                        if missing != nil, let url = entry.installerURL { NSWorkspace.shared.open(url) }
+                        else {
+                            engine.catalogAction(project: workspace, id: entry.id,
+                                                 action: entry.isInstalled ? "enable" : "installAndEnable")
+                        }
+                    },
+                    onDismiss: { dismissSetup(need) },
+                    secondaryTitle: "ดูรายละเอียด",
+                    onSecondary: { settingsSection = .integrations; showSettings = true })
+            }
+        }
+    }
 
     enum RightTab: String, CaseIterable {
         case context = "คอนเท็กซ์", changes = "ที่แก้ไป", memory = "ความจำ", subagents = "งานย่อย"
@@ -213,10 +434,31 @@ struct ContentView: View {
         }
         .onAppear {
             engine.loadAgents(); engine.registerProgress(); engine.loadUsage()
+            engine.loadCatalog(project: workspace, automaticUpdates: autoCatalogUpdates)
+            if autoRoute { engine.loadRouterModels() }
             if let raw = UserDefaults.standard.object(forKey: "chorus.defaultPermission") as? Int,
                let p = PermissionLevel(rawValue: Int32(raw)) { permission = p }
         }
-        .onChange(of: workspace) { _, w in fileIndex.load(w); engine.loadSkills(cwd: w) }
+        .onChange(of: workspace) { _, w in
+            suggestionsPaused = false
+            fileIndex.load(w)
+            engine.loadSkills(cwd: w)
+            engine.loadCatalog(project: w, automaticUpdates: autoCatalogUpdates)
+        }
+        .onChange(of: autoRoute) { _, enabled in
+            if enabled { engine.loadRouterModels() }
+        }
+        .onChange(of: routerModel) { _, _ in
+            if autoRoute { engine.loadRouterModels() }
+        }
+        .onChange(of: dismissedSetupCards) { _, value in
+            if value.isEmpty { suggestionsPaused = false }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            engine.loadAgents()
+            engine.loadCatalog(project: workspace)
+            if autoRoute { engine.loadRouterModels() }
+        }
         .onChange(of: engine.sessionID) { _, id in
             guard !workspace.isEmpty else { return }
             engine.loadSessions(db: dbPath)
@@ -278,7 +520,35 @@ struct ContentView: View {
             .allowsHitTesting(false)
         )
         .sheet(isPresented: $showSettings) {
-            SettingsSheet(workspace: workspace).environmentObject(engine)
+            SettingsSheet(workspace: workspace, section: settingsSection).environmentObject(engine)
+        }
+        .sheet(item: $pendingRoute) { proposal in
+            if proposal.automatic {
+                RouteReview(agent: engine.agents.first(where: { $0.id == proposal.agentID })?.label
+                                ?? agentFor(reviewModel)?.label ?? "Agent",
+                            model: ModelID(reviewModel).base,
+                            effort: ModelID(reviewModel).effort ?? "ค่าเริ่มต้น",
+                            reason: proposal.reason,
+                            onSendNow: sendReviewedRoute,
+                            onChange: { pendingRoute?.automatic = false },
+                            onCancel: cancelReviewedRoute)
+            } else {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("เลือกผู้ทำงาน").font(.title3.bold())
+                    Text(proposal.reason).font(.callout).foregroundStyle(.secondary)
+                    ModelPicker(model: $reviewModel, onNeedsLogin: { pendingRoute = nil; showSettings = true })
+                        .environmentObject(engine)
+                    HStack {
+                        Button("ยกเลิก", action: cancelReviewedRoute)
+                        Spacer()
+                        Button("ส่งงาน", action: sendReviewedRoute)
+                            .buttonStyle(.borderedProminent)
+                            .disabled(agentFor(reviewModel)?.ready != true)
+                    }
+                }
+                .padding(20)
+                .frame(width: 390)
+            }
         }
         .sheet(isPresented: Binding(get: { compareOutput != nil }, set: { if !$0 { compareOutput = nil } })) {
             CompareResultsSheet(json: compareOutput ?? "")
@@ -492,7 +762,10 @@ struct ContentView: View {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
                             ForEach(engine.events) { ev in
-                                EventRow(event: ev).id(ev.seq)
+                                EventRow(event: ev,
+                                         attachments: engine.attachments.filter { $0.event_seq == ev.seq },
+                                         onDeleteAttachment: engine.deleteAttachment)
+                                    .id(ev.seq)
                             }
                             if engine.busy { workingRow.id("working") }
                             else if !engine.lastThoughts.isEmpty {
@@ -524,18 +797,22 @@ struct ContentView: View {
                 .padding(.horizontal, 16).padding(.bottom, 14).padding(.top, 4)
         }
         .safeAreaInset(edge: .top, spacing: 0) {
-            if let err = engine.lastError {
-                HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
-                    Text(err).font(.callout).lineLimit(3).textSelection(.enabled)
-                    Spacer(minLength: 0)
-                    Button { engine.lastError = nil } label: { Image(systemName: "xmark") }
-                        .buttonStyle(.borderless)
+            VStack(spacing: 8) {
+                if let err = engine.lastError {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+                        Text(err).font(.callout).lineLimit(3).textSelection(.enabled)
+                        Spacer(minLength: 0)
+                        Button { engine.lastError = nil } label: { Image(systemName: "xmark") }
+                            .buttonStyle(.borderless)
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                    .floatingPanel(cornerRadius: 14, tint: .red)
                 }
-                .padding(.horizontal, 14).padding(.vertical, 9)
-                .floatingPanel(cornerRadius: 14, tint: .red)
-                .padding(.horizontal, 16).padding(.top, 8)
+                setupCard
             }
+            .frame(maxWidth: 820)
+            .padding(.horizontal, 16).padding(.top, 8)
         }
         .frame(minWidth: 420)
         .clipShape(RoundedRectangle(cornerRadius: 20))
@@ -619,9 +896,24 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             if let hint { Text(hint).font(.caption).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading) }
-            ComposerField(box: draftBox, suggestions: suggest, onSubmit: submit)
+            ComposerField(box: draftBox, suggestions: suggest, onSubmit: submit,
+                          onImportURLs: importFiles,
+                          onPasteImage: { data, mime in importPastedImage(data, mime: mime) },
+                          onRemoveAttachment: { id in
+                              draftBox.attachments.removeAll { $0.id == id }
+                              engine.deleteAttachment(id)
+                          })
             HStack(spacing: 8) {
-                ModelPicker(model: $model, onNeedsLogin: { showSettings = true })
+                Button { autoRoute.toggle() } label: {
+                    Label("Auto", systemImage: "arrow.triangle.branch")
+                        .font(.caption.weight(.medium))
+                }
+                .buttonStyle(InteractiveStyle(cornerRadius: 99, selected: autoRoute,
+                                              padding: .init(top: 4, leading: 9, bottom: 4, trailing: 9)))
+                .help(autoRoute ? "ให้โมเดลในเครื่องเลือกเอเจนต์ โมเดล และระดับคิด" : "ใช้โมเดลที่เลือกเอง")
+                if !autoRoute {
+                    ModelPicker(model: $model, onNeedsLogin: { settingsSection = .agents; showSettings = true })
+                }
                 ChipPicker(
                     icon: permission == .ask ? "hand.raised" : "bolt.fill",
                     value: "\(permission.rawValue)",
@@ -659,20 +951,65 @@ struct ContentView: View {
         return (a.defaultModel, parts.count > 1 ? String(parts[1]) : "")
     }
 
+    private func importFiles(_ urls: [URL]) {
+        guard engine.sessionID >= 0 else { hint = "เปิดเซสชันก่อนแนบไฟล์"; return }
+        let room = max(0, 5 - draftBox.attachments.count - importingFiles)
+        guard urls.count <= room else { hint = "แนบได้สูงสุด 5 ไฟล์ต่อข้อความ"; return }
+        importingFiles += urls.count
+        for url in urls {
+            engine.importFile(url) { attachment, error in
+                importingFiles -= 1
+                if let attachment { draftBox.attachments.append(attachment) }
+                if let error { hint = error }
+            }
+        }
+    }
+
+    private func importPastedImage(_ data: Data, mime: String) {
+        guard engine.sessionID >= 0 else { hint = "เปิดเซสชันก่อนแนบรูป"; return }
+        guard draftBox.attachments.count + importingFiles < 5 else { hint = "แนบได้สูงสุด 5 ไฟล์ต่อข้อความ"; return }
+        importingFiles += 1
+        engine.importImage(data, mime: mime) { attachment, error in
+            importingFiles -= 1
+            if let attachment { draftBox.attachments.append(attachment) }
+            if let error { hint = error }
+        }
+    }
+
     private func submit() {
         let raw = draftBox.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let (target, text) = route(raw)
-        guard engine.sessionID >= 0, !raw.isEmpty else { return }
-        guard !text.isEmpty else {
+        guard engine.sessionID >= 0, !raw.isEmpty || !draftBox.attachments.isEmpty else { return }
+        guard importingFiles == 0 else { hint = "รอแนบไฟล์ให้เสร็จก่อนส่ง"; return }
+        if text.isEmpty && draftBox.attachments.isEmpty {
             hint = "พิมพ์ข้อความต่อจาก \(raw) ด้วย"
+            return
+        }
+        guard draftBox.attachments.allSatisfy(\.agentReadable) else {
+            hint = "มีไฟล์ที่ agent ยังอ่านไม่ได้ กรุณาลบไฟล์นั้นก่อนส่ง"
+            return
+        }
+        guard draftBox.attachments.reduce(Int64(0), { $0 + $1.size }) <= 50 * 1024 * 1024 else {
+            hint = "ไฟล์แนบรวมต้องไม่เกิน 50 MB"
             return
         }
         hint = nil
         draftBox.text = ""
+        let explicitTag = raw.hasPrefix("@")
+            && engine.agents.contains { candidate in
+                let tag = raw.dropFirst().split(separator: " ", maxSplits: 1).first.map(String.init) ?? ""
+                return candidate.ready && (candidate.id.caseInsensitiveCompare(tag) == .orderedSame
+                    || candidate.label.caseInsensitiveCompare(tag) == .orderedSame)
+            }
+        let send = PendingSend(model: target,
+                               text: text.isEmpty ? "ช่วยดูไฟล์ที่แนบมา" : text,
+                               attachments: draftBox.attachments,
+                               explicitAgent: explicitTag)
+        draftBox.attachments = []
         // Busy: line it up behind the running turn (Cursor-style queue)
         // instead of dropping the keystroke on a disabled button.
-        if engine.busy { queued.append((target, text)); return }
-        dispatch(target, text)
+        if engine.busy || routingInProgress || pendingRoute != nil { queued.append(send); return }
+        routeOrDispatch(send)
     }
 
     /// The relay chain for a turn, as *agent names* (with accounts), never
@@ -705,9 +1042,83 @@ struct ContentView: View {
         String(name.split(separator: "@", maxSplits: 1).first ?? Substring(name))
     }
 
-    private func dispatch(_ target: String, _ text: String) {
+    private func routeOrDispatch(_ send: PendingSend) {
+        guard autoRoute, !send.explicitAgent else {
+            dispatch(send.model, send.text, attachments: send.attachments.map(\.id))
+            return
+        }
+        let integrations = engine.catalog.filter(\.isEnabledForProject).map(\.id)
+        let candidates = engine.agents.filter(\.ready).flatMap { agent in
+            agent.models.map { choice -> [String: Any] in
+                ["id": "\(agent.id):\(choice.id)", "agent": agent.id,
+                 "model": ModelID(choice.id).base,
+                 "effort": ModelID(choice.id).effort ?? "default",
+                 "ready": true, "media_types": ["text/*", "image/*"],
+                 "integrations": integrations]
+            }
+        }
+        let task: [String: Any] = [
+            "text": send.text,
+            "attachments": send.attachments.map { file -> [String: Any] in
+                ["media_type": file.mediaType.hasPrefix("image/") ? file.mediaType : "text/plain",
+                 "size_bytes": file.size]
+            },
+            "enabled_integrations": integrations, "required_integrations": []
+        ]
+        guard let taskData = try? JSONSerialization.data(withJSONObject: task),
+              let candidatesData = try? JSONSerialization.data(withJSONObject: ["candidates": candidates]),
+              let taskJSON = String(data: taskData, encoding: .utf8),
+              let candidatesJSON = String(data: candidatesData, encoding: .utf8),
+              !routerModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            reviewModel = send.model
+            pendingRoute = PendingRoute(send: send, reason: "ตั้งค่าโมเดล router ในตั้งค่าก่อน หรือเลือกโมเดลเอง", automatic: false)
+            return
+        }
+        routingInProgress = true
+        let session = engine.sessionID
+        engine.proposeRoute(taskJSON: taskJSON, candidatesJSON: candidatesJSON, routerModel: routerModel) { json in
+            routingInProgress = false
+            guard session == engine.sessionID else { return }
+            let response = try? JSONDecoder().decode(RouterEnvelope.self, from: Data(json.utf8))
+            if response?.ok == true, response?.route?.status == "proposal",
+               let chosenID = response?.route?.result?.candidate_id,
+               let chosen = engine.agents.flatMap({ agent in
+                   agent.models.map { choice in ("\(agent.id):\(choice.id)", choice.id, agent.id) }
+               }).first(where: { $0.0 == chosenID }) {
+                reviewModel = chosen.1
+                pendingRoute = PendingRoute(send: send,
+                    reason: response?.route?.result?.reason ?? "เหมาะกับงานนี้",
+                    automatic: true, agentID: chosen.2)
+            } else {
+                reviewModel = send.model
+                pendingRoute = PendingRoute(send: send,
+                    reason: response?.route?.result?.message ?? response?.error
+                        ?? "Router ในเครื่องยังเลือกไม่ได้ กรุณาเลือกโมเดลและยืนยันส่งเอง",
+                    automatic: false)
+            }
+        }
+    }
+
+    private func sendReviewedRoute() {
+        guard let pendingRoute else { return }
+        self.pendingRoute = nil
+        dispatch(reviewModel, pendingRoute.send.text,
+                 attachments: pendingRoute.send.attachments.map(\.id),
+                 agentOverride: pendingRoute.automatic ? pendingRoute.agentID : nil)
+    }
+
+    private func cancelReviewedRoute() {
+        guard let pendingRoute else { return }
+        draftBox.text = pendingRoute.send.text + (draftBox.text.isEmpty ? "" : "\n" + draftBox.text)
+        draftBox.attachments.insert(contentsOf: pendingRoute.send.attachments, at: 0)
+        self.pendingRoute = nil
+        flushQueue()
+    }
+
+    private func dispatch(_ target: String, _ text: String, attachments: [Int64] = [],
+                          agentOverride: String? = nil) {
         lastPrompt = text
-        let agentID = agentFor(target)?.id ?? target
+        let agentID = agentOverride ?? agentFor(target)?.id ?? target
         // `@codex …` picked another agent's default model; pin it for the turn.
         if target != model { engine.setModel(agent: agentID, model: target) }
         var names = chain(for: agentID)
@@ -724,19 +1135,21 @@ struct ContentView: View {
         // After the send: starting a turn clears the banner.
         defer { if let notice { engine.lastError = notice } }
         if permission == .ask {
-            engine.sendInteractive(text, agent: names.first ?? agentID)
+            engine.sendInteractive(text, agent: names.first ?? agentID, attachments: attachments)
         } else {
             // Always the relay path, even for one agent: a chain of one
             // behaves exactly like a single turn, and the user never has
             // to know the word "relay" to get failover.
-            engine.sendRelay(text, agents: names.joined(separator: ","), level: permission.rawValue)
+            engine.sendRelay(text, agents: names.joined(separator: ","), level: permission.rawValue,
+                             attachments: attachments)
         }
     }
 
     private func flushQueue() {
-        guard !engine.busy, !queued.isEmpty, engine.lastError == nil else { return }
+        guard !engine.busy, !routingInProgress, pendingRoute == nil,
+              !queued.isEmpty, engine.lastError == nil else { return }
         let next = queued.removeFirst()
-        dispatch(next.model, next.text)
+        routeOrDispatch(next)
     }
 
     // MARK: `/` and `@` completion
@@ -1379,6 +1792,8 @@ struct FileChanges: View {
 
 struct EventRow: View {
     let event: LedgerEvent
+    var attachments: [SessionAttachment] = []
+    var onDeleteAttachment: (Int64) -> Void = { _ in }
 
     private var isUser: Bool { event.actor == "user" }
 
@@ -1413,6 +1828,24 @@ struct EventRow: View {
                 .padding(.horizontal, isUser ? 12 : 0).padding(.vertical, isUser ? 8 : 0)
                 .background(isUser ? Color.accentColor.opacity(0.14) : .clear,
                             in: RoundedRectangle(cornerRadius: 12))
+            if !attachments.isEmpty {
+                ForEach(attachments) { file in
+                    HStack(spacing: 6) {
+                        Image(systemName: file.status == "deleted" ? "doc.badge.xmark" : "paperclip")
+                        Text(file.name).lineLimit(1)
+                        if file.status == "deleted" {
+                            Text("ลบแล้ว").foregroundStyle(.secondary)
+                        } else {
+                            Button("ลบ", role: .destructive) { onDeleteAttachment(file.id) }
+                                .buttonStyle(.link)
+                                .accessibilityLabel("ลบไฟล์ \(file.name) จากเซสชัน")
+                        }
+                    }
+                    .font(.caption)
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .background(Color.primary.opacity(0.06), in: Capsule())
+                }
+            }
         }
         .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
     }
