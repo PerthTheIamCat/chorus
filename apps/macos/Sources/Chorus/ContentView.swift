@@ -62,6 +62,8 @@ struct ContentView: View {
     @AppStorage("chorus.dismissedSetupCards") private var dismissedSetupCards = ""
     @State private var routingInProgress = false
     @State private var pendingRoute: PendingRoute?
+    /// Auto router progress / last pick, shown above the composer.
+    @State private var routeStatus: RouteStatus?
     @State private var reviewModel = ""
     @State private var showSettings = false
     /// A tool's own page shown in place of the thread (nil = the thread).
@@ -941,6 +943,10 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            if let routeStatus {
+                RouteStatusCard(status: routeStatus) { self.routeStatus = nil }
+                    .transition(.opacity)
+            }
             if let hint { Text(hint).font(.caption).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading) }
             ComposerField(box: draftBox, suggestions: suggest, onSubmit: submit,
                           onImportURLs: importFiles,
@@ -1121,21 +1127,24 @@ struct ContentView: View {
             return
         }
         routingInProgress = true
+        routeStatus = .thinking(routerModel: routerModel, candidates: candidates.count)
         let session = engine.sessionID
         engine.proposeRoute(taskJSON: taskJSON, candidatesJSON: candidatesJSON, routerModel: routerModel) { json in
             routingInProgress = false
-            guard session == engine.sessionID else { return }
+            guard session == engine.sessionID else { routeStatus = nil; return }
             let response = try? JSONDecoder().decode(RouterEnvelope.self, from: Data(json.utf8))
             if response?.ok == true, response?.route?.status == "proposal",
                let chosenID = response?.route?.result?.candidate_id,
                let chosen = engine.agents.flatMap({ agent in
                    agent.models.map { choice in ("\(agent.id):\(choice.id)", choice.id, agent.id) }
                }).first(where: { $0.0 == chosenID }) {
+                routeStatus = nil
                 reviewModel = chosen.1
                 pendingRoute = PendingRoute(send: send,
                     reason: response?.route?.result?.reason ?? "เหมาะกับงานนี้",
                     automatic: true, agentID: chosen.2)
             } else {
+                routeStatus = nil
                 reviewModel = send.model
                 pendingRoute = PendingRoute(send: send,
                     reason: response?.route?.result?.message ?? response?.error
@@ -1148,6 +1157,15 @@ struct ContentView: View {
     private func sendReviewedRoute() {
         guard let pendingRoute else { return }
         self.pendingRoute = nil
+        if pendingRoute.automatic {
+            let id = ModelID(reviewModel)
+            routeStatus = .chosen(
+                agent: engine.agents.first(where: { $0.id == pendingRoute.agentID })?.label
+                    ?? agentFor(reviewModel)?.label ?? "Agent",
+                model: id.base, effort: id.effort ?? "ค่าเริ่มต้น", reason: pendingRoute.reason)
+        } else {
+            routeStatus = nil
+        }
         dispatch(reviewModel, pendingRoute.send.text,
                  attachments: pendingRoute.send.attachments.map(\.id),
                  agentOverride: pendingRoute.automatic ? pendingRoute.agentID : nil)
@@ -1155,6 +1173,7 @@ struct ContentView: View {
 
     private func cancelReviewedRoute() {
         guard let pendingRoute else { return }
+        routeStatus = nil
         draftBox.text = pendingRoute.send.text + (draftBox.text.isEmpty ? "" : "\n" + draftBox.text)
         draftBox.attachments.insert(contentsOf: pendingRoute.send.attachments, at: 0)
         self.pendingRoute = nil
