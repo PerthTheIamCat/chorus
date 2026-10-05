@@ -39,6 +39,9 @@ struct CatalogIntegration: Identifiable, Hashable {
     var installerURL: URL? {
         switch missingInstaller {
         case "brew": URL(string: "https://brew.sh/")
+        case "npm": URL(string: "https://nodejs.org/en/download")
+        case "uv": URL(string: "https://docs.astral.sh/uv/getting-started/installation/")
+        case "cargo": URL(string: "https://rustup.rs/")
         default: nil
         }
     }
@@ -216,17 +219,22 @@ private struct IntegrationCard: View {
                         Text(installStatus).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
                 } else if let missing = entry.missingInstaller {
-                    Text(missing == "Homebrew formula" ? "ยังไม่มีสูตร Homebrew ที่ตรวจแล้ว" : "ต้องมี \(missing) ก่อน")
+                    Text("ต้องมี \(missing) ก่อน")
                         .font(.caption).foregroundStyle(.orange)
                 }
             }
             Spacer(minLength: 8)
 
             if entry.isInstalled && !entry.isWorking {
-                Toggle("", isOn: Binding(get: { entry.isEnabledForProject }, set: { onProjectEnableChanged($0) }))
-                    .labelsHidden().toggleStyle(.switch).controlSize(.small)
-                    .disabled(projectName.isEmpty || entry.isHealthy != true)
-                    .help(projectName.isEmpty ? "เลือกโปรเจกต์ก่อน" : "เปิดใช้กับ \(projectName)")
+                VStack(alignment: .trailing, spacing: 3) {
+                    Toggle("", isOn: Binding(get: { entry.isEnabledForProject }, set: { onProjectEnableChanged($0) }))
+                        .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                        .disabled(projectName.isEmpty || entry.isHealthy == false)
+                    Text(projectName.isEmpty ? "เลือกโปรเจกต์ก่อน"
+                         : entry.isEnabledForProject ? "เปิดใช้กับ \(projectName)" : "ปิดอยู่ใน \(projectName)")
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+                .help("เปิดให้ Claude และ Codex ใช้เครื่องมือนี้ในโปรเจกต์ปัจจุบัน")
             }
             actionButton
         }
@@ -246,8 +254,6 @@ private struct IntegrationCard: View {
                   let url = entry.installerURL {
             Link("วิธีติดตั้ง \(missing)", destination: url)
                 .buttonStyle(.bordered).controlSize(.small)
-        } else if entry.brewFormula == nil && entry.id != "chorus-review" && !entry.isInstalled {
-            Button("เร็ว ๆ นี้") {}.buttonStyle(.bordered).controlSize(.small).disabled(true)
         } else if !entry.isInstalled {
             Button("ติดตั้ง…", action: onInstall).buttonStyle(.borderedProminent).controlSize(.small)
         } else if entry.updateAvailable {

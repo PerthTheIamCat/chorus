@@ -207,9 +207,6 @@ const INSTALLERS: &[&str] = &["brew", "uv", "npm", "cargo", "git"];
 /// Report the missing package installer needed by a catalog entry, if any.
 /// The same resolver is used by installation preflight and child processes.
 pub fn missing_installer(entry: &Integration) -> Option<&'static str> {
-    if entry.recipe.method != InstallMethod::Homebrew && entry.recipe.method != InstallMethod::Bundled {
-        return Some("Homebrew formula");
-    }
     let name = runner(entry.recipe.method);
     (!name.is_empty() && installer_path(name).is_none()).then_some(name)
 }
@@ -274,11 +271,34 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
+thread_local! {
+    /// While a managed install runs, package-manager caches go inside the
+    /// integration's own directory so removing it leaves nothing behind.
+    static CACHE_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+struct CacheScope;
+impl CacheScope {
+    fn enter(root: &Path) -> Self {
+        CACHE_DIR.with(|c| *c.borrow_mut() = Some(root.join(".cache")));
+        CacheScope
+    }
+}
+impl Drop for CacheScope {
+    fn drop(&mut self) {
+        CACHE_DIR.with(|c| *c.borrow_mut() = None);
+    }
+}
+
 fn installer_command(name: &str) -> Result<Command, CatalogError> {
     let executable = installer_path(name)
         .ok_or_else(|| CatalogError::MissingRuntime(name.to_owned()))?;
     let mut command = Command::new(executable);
     command.env("PATH", child_path());
+    if let Some(cache) = CACHE_DIR.with(|c| c.borrow().clone()) {
+        command.env("UV_CACHE_DIR", cache.join("uv"))
+            .env("NPM_CONFIG_CACHE", cache.join("npm"));
+    }
     Ok(command)
 }
 
@@ -331,6 +351,8 @@ fn install_uv_locked(entry: &Integration, root: &Path) -> Result<(PathBuf, Strin
             "Python 3.13; recovery: install it with `uv python install 3.13`".into(),
         ));
     }
+    // Pure-Python dependencies that publish no wheel; hashes still pin them.
+    let sdist_ok: &[&str] = if entry.id == "serena" { &["proxy-tools"] } else { &[] };
     let input = root.join("requirements.in");
     let lock = root.join("requirements.lock");
     let venv = root.join("venv");
@@ -343,6 +365,8 @@ fn install_uv_locked(entry: &Integration, root: &Path) -> Result<(PathBuf, Strin
             "--no-config",
             "pip",
             "compile",
+            "--python-version",
+            "3.13",
             "--generate-hashes",
             "--only-binary",
             ":all:",
@@ -352,6 +376,7 @@ fn install_uv_locked(entry: &Integration, root: &Path) -> Result<(PathBuf, Strin
         ])
         .arg(&lock)
         .arg(&input)
+        .args(sdist_ok.iter().flat_map(|p| ["--no-binary", *p]))
         .env_remove("UV_INDEX_URL")
         .env_remove("UV_EXTRA_INDEX_URL")
         .env_remove("UV_DEFAULT_INDEX")
@@ -389,6 +414,7 @@ fn install_uv_locked(entry: &Integration, root: &Path) -> Result<(PathBuf, Strin
         .arg(&python)
         .args(["--require-hashes", "-r"])
         .arg(&lock)
+        .args(sdist_ok.iter().flat_map(|p| ["--no-binary", *p]))
         .env_remove("UV_INDEX_URL")
         .env_remove("UV_EXTRA_INDEX_URL")
         .env_remove("UV_DEFAULT_INDEX")
@@ -464,9 +490,10 @@ fn run_install(command: &mut Command) -> Result<(), CatalogError> {
     }
 }
 
-/// Install from the approved Homebrew formula, or copy a bundled skill.
-/// Legacy package-manager records remain readable and removable, but no new
-/// npm, uv or Cargo installation is started by the catalog.
+/// Install from the approved Homebrew formula, from the tool's official package
+/// manager (npm, uv, cargo) into a Chorus-owned directory, or copy a bundled
+/// skill. Everything but Homebrew lands under `~/.chorus/tools/<id>`, caches
+/// included, so removal is deleting that one directory.
 pub fn install(id: &str) -> Result<InstallRecord, CatalogError> {
     let entry = get(id).ok_or_else(|| CatalogError::Unknown(id.into()))?;
     let mut state = load_state()?;
@@ -496,11 +523,6 @@ pub fn install(id: &str) -> Result<InstallRecord, CatalogError> {
         save_state(&state)?;
         return Ok(record);
     }
-    if entry.recipe.method != InstallMethod::Bundled {
-        return Err(CatalogError::Install(format!(
-            "{} has no approved Homebrew formula yet", entry.title
-        )));
-    }
     if let Some(record) = state
         .installed
         .get(id)
@@ -517,6 +539,7 @@ pub fn install(id: &str) -> Result<InstallRecord, CatalogError> {
         )));
     }
     std::fs::create_dir_all(&root)?;
+    let _cache = CacheScope::enter(&root);
     if let Some(bin) = missing_installer(entry) {
         let _ = std::fs::remove_dir_all(&root);
         return Err(CatalogError::MissingRuntime(bin.into()));
@@ -652,13 +675,19 @@ pub fn install(id: &str) -> Result<InstallRecord, CatalogError> {
         let lock = root.join("package-lock.json");
         let lock_data = std::fs::read(&lock)
             .and_then(|b| serde_json::from_slice::<Value>(&b).map_err(std::io::Error::other));
+        // npm keys the top-level package as `node_modules/<pkg>`, or as a long
+        // relative path when --prefix sits behind a symlink (macOS /tmp, /var).
+        let suffix = format!("node_modules/{}", entry.recipe.package);
         let lock_integrity = lock_data.ok().and_then(|v| {
             v.get("packages")
                 .and_then(Value::as_object)
-                .and_then(|p| p.get(&format!("node_modules/{}", entry.recipe.package)))
-                .and_then(|v| v.get("integrity"))
-                .and_then(Value::as_str)
-                .map(str::to_owned)
+                .and_then(|p| {
+                    p.iter()
+                        .filter(|(key, _)| key.ends_with(&suffix))
+                        .filter_map(|(_, v)| v.get("integrity").and_then(Value::as_str))
+                        .find(|found| *found == expected)
+                        .map(str::to_owned)
+                })
         });
         if lock_integrity.as_deref() != Some(expected) {
             let _ = std::fs::remove_dir_all(&root);
@@ -848,9 +877,25 @@ pub fn uninstall(id: &str) -> Result<(), CatalogError> {
     if let Some(record) = state.installed.remove(id) {
         remove_owned_files(&record)?;
     }
+    remove_tool_dir(id)?;
     for ids in state.projects.values_mut() { ids.remove(id); }
     state.projects.retain(|_, ids| !ids.is_empty());
     save_state(&state)?;
+    Ok(())
+}
+
+/// Delete `~/.chorus/tools/<id>` (every version, caches) after checking it is
+/// really inside the managed root.
+fn remove_tool_dir(id: &str) -> Result<(), CatalogError> {
+    let root = tools_path()?;
+    let dir = root.join(id);
+    let (Ok(root), Ok(dir)) = (std::fs::canonicalize(&root), std::fs::canonicalize(&dir)) else {
+        return Ok(());
+    };
+    if !dir.starts_with(&root) || dir == root {
+        return Err(CatalogError::Install(format!("refusing to remove path outside Chorus tools: {}", dir.display())));
+    }
+    std::fs::remove_dir_all(dir)?;
     Ok(())
 }
 
@@ -1010,7 +1055,14 @@ pub fn plan(id: &str, action: &str, project: &Path) -> Result<Plan, CatalogError
                 }
             } else {
                 let root = tools_path()?.join(id).join(entry.reviewed_version);
-                items.push(item("file", "fetch", "สร้างไฟล์ skill", Some(display_path(&root))));
+                let (title, detail) = match entry.recipe.method {
+                    InstallMethod::Bundled => ("สร้างไฟล์ skill".to_string(), display_path(&root)),
+                    method => (
+                        format!("ติดตั้ง {} {} ผ่าน {}", entry.recipe.package, entry.reviewed_version, runner(method)),
+                        format!("{} · แยกจากระบบ ไม่แตะ global", display_path(&root)),
+                    ),
+                };
+                items.push(item("file", "fetch", title, Some(detail)));
             }
             items.push(item("check", "verify", "ตรวจว่าใช้งานได้",
                 (!entry.recipe.health_args.is_empty()).then(|| format!("{} {}", entry.recipe.executable, entry.recipe.health_args.join(" ")))));
@@ -1031,9 +1083,8 @@ pub fn plan(id: &str, action: &str, project: &Path) -> Result<Plan, CatalogError
             if !projects.is_empty() {
                 items.push(item("project", "disable", format!("เลิกใช้กับ {} โปรเจกต์", projects.len()), Some(projects.join(", "))));
             }
-            let owned: Vec<String> = state.installed.get(id)
-                .map(|r| r.owned_files.iter().map(|p| display_path(p)).collect())
-                .unwrap_or_default();
+            let tool_dir = tools_path()?.join(id);
+            let owned: Vec<String> = if tool_dir.exists() { vec![display_path(&tool_dir)] } else { vec![] };
             if brew {
                 if state.adopted.contains(id) {
                     items.push(item("keep", "remove", "ไม่ลบแพ็กเกจ Homebrew",

@@ -26,16 +26,54 @@ fn bundled_skill_plan_install_remove_round_trip() {
     assert_eq!(cat::enabled_for(&project).unwrap().len(), 1);
 
     let removal = cat::plan("chorus-review", "remove", &project).unwrap();
-    assert!(removal.items.iter().any(|i| i.kind == "file" && i.detail.as_deref() == Some(&created)));
+    assert!(removal.items.iter().any(|i| i.kind == "file"
+        && i.detail.as_deref().is_some_and(|d| created.starts_with(d))));
 
     cat::perform("remove", "chorus-review", &project).unwrap();
     assert!(!record.owned_files[0].exists());
     let after = cat::load_state().unwrap();
     assert!(after.installed.is_empty() && after.projects.is_empty());
-    assert!(Path::new(home.path()).join(".chorus/tools").exists(), "only the version dir is removed");
+    assert!(!home.path().join(".chorus/tools/chorus-review").exists(), "the whole tool dir goes, not just one version");
 }
 
 #[test]
 fn unknown_action_is_rejected_by_plan() {
     assert!(cat::plan("rtk", "explode", Path::new("/tmp")).is_err());
+}
+
+/// Needs network + npm. Real install of an npm tool into a temp HOME, then a
+/// removal that must leave nothing: not the package, not the npm cache.
+/// Run: cargo test -p chorus-core --test integration_install -- --ignored
+#[test]
+#[ignore]
+fn npm_install_remove_leaves_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let real_path = std::env::var_os("PATH");
+    std::env::set_var("HOME", home.path());
+    if let Some(p) = real_path { std::env::set_var("PATH", p); }
+    let project = home.path().join("demo");
+    std::fs::create_dir_all(&project).unwrap();
+    cat::perform("install_enable", "graft", &project).unwrap();
+    assert!(home.path().join(".chorus/tools/graft/0.18.0/node_modules/.bin/graft").exists());
+    assert!(!home.path().join(".npm").exists(), "npm cache must stay inside the tool dir");
+    cat::perform("remove", "graft", &project).unwrap();
+    assert!(!home.path().join(".chorus/tools/graft").exists());
+    assert!(!home.path().join(".npm").exists());
+    assert!(cat::load_state().unwrap().installed.is_empty());
+}
+
+/// Needs network + uv with Python 3.13. Same guarantee for a uv tool.
+#[test]
+#[ignore]
+fn uv_install_remove_leaves_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("HOME", home.path());
+    let project = home.path().join("demo");
+    std::fs::create_dir_all(&project).unwrap();
+    cat::perform("install_enable", "serena", &project).unwrap();
+    assert!(home.path().join(".chorus/tools/serena").exists());
+    cat::perform("remove", "serena", &project).unwrap();
+    assert!(!home.path().join(".chorus/tools/serena").exists());
+    assert!(!home.path().join(".cache").exists(), "uv cache must stay inside the tool dir");
+    assert!(cat::load_state().unwrap().installed.is_empty());
 }
