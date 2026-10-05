@@ -313,6 +313,10 @@ pub struct Session {
     /// The in-process MCP server handed to every agent (exposes
     /// `memory.propose`). `None` when it couldn't bind a port.
     mcp: Option<McpServer>,
+    /// Where facts and proposals live when this session belongs to a
+    /// project: one store shared by every folder in it. `None` = the
+    /// session's own store, as before projects existed.
+    memory: Option<Store>,
 }
 
 /// Open the shadow repo and pick the base sha a handoff diff is measured
@@ -353,6 +357,7 @@ impl Session {
             models: std::collections::HashMap::new(),
             base_ckpt,
             mcp,
+            memory: None,
         })
     }
 
@@ -383,6 +388,7 @@ impl Session {
             models: std::collections::HashMap::new(),
             base_ckpt,
             mcp,
+            memory: None,
         })
     }
 
@@ -456,10 +462,32 @@ impl Session {
         Ok(ck.snapshot(message)?)
     }
 
+    /// The connection facts and proposals are read from and written to.
+    fn mem_store(&self) -> &Store {
+        self.memory.as_ref().unwrap_or(&self.store)
+    }
+
+    /// Share memory with the rest of a project: facts and the approve queue
+    /// move to `path` (created on first use), and the MCP `memory_propose`
+    /// tool writes there too. This folder's existing facts are copied in once,
+    /// so attaching a folder to a project never loses what it remembered.
+    pub fn set_memory_db(&mut self, path: &Path) -> Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).context("create project memory dir")?;
+        }
+        let shared = Store::open(path).context("open project memory")?;
+        for f in memory::top(self.store.conn(), 1, 1000)? {
+            memory::add(shared.conn(), f.scope, &f.text)?;
+        }
+        self.mcp = McpServer::start(&path.to_string_lossy()).ok();
+        self.memory = Some(shared);
+        Ok(())
+    }
+
     /// The memory inspector's view: rendered project-scope facts, and the
     /// pending proposal queue as `(id, scope, text)`.
     pub fn memory_state(&self) -> Result<MemoryState> {
-        let c = self.store.conn();
+        let c = self.mem_store().conn();
         let facts = memory::top(c, 1, 100)?
             .iter()
             .map(|f| f.text.clone())
@@ -473,7 +501,7 @@ impl Session {
 
     /// Approve or reject a queued proposal.
     pub fn review_proposal(&self, id: i64, approve: bool) -> Result<()> {
-        let c = self.store.conn();
+        let c = self.mem_store().conn();
         if approve {
             memory::approve(c, id)?;
         } else {
@@ -680,6 +708,7 @@ impl Session {
         policy: Policy,
     ) -> Result<RelayReport> {
         let first = chain.first().context("relay chain is empty")?;
+        chorus_acp::reset_cancel();
         let saved_bridge = self.forced_bridge.clone();
         self.forced_bridge = Some(self.resolve_bridge(&first.name, &first.bridge));
 
@@ -687,11 +716,14 @@ impl Session {
 
         let result: Result<RelayReport> =
             match self.run_turn(&first.name, &first.provider, user_text, policy) {
-                Ok(turn) if !is_transient_stop(&turn.stop_reason) => Ok(RelayReport {
-                    answered_by: first.name.clone(),
-                    turn,
-                    handoffs,
-                }),
+                Ok(turn) if !is_transient_stop(&turn.stop_reason) => {
+                    crate::limits::clear(&first.name);
+                    Ok(RelayReport {
+                        answered_by: first.name.clone(),
+                        turn,
+                        handoffs,
+                    })
+                }
                 Ok(turn) => {
                     // Answered but stopped short — relay from here.
                     let reason = HandoffReason::ContextExhausted;
@@ -713,10 +745,22 @@ impl Session {
                         Err(e) => Err(e),
                     }
                 }
+                Err(_) if chorus_acp::was_cancelled() => {
+                    // The user pressed Stop. Not a provider failure — failing
+                    // over would just start the same turn on another agent.
+                    Err(anyhow::anyhow!("หยุดโดยผู้ใช้"))
+                }
                 Err(e) => {
                     // `{e:#}` flattens anyhow's context chain so the classifier
                     // sees the underlying "…rate limit…" message.
-                    match HandoffReason::from_failure(&format!("{e:#}")) {
+                    let msg = format!("{e:#}");
+                    if matches!(
+                        HandoffReason::from_failure(&msg),
+                        Some(HandoffReason::RateLimit | HandoffReason::QuotaExhausted)
+                    ) {
+                        crate::limits::record_hit(&first.name, &msg);
+                    }
+                    match HandoffReason::from_failure(&msg) {
                         None => Err(e).with_context(|| first.name.clone()),
                         Some(reason) => match self.relay_rest(
                             &chain[1..],
@@ -798,6 +842,7 @@ impl Session {
             );
             match h {
                 Ok(hr) if !is_transient_stop(&hr.stop_reason) => {
+                    crate::limits::clear(&spec.name);
                     let turn = TurnReport {
                         user_seq: hr.handoff_seq,
                         agent_seqs: hr.agent_seqs,
@@ -817,8 +862,11 @@ impl Session {
                     from = spec.name.clone();
                 }
                 Err(e) => {
-                    reason = HandoffReason::from_failure(&format!("{e:#}"))
-                        .unwrap_or(HandoffReason::Failover);
+                    let msg = format!("{e:#}");
+                    reason = HandoffReason::from_failure(&msg).unwrap_or(HandoffReason::Failover);
+                    if matches!(reason, HandoffReason::RateLimit | HandoffReason::QuotaExhausted) {
+                        crate::limits::record_hit(&spec.name, &msg);
+                    }
                     from = spec.name.clone();
                 }
             }
@@ -1037,7 +1085,7 @@ impl Session {
             })
             .collect();
 
-        let facts = memory::top(c, 1, 12)?;
+        let facts = memory::top(self.mem_store().conn(), 1, 12)?;
         let memory_items: Vec<ContextItem> = memory::render(&facts)
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -1124,6 +1172,15 @@ impl Session {
         }
     }
 
+    /// The pin for `agent_name`, falling back to its agent without the
+    /// account (`claude@work` uses the model picked for `claude`).
+    fn model_pin(&self, agent_name: &str) -> Option<String> {
+        self.models
+            .get(agent_name)
+            .or_else(|| self.models.get(crate::accounts::split(agent_name).0))
+            .cloned()
+    }
+
     /// What model is pinned for `agent_name`, if any.
     pub fn model_for(&self, agent_name: &str) -> Option<&str> {
         self.models.get(agent_name).map(String::as_str)
@@ -1179,14 +1236,16 @@ impl Session {
             command,
             mcp_servers,
             mode: Some(mode.to_string()),
-            model: self.models.get(agent_name).cloned(),
+            model: self.model_pin(agent_name),
             log: acp_log(),
+            // `codex@work` runs the same CLI with its own CODEX_HOME.
+            env: crate::accounts::env_for(agent_name),
         };
         let mut agent =
             CodexAgent::start(&self.cwd, cfg).with_context(|| format!("start {agent_name}"))?;
         note_mode(agent_name, agent.mode(), self.log_permissions);
         if self.log_permissions {
-            match (self.models.get(agent_name), agent.model()) {
+            match (self.model_pin(agent_name).as_ref(), agent.model()) {
                 // Asked for one and the agent confirmed a different one: the
                 // pick did not take. Say so — the alternative is a user who
                 // thinks they switched models and is reading output from the
@@ -1305,7 +1364,7 @@ impl Session {
 
         let project =
             std::fs::read_to_string(self.cwd.join(".chorus/project.md")).unwrap_or_default();
-        let facts = memory::top(self.store.conn(), 1, 24)
+        let facts = memory::top(self.mem_store().conn(), 1, 24)
             .map(|f| memory::render(&f))
             .unwrap_or_default();
         let task = self.task_state().map(|t| t.render()).unwrap_or_default();
@@ -1536,6 +1595,18 @@ pub struct SessionSummary {
 /// single pass. Opening a `Session` — and its shadow-git checkpoint, MCP
 /// listener — per row would make a picker screen the slowest thing in the
 /// app; this function exists so it never has to.
+/// Rename a session in a store, without opening it.
+pub fn rename_session(db: &Path, id: i64, title: &str) -> Result<()> {
+    let store = Store::open(db).context("open store")?;
+    Ok(ledger::rename_session(store.conn(), id, title)?)
+}
+
+/// Delete a session from a store (see [`ledger::delete_session`]).
+pub fn delete_session(db: &Path, id: i64) -> Result<()> {
+    let store = Store::open(db).context("open store")?;
+    Ok(ledger::delete_session(store.conn(), id)?)
+}
+
 pub fn list_sessions(db: &Path) -> Result<Vec<SessionSummary>> {
     let store = Store::open(db).context("open store")?;
     let c = store.conn();

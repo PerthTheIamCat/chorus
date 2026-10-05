@@ -87,6 +87,33 @@ pub fn discover(cwd: &Path) -> Vec<Skill> {
     out
 }
 
+/// `(name, description, dir)` for every `*/SKILL.md` under an arbitrary root.
+///
+/// For listing skills that are not ours to project — the user's global
+/// `~/.claude/skills`, or a project's own `.claude/skills` — so Settings can
+/// show everything an agent could see. Sorted by name, unreadable entries skipped.
+pub fn list_dir(root: &Path) -> Vec<(String, String, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out: Vec<_> = entries
+        .flatten()
+        .filter_map(|e| {
+            // `is_dir` follows symlinks, which is how most global skills are installed.
+            let dir = e.path();
+            if !dir.is_dir() {
+                return None;
+            }
+            let body = std::fs::read_to_string(dir.join("SKILL.md")).ok()?;
+            let dir_name = dir.file_name()?.to_string_lossy().into_owned();
+            let (name, description) = parse_front_matter(&body, &dir_name);
+            Some((name, description, dir))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 /// Pull `name` and `description` out of a leading `---` block.
 ///
 /// A deliberately small parser, not a YAML dependency: the frontmatter we

@@ -344,7 +344,42 @@ fn keychain_has(_service: &str) -> bool {
 /// machine this app is being built for. Check the file first anyway — Linux,
 /// and Macs where a token was placed by hand, still use it.
 fn claude_logged_in(cred_paths: &[PathBuf]) -> bool {
-    cred_paths.iter().any(|p| p.exists()) || keychain_has("Claude Code-credentials")
+    match claude_auth_status(None) {
+        Some(v) => v,
+        None => cred_paths.iter().any(|p| p.exists()) || keychain_has("Claude Code-credentials"),
+    }
+}
+
+/// Ask the CLI itself: `claude auth status --json` → `loggedIn`. Fast (no
+/// network) and the only check that knows about a *revoked* login — the
+/// keychain item survives revocation, so the old check said "ready" while
+/// every turn spent ~3 minutes retrying a 401 before failing. Also the only
+/// check that works for an extra account (`CLAUDE_CONFIG_DIR`), whose
+/// credentials macOS keeps under a keychain name we do not know.
+///
+/// Reads one boolean; the rest of the output (it includes the account email)
+/// is dropped unprinted. `None` when the CLI is missing or too old to have
+/// the subcommand, so callers fall back to the file/keychain check.
+pub fn claude_auth_status(config_dir: Option<&std::path::Path>) -> Option<bool> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut cmd = Command::new("claude");
+    cmd.args(["auth", "status", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    for var in ["CLAUDECODE", "CLAUDE_CODE_SSE_PORT", "CLAUDE_CODE_ENTRYPOINT"] {
+        cmd.env_remove(var);
+    }
+    if let Some(d) = config_dir {
+        cmd.env("CLAUDE_CONFIG_DIR", d);
+    }
+    let mut child = cmd.spawn().ok()?;
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    let _ = child.wait();
+    let v: serde_json::Value = serde_json::from_str(out.trim()).ok()?;
+    v.get("loggedIn").and_then(serde_json::Value::as_bool)
 }
 
 /// Detect one agent's current runnability. Cheap and non-blocking: a

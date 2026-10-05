@@ -651,6 +651,65 @@ fn parse_reason(s: &str) -> HandoffReason {
     }
 }
 
+/// Stop the turn that is running right now (the shell's Stop button).
+/// Safe to call from any thread, with or without a live engine.
+/// JSON: {"ok":true,"was_running":bool}
+#[no_mangle]
+pub extern "C" fn chorus_cancel() -> *mut c_char {
+    out(serde_json::json!({ "ok": true, "was_running": chorus_cli::cancel_active() }).to_string())
+}
+
+/// Point this session's memory (facts + approve queue + MCP `memory_propose`)
+/// at a shared project store. The folder's own facts are copied in once.
+/// JSON: {"ok":true}
+///
+/// # Safety
+/// `e` must be a live handle; `path` a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_memory_db(
+    e: *mut ChorusEngine,
+    path: *const c_char,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let Some(path) = borrow(path) else {
+        return err("path must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        engine.session.set_memory_db(std::path::Path::new(path))
+    })) {
+        Ok(Ok(())) => out(serde_json::json!({ "ok": true }).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in set_memory_db"),
+    }
+}
+
+/// Live view of the running turn. `cb(ctx, kind, text)` is called from the
+/// turn's thread for each update: kind is `thought` | `message` | `tool` |
+/// `tool_done`. Both strings are only valid during the call. Pass a null `cb`
+/// to stop. Display only: the ledger is unaffected.
+///
+/// # Safety
+/// `ctx` must stay valid until the callback is replaced or cleared.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_progress_callback(
+    cb: Option<extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char)>,
+    ctx: *mut std::ffi::c_void,
+) {
+    let Some(cb) = cb else {
+        chorus_cli::set_progress_sink(None);
+        return;
+    };
+    let ctx = ctx as usize;
+    chorus_cli::set_progress_sink(Some(Box::new(move |kind: &str, text: &str| {
+        let (Ok(k), Ok(t)) = (CString::new(kind), CString::new(text.replace('\0', ""))) else {
+            return;
+        };
+        cb(ctx as *mut std::ffi::c_void, k.as_ptr(), t.as_ptr());
+    })));
+}
+
 /// How many events still have no stored summary rungs. The shell polls this
 /// to decide whether a background compaction pass is worth running.
 /// JSON: {"ok":true,"pending":N}
@@ -877,6 +936,167 @@ pub unsafe extern "C" fn chorus_set_model(
     match r {
         Ok(()) => out(serde_json::json!({ "ok": true }).to_string()),
         Err(_) => err("panic in set_model"),
+    }
+}
+
+/// Every skill an agent in this workspace could see, grouped by where it lives:
+/// `chorus` (`.chorus/skills`, projected to every agent), `project`
+/// (`.claude/skills`) and `user` (`~/.claude/skills`). Read-only.
+/// JSON: {"ok":true,"skills":[{"name","description","path","source"}]}
+///
+/// # Safety
+/// `cwd` must be a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_list_skills(cwd: *const c_char) -> *mut c_char {
+    let Some(cwd) = borrow(cwd) else {
+        return err("cwd must be valid UTF-8");
+    };
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let cwd = std::path::Path::new(cwd);
+        let mut roots = vec![
+            ("chorus", cwd.join(chorus_core::skills::SKILLS_DIR)),
+            ("project", cwd.join(chorus_core::skills::CLAUDE_SKILLS_DIR)),
+        ];
+        if let Some(home) = std::env::var_os("HOME") {
+            roots.push(("user", std::path::Path::new(&home).join(".claude/skills")));
+        }
+        let mut skills = Vec::new();
+        for (source, root) in roots {
+            for (name, description, dir) in chorus_core::skills::list_dir(&root) {
+                skills.push(serde_json::json!({
+                    "name": name, "description": description,
+                    "path": dir.join("SKILL.md").to_string_lossy(), "source": source,
+                }));
+            }
+        }
+        skills
+    }));
+    match r {
+        Ok(skills) => out(serde_json::json!({ "ok": true, "skills": skills }).to_string()),
+        Err(_) => err("panic in list_skills"),
+    }
+}
+
+/// Every account of every agent with what is known about its usage: Codex's
+/// own 5-hour/weekly percentages, and for Claude the last limit it hit.
+/// JSON: {"ok":true,"accounts":[{name,agent,account,dir,ready,login,rate_limits,hit}]}
+#[no_mangle]
+pub extern "C" fn chorus_usage_report() -> *mut c_char {
+    match catch_unwind(chorus_cli::limits::usage_report) {
+        Ok(rows) => out(serde_json::json!({ "ok": true, "accounts": rows }).to_string()),
+        Err(_) => err("panic in usage_report"),
+    }
+}
+
+/// Add an extra account (`name` = a-z0-9-_) for `agent`. Creates its config
+/// dir; the user then logs in with the returned command.
+/// JSON: {"ok":true,"dir":"…","login":"…"}
+///
+/// # Safety
+/// `agent` and `name` must be valid NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_add_account(
+    agent: *const c_char,
+    name: *const c_char,
+) -> *mut c_char {
+    let (Some(agent), Some(name)) = (borrow(agent), borrow(name)) else {
+        return err("agent/name must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| chorus_cli::accounts::add(agent, name))) {
+        Ok(Ok(dir)) => out(serde_json::json!({
+            "ok": true,
+            "dir": dir.to_string_lossy(),
+            "login": chorus_cli::accounts::login_command(agent, Some(name)),
+        })
+        .to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in add_account"),
+    }
+}
+
+/// Remove an extra account and its config dir (its login). JSON: {"ok":true}
+///
+/// # Safety
+/// `agent` and `name` must be valid NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_remove_account(
+    agent: *const c_char,
+    name: *const c_char,
+) -> *mut c_char {
+    let (Some(agent), Some(name)) = (borrow(agent), borrow(name)) else {
+        return err("agent/name must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        chorus_cli::accounts::remove(agent, name)
+    })) {
+        Ok(Ok(())) => out(serde_json::json!({ "ok": true }).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in remove_account"),
+    }
+}
+
+/// Rename a session. JSON: {"ok":true}
+///
+/// # Safety
+/// `db_path` and `title` must be valid NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_rename_session(
+    db_path: *const c_char,
+    id: i64,
+    title: *const c_char,
+) -> *mut c_char {
+    let (Some(db), Some(title)) = (borrow(db_path), borrow(title)) else {
+        return err("db_path/title must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        chorus_cli::session::rename_session(&PathBuf::from(db), id, title)
+    })) {
+        Ok(Ok(())) => out(serde_json::json!({ "ok": true }).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in rename_session"),
+    }
+}
+
+/// Delete a session and its events. Refused if another session forked from
+/// it. Close the session first if it is open. JSON: {"ok":true}
+///
+/// # Safety
+/// `db_path` must be a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_delete_session(db_path: *const c_char, id: i64) -> *mut c_char {
+    let Some(db) = borrow(db_path) else {
+        return err("db_path must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        chorus_cli::session::delete_session(&PathBuf::from(db), id)
+    })) {
+        Ok(Ok(())) => out(serde_json::json!({ "ok": true }).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in delete_session"),
+    }
+}
+
+/// Ask an agent for its current model list (opens a real ACP session in
+/// `cwd`, so it is slow — call off the UI thread) and refresh the cache that
+/// `chorus_list_agents` reads. JSON: {"ok":true,"count":N}
+///
+/// # Safety
+/// `agent_id` and `cwd` must be valid NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_refresh_models(
+    agent_id: *const c_char,
+    cwd: *const c_char,
+) -> *mut c_char {
+    let (Some(agent_id), Some(cwd)) = (borrow(agent_id), borrow(cwd)) else {
+        return err("agent_id/cwd must be valid UTF-8");
+    };
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        chorus_cli::agents::refresh_models(agent_id, std::path::Path::new(cwd))
+    }));
+    match r {
+        Ok(Ok(m)) => out(serde_json::json!({ "ok": true, "count": m.len() }).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in refresh_models"),
     }
 }
 

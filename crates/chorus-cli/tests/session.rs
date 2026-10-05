@@ -981,3 +981,31 @@ fn a_model_pin_is_per_agent_and_clearable() {
     assert_eq!(s.model_for("codex"), None, "an empty id clears the pin");
     assert_eq!(s.model_for("claude"), Some("haiku"), "clearing one must not clear the other");
 }
+
+/// Two folders in one project see each other's facts: the first folder's own
+/// facts are carried into the shared store, and a fact approved from the
+/// second folder shows up in the first.
+#[test]
+fn project_memory_is_shared_across_folders() {
+    let root = std::env::temp_dir().join(format!("chorus-projmem-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let (a, b) = (root.join("a"), root.join("b"));
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let shared = root.join("project/memory.db");
+
+    let db_a = a.join("store.db");
+    let mut sa = Session::create(&db_a, &a, "a").unwrap();
+    chorus_core::memory::add(chorus_core::store::Store::open(&db_a).unwrap().conn(), 1, "folder A fact")
+        .unwrap();
+    sa.set_memory_db(&shared).unwrap();
+
+    let mut sb = Session::create(&b.join("store.db"), &b, "b").unwrap();
+    sb.set_memory_db(&shared).unwrap();
+    assert!(sb.memory_state().unwrap().0.iter().any(|f| f == "folder A fact"));
+
+    let id = chorus_core::memory::propose(
+        chorus_core::store::Store::open(&shared).unwrap().conn(), 1, "from B", None).unwrap();
+    sb.review_proposal(id, true).unwrap();
+    assert!(sa.memory_state().unwrap().0.iter().any(|f| f == "from B"));
+}

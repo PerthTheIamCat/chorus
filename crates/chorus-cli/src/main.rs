@@ -54,6 +54,10 @@ fn main() -> Result<()> {
         "skills" => skills_cmd(&args[1..]),
         "mcp" => mcp_cmd(&args[1..]),
         "models" => models_cmd(&args[1..]),
+        "usage" => {
+            println!("{}", serde_json::to_string_pretty(&chorus_cli::limits::usage_report())?);
+            Ok(())
+        }
         "doctor" => doctor_cmd(),
         "demo" => demo_cmd(&args[1..]),
         other => {

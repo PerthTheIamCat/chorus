@@ -21,6 +21,9 @@ struct ChorusApp: App {
                     NSApp.windows.first?.makeKeyAndOrderFront(nil)
                 }
         }
-        .windowStyle(.hiddenTitleBar)
+        // Not `.hiddenTitleBar`: with a NavigationSplitView and a toolbar it
+        // shifts hit-testing away from what is drawn, so sidebar clicks landed
+        // on the row next to the one under the pointer.
+        .windowToolbarStyle(.unified)
     }
 }

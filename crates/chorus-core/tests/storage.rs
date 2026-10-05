@@ -360,3 +360,34 @@ fn history_walks_the_fork_chain() {
         .collect();
     assert_eq!(rh.len(), 3);
 }
+
+
+#[test]
+fn rename_and_delete_session() {
+    let st = setup();
+    let c = st.conn();
+    let user = actor::intern(c, "user", "human").unwrap();
+    let keep = ledger::new_session(c, "keep", "/tmp").unwrap();
+    let gone = ledger::new_session(c, "gone", "/tmp").unwrap();
+    let big = "x".repeat(10_000);
+    ledger::append(c, &NewEvent::new(keep, EventKind::Msg, user, big.clone())).unwrap();
+    ledger::append(c, &NewEvent::new(gone, EventKind::Msg, user, big)).unwrap();
+    ledger::append(c, &NewEvent::new(gone, EventKind::Msg, user, "only here")).unwrap();
+
+    ledger::rename_session(c, keep, "renamed").unwrap();
+    let t: String = c.query_row("SELECT title FROM session WHERE id = ?1", [keep], |r| r.get(0)).unwrap();
+    assert_eq!(t, "renamed");
+
+    // A fork blocks deleting its parent.
+    let fork = ledger::fork(c, gone, 0, "fork").unwrap();
+    assert!(ledger::delete_session(c, gone).is_err());
+    ledger::delete_session(c, fork).unwrap();
+
+    ledger::delete_session(c, gone).unwrap();
+    let n: i64 = c.query_row("SELECT COUNT(*) FROM event WHERE sess = ?1", [gone], |r| r.get(0)).unwrap();
+    assert_eq!(n, 0);
+    // The shared blob is still referenced by `keep`, so it survives.
+    let blobs: i64 = c.query_row("SELECT COUNT(*) FROM blob", [], |r| r.get(0)).unwrap();
+    assert_eq!(blobs, 1);
+    assert!(ledger::delete_session(c, gone).is_err());
+}

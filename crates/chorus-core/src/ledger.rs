@@ -196,6 +196,53 @@ pub fn fork(c: &Connection, sess: i64, at_seq: i64, title: &str) -> Result<i64> 
     Ok(c.last_insert_rowid())
 }
 
+/// Rename a session. The title is what lists show; the ledger is untouched.
+pub fn rename_session(c: &Connection, sess: i64, title: &str) -> Result<()> {
+    let n = c.execute("UPDATE session SET title = ?1 WHERE id = ?2", (title, sess))?;
+    if n == 0 {
+        return Err(ChorusError::Invalid(format!("no session {sess}")));
+    }
+    Ok(())
+}
+
+/// Delete a session, its events (and their stored summaries), then any blob
+/// nothing references any more.
+///
+/// Refuses when another session was forked from this one: a fork copies no
+/// events and reads its history through the parent, so deleting the parent
+/// would silently empty the fork.
+pub fn delete_session(c: &Connection, sess: i64) -> Result<()> {
+    let forks: i64 = c.query_row(
+        "SELECT COUNT(*) FROM session WHERE forked_from = ?1",
+        [sess],
+        |r| r.get(0),
+    )?;
+    if forks > 0 {
+        return Err(ChorusError::Invalid(format!(
+            "session {sess} has {forks} fork(s); delete those first"
+        )));
+    }
+    c.execute_batch("BEGIN")?;
+    let r = (|| -> Result<()> {
+        c.execute(
+            "DELETE FROM summary WHERE seq IN (SELECT seq FROM event WHERE sess = ?1)",
+            [sess],
+        )?;
+        c.execute("DELETE FROM event WHERE sess = ?1", [sess])?;
+        let n = c.execute("DELETE FROM session WHERE id = ?1", [sess])?;
+        if n == 0 {
+            return Err(ChorusError::Invalid(format!("no session {sess}")));
+        }
+        crate::blob::gc(c, now_ms() + 1)?;
+        Ok(())
+    })();
+    match r {
+        Ok(()) => c.execute_batch("COMMIT")?,
+        Err(_) => c.execute_batch("ROLLBACK")?,
+    }
+    r
+}
+
 /// Full-text search over event bodies. Uses the `ev_fts` FTS5 index when
 /// available, and falls back to a `LIKE` scan otherwise (e.g. this sqlite
 /// build lacks FTS5).

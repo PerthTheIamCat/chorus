@@ -76,6 +76,33 @@ char *chorus_memory_review(const ChorusEngine *e, int64_t proposal_id, int appro
 char *chorus_working_diff(const ChorusEngine *e);
 
 /* Take a manual checkpoint. JSON: {"ok":true,"sha":"..."} */
+/* Stop the running turn; callable from any thread. {"ok":true,"was_running":bool} */
+char *chorus_cancel(void);
+
+/* Skills visible in a workspace (chorus/project/user). {"ok":true,"skills":[{name,description,path,source}]} */
+char *chorus_list_skills(const char *cwd);
+
+/* Accounts & usage. Every account of every agent, with Codex's 5h/weekly
+   percentages and Claude's last limit hit. Accounts are config dirs. */
+char *chorus_usage_report(void);
+char *chorus_add_account(const char *agent, const char *name);
+char *chorus_remove_account(const char *agent, const char *name);
+
+/* Rename / delete a session by store path (no open engine needed). {"ok":true} */
+char *chorus_rename_session(const char *db_path, int64_t id, const char *title);
+char *chorus_delete_session(const char *db_path, int64_t id);
+
+/* Re-ask an agent for its models and refresh the cache (slow: opens a session). {"ok":true,"count":N} */
+char *chorus_refresh_models(const char *agent_id, const char *cwd);
+
+/* Share memory across a project: facts/approve queue/MCP go to `path`. {"ok":true} */
+char *chorus_set_memory_db(ChorusEngine *e, const char *path);
+
+/* Live updates of the running turn: kind = thought|message|tool|tool_done.
+   Strings valid only during the call. NULL cb clears. Display only. */
+typedef void (*chorus_progress_cb)(void *ctx, const char *kind, const char *text);
+void chorus_set_progress_callback(chorus_progress_cb cb, void *ctx);
+
 char *chorus_snapshot(const ChorusEngine *e, const char *message);
 
 /* Roll the workspace back to `sha` (NULL/"" = the session base).

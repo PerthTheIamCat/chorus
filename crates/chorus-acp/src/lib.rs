@@ -48,6 +48,61 @@ fn log_raw(log: &Log, dir: &str, text: &str) {
     }
 }
 
+/// Pid of the agent process currently answering a turn (0 = none).
+///
+/// Process-global on purpose: the shell's Stop button has no handle to the
+/// `Agent` (it lives on the turn thread, blocked in `prompt`), and only one
+/// turn runs at a time. Killing the process unblocks `prompt` with an error;
+/// [`was_cancelled`] is how the caller tells that apart from a real failure.
+static ACTIVE_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Where live `session/update`s go while a turn runs: `(kind, text)` with kind
+/// one of `thought`, `message`, `tool`, `tool_done`. Process-global for the same
+/// reason as [`ACTIVE_PID`]: the shell wants a live view of the one running
+/// turn and has no other way in while that turn blocks its engine queue.
+/// Display only — nothing here is written to the ledger.
+pub type ProgressSink = Box<dyn Fn(&str, &str) + Send + Sync>;
+static PROGRESS: Mutex<Option<ProgressSink>> = Mutex::new(None);
+
+pub fn set_progress_sink(sink: Option<ProgressSink>) {
+    if let Ok(mut p) = PROGRESS.lock() {
+        *p = sink;
+    }
+}
+
+pub fn emit_progress(kind: &str, text: &str) {
+    if let Ok(p) = PROGRESS.lock() {
+        if let Some(f) = p.as_ref() {
+            f(kind, text);
+        }
+    }
+}
+
+/// Stop the running turn. Returns false when no agent is running.
+pub fn cancel_active() -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    let pid = ACTIVE_PID.load(SeqCst);
+    if pid == 0 {
+        return false;
+    }
+    CANCELLED.store(true, SeqCst);
+    // Children first (the bridge's node/codex), then the bridge itself.
+    let _ = Command::new("pkill").args(["-TERM", "-P", &pid.to_string()]).status();
+    let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    true
+}
+
+/// True if the last turn ended because [`cancel_active`] killed it.
+pub fn was_cancelled() -> bool {
+    CANCELLED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Call before starting a turn.
+pub fn reset_cancel() {
+    CANCELLED.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// A spawned agent process we speak ACP to.
 pub struct Agent {
     child: Child,
@@ -71,8 +126,15 @@ pub enum Inbound {
 
 impl Agent {
     pub fn spawn(cmd: &[String], log: Log) -> Result<Self> {
+        Self::spawn_env(cmd, &[], log)
+    }
+
+    /// Like [`spawn`], with extra environment variables — how an account is
+    /// chosen (`CODEX_HOME` / `CLAUDE_CONFIG_DIR` pointing at its own dir).
+    pub fn spawn_env(cmd: &[String], env: &[(String, String)], log: Log) -> Result<Self> {
         let (program, args) = cmd.split_first().ok_or_else(|| anyhow!("empty command"))?;
         let mut command = Command::new(program);
+        command.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         command
             .args(args)
             .stdin(Stdio::piped())
@@ -86,6 +148,7 @@ impl Agent {
             command.env_remove(var);
         }
         let mut child = command.spawn().with_context(|| format!("spawn {cmd:?}"))?;
+        ACTIVE_PID.store(child.id(), std::sync::atomic::Ordering::SeqCst);
 
         let stdout = child.stdout.take().expect("piped");
         let stderr = child.stderr.take().expect("piped");
@@ -291,6 +354,9 @@ impl Agent {
 
 impl Drop for Agent {
     fn drop(&mut self) {
+        let _ = ACTIVE_PID.compare_exchange(
+            self.child.id(), 0,
+            std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

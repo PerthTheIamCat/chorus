@@ -98,6 +98,28 @@ impl HandoffReason {
             return Some(Self::RateLimit);
         }
 
+        // The login is gone (revoked, expired, never done). This agent cannot
+        // answer until a person logs in again, so the turn moves on. Checked
+        // before the context rule: these messages say "token" too.
+        //
+        // Observed live from claude-agent-acp on 5 Oct 2026, after ~190 s of
+        // the CLI retrying on its own:
+        //   "Failed to authenticate. API Error: 401 … OAuth access token has been revoked."
+        //   "Authentication required"   (same machine, sandbox off)
+        const AUTH: &[&str] = &[
+            "failed to authenticate",
+            "authentication required",
+            "authentication_error",
+            "token has been revoked",
+            "not logged in",
+            "please run /login",
+            "invalid api key",
+            "401",
+        ];
+        if AUTH.iter().any(|k| m.contains(k)) {
+            return Some(Self::Failover);
+        }
+
         // The window is full.
         if (m.contains("context") || m.contains("token"))
             && (m.contains("exhaust")
