@@ -42,17 +42,18 @@ Swift ทำแค่วาดกับรับ input เพื่อให้�
 
 ---
 
-## 3. สถานะตอนนี้ (11 ก.ย. 2026)
+## 3. สถานะตอนนี้ (12 ก.ย. 2026)
 
-**Phase 0–2 ครบ + macOS shell ครบ design §7** — เทสต์ผ่าน 60/60 · clippy clean
+**Phase 0–2 ครบ + macOS shell ครบ + warm tier + UI ที่เลือกโหมดเองแล้ว** — เทสต์ผ่าน 76/76 · clippy 0 warning · build 0 warning
+(ตัวเลขนี้ verify โดย build ใหม่จากศูนย์บนเครื่องอื่น ไม่ใช่เชื่อ log เดิม)
 
 | crate | ทำอะไร |
 |---|---|
-| `chorus-core` | ledger (+ fork-chain `history()`), blob store, memory + approve queue (v2), token counter, render, context assembler, handoff brief, projector, checkpoint (shadow git + `apply_reverse`), compaction (Extractive + **Ollama**), **mcp (Streamable-HTTP: `memory_propose` — ทำงานกับ Codex)** |
+| `chorus-core` | ledger (+ fork-chain `history()`), blob store, memory + approve queue (v2), token counter, render, context assembler, handoff brief, projector, checkpoint (shadow git + `apply_reverse`), compaction (Extractive + **Ollama**) — **รังส์ L1/L2 เก็บลงตาราง `summary` (schema v3) ไม่ generate ตอน assemble**, **mcp (Streamable-HTTP: `memory_propose` — ทำงานกับ Codex)** |
 | `chorus-acp` | ACP client + `acp-probe` + mock (`--fail`) + `CodexAgent` + `bridge_for` (codex/claude/gemini) · strip `CLAUDECODE` |
 | `chorus-cli` | lib+bin · `bench`/`run`(+`--chain`/`--read-only`)/`handoff`/`memory`/`compare` · `Session` engine |
-| `chorus-ffi` | C ABI (`chorus.h`) — engine/run_turn(+interactive callback)/run_relay/compare/handoff/events_since/working_diff/snapshot/restore/reject_hunks/memory_state+review · JSON ล้วน · panic-guarded |
-| `apps/macos` | SwiftUI shell — sidebar (single/relay/compare/**ask-each**) · thread + agent blame · Context/Changes(**per-hunk keep-reject**)/Memory panes · handoff + compare sheets · **interactive permission dialog** · `apps/macos/build.sh` |
+| `chorus-ffi` | C ABI (`chorus.h`) — engine/run_turn(+interactive callback)/run_relay/compare/handoff/events_since/working_diff/snapshot/restore/reject_hunks/memory_state+review/**compact/uncompacted/task_state** · JSON ล้วน · panic-guarded |
+| `apps/macos` | SwiftUI shell — sidebar (single/relay/compare/**ask-each**) · thread + agent blame · Context/Changes(**per-hunk keep-reject**)/Memory panes · handoff + compare sheets · **interactive permission dialog** · **Task state pane + warm-tier backlog (`compactIfIdle` หลังทุกเทิร์น)** · `apps/macos/build.sh` |
 
 **Flow ที่ทำงานจริงกับ Codex**: หลาย agent ใน session เดียว · ledger เป็น SoT · จำข้ามเทิร์นจาก ledger
 (ไม่ใช่ provider session) · handoff กลางคัน + Verify echo-back · brief พก diff จาก checkpoint ·
@@ -60,8 +61,8 @@ relay auto-failover 429/quota · compare (fork ต่อ agent) · projector เ
 
 **ยังต้องเพื่อน (แต่ไม่บล็อกอะไร)**:
 - **Gemini adapter** — ไม่มี `gemini` CLI (`bridge_for` เตรียมไว้ · ลง CLI แล้วใช้ได้ทันที)
-- **claude-code-acp** — โค้ดพร้อม · เครื่องนี้ `claude` OAuth หมดอายุ → login ใหม่
-- **Ollama compaction** — โค้ดพร้อม · `brew install ollama && ollama pull qwen2.5:3b` แล้วตั้ง `CHORUS_SUMMARY_MODEL`
+- **Claude bridge** — package ถูก rename เป็น `@zed-industries/claude-agent-acp` (ตัวเก่า `claude-code-acp` deprecated) · `bridge_for` ชี้ตัวใหม่แล้ว ถ้าเครื่องยังมีแต่ตัวเก่าให้ตั้ง `CHORUS_CLAUDE_BRIDGE="npx -y @zed-industries/claude-code-acp"` · เครื่องนี้ `claude` OAuth หมดอายุ → login ใหม่
+- **Ollama compaction** — ใช้ได้จริงแล้วผ่าน `chorus compact` (ไม่อยู่บน turn path อีกต่อไป) · `brew install ollama && ollama pull qwen2.5:3b` แล้วตั้ง `CHORUS_SUMMARY_MODEL`
 - **embedding + sqlite-vec** — ต้องตัดสิน dep (MLX / `NLEmbedding` / sqlite-vec)
 - **Seatbelt sandbox · notarize · .app bundle** — ต้อง Apple Developer account
 - **event push** — shell ยัง poll `events_since` (ทำงานได้ดี · push เป็น optimization)
@@ -73,20 +74,37 @@ relay auto-failover 429/quota · compare (fork ต่อ agent) · projector เ
 ledger ดิบ 103,553 token
   @200k window → 16,226 token (15.7%)   demoted/dropped 0/0
   @6k  window →  2,490 token (2.4%)     demoted/dropped 40/11
-store.db 92 KB / 78 events   (เดิม 84 KB — schema v2 เพิ่มตาราง fact_proposal + index ว่าง ~8 KB)
+store.db 100 KB / 78 events   (schema v3 เพิ่มตาราง summary)
 ```
 
 **Invariant 3 ข้อ** — ถ้า bench แสดงผิดจากนี้แปลว่ามี regression:
 1. `blob rows = 1` (dedup ทำงาน)
 2. assembled เป็นเศษเสี้ยวของ raw
 3. **demoted ต้องมาก่อน dropped เสมอ** — ย่อก่อนทิ้ง ไม่ใช่ตัดท้าย
+4. **task state ต้องไม่ว่าง** บน session ที่พูดอะไรไปแล้ว (bench section `real path`)
+5. **assemble_context ต้องไม่เรียก summariser** — bench ตั้ง `CHORUS_SUMMARY_MODEL` แล้ววัดเวลา ถ้าเกิน 2 วิ = regression
+
+> bench เดิมป้อน `task_state` ให้ตัวเองแล้วรายงานว่าผ่าน ทั้งที่ของจริงส่ง `String::new()`
+> มาหลายเดือน — harness ที่ป้อน input ให้ตัวเองวัดได้แค่ตัวเอง ข้อ 4–5 เลยรันผ่าน
+> `Session::assemble_context` ตัวจริง ไม่ใช่ `AssembleInput` ที่ประกอบมือ
 
 ---
 
 ## 4. คำสั่ง
 
+### ติดตั้งเป็นคำสั่ง `chorus` (ไม่บังคับ)
+
 ```bash
-cargo test                              # 60 tests
+cargo install --path crates/chorus-cli    # ได้คำสั่ง chorus
+cargo install --path crates/chorus-acp    # ได้ acp-probe ซึ่ง `chorus demo` ต้องใช้
+```
+
+**ต้องลงทั้งสองอัน** — `chorus` กับ `acp-probe` อยู่คนละ crate และ `chorus demo` spawn
+`acp-probe --serve-mock` เป็น agent ปลอม ถ้าลงแค่อันแรก demo จะขึ้น error ที่บอกวิธีแก้ให้เอง
+ไม่ลงก็ได้ ใช้ `cargo run -p chorus-cli -- <คำสั่ง>` ในโฟลเดอร์โปรเจกต์แทน
+
+```bash
+cargo test                              # 76 tests
 cargo run -p chorus-cli -- bench        # วัด invariant ทั้ง 3
 cargo run --bin acp-probe -- --cwd /tmp/acp-scratch --mock         # ลอง ACP กับ agent ปลอม
 cargo run -p chorus-acp --example codex_smoke -- /tmp/codex-smoke   # CodexAgent กับ bridge จริง (ต้อง codex login)
@@ -98,9 +116,12 @@ cargo run -p chorus-cli -- run <cwd> "<prompt>" --chain codex,claude-opus --db /
 cargo run -p chorus-cli -- handoff --db /tmp/s.db --session 1 --to codex --reason rate_limit --goal "..."
 cargo run -p chorus-cli -- compare "<prompt>" --db /tmp/s.db --session 1 --agents codex,claude-opus
 cargo run -p chorus-cli -- memory pending --db /tmp/s.db          # approve queue
+cargo run -p chorus-cli -- compact --db /tmp/s.db --session 1 [--limit N]   # เติม warm tier (L1/L2)
+cargo run -p chorus-cli -- demo          # เล่าทั้งเรื่องด้วย agent ปลอม ไม่ต้องมี API key
+cargo run -p chorus-cli -- doctor        # ทำไมเทิร์นถึงรัน/ไม่รัน — agent, login, bridge, env
 
 # macOS shell
-apps/macos/build.sh                     # cargo build -p chorus-ffi + swift build + run
+apps/macos/build.sh                     # cargo build -p chorus-ffi + swift build + bundle + open
 ```
 
 **รัน `cargo test` และ `bench` ทุกครั้งที่แก้ core** — bench คือตัวที่จับ regression ที่ test จับไม่ได้
@@ -126,10 +147,11 @@ crates/chorus-core/src/
   handoff.rs    Brief::build + render_markdown + to_json + HandoffReason::from_failure (relay classifier) — pure
   projector.rs  render memory → CLAUDE.md/AGENTS.md/GEMINI.md + drift detect (marker + hash)
   checkpoint.rs shadow git repo <cwd>/.chorus/ckpt — snapshot/diff_since/restore (shell ออก git)
-  compaction.rs Summarizer trait · Extractive (model-free) + Ollama (localhost:11434) · best() เลือกให้
+  compaction.rs Summarizer trait · Extractive (model-free) + Ollama · best() เลือกให้
+                + warm tier: save_rungs/load_session_rungs/uncompacted — L1/L2 เก็บในตาราง `summary`
   mcp.rs        Streamable-HTTP MCP server (std::net, ไม่มี dep) — tool memory_propose · ทำงานกับ Codex แล้ว (persistent conn + held-open SSE)
 crates/chorus-cli/src/main.rs           bench + run + handoff + memory + compare subcommands
-crates/chorus-cli/src/session.rs        Session engine — run_turn/run_relay/handoff/compare/assemble_context/events_since
+crates/chorus-cli/src/session.rs        Session engine — run_turn/run_relay/handoff/compare/assemble_context/task_state/compact/events_since
 crates/chorus-acp/src/lib.rs            ACP client (Agent) + mock agent module (--fail สำหรับเทสต์ relay)
 crates/chorus-acp/src/codex.rs         CodexAgent adapter + bridge_for(name) — start/load/prompt → TurnOutcome
 crates/chorus-acp/src/bin/acp_probe.rs  สไปก์ที่ 1 (probe)
@@ -157,6 +179,17 @@ evals/handoff/                          สไปก์ที่ 2 (README + เ
 | macOS shell | SwiftUI ตัวจริงเลย ไม่แวะ Tauri | โฟกัส macOS อย่างเดียวแล้ว |
 | mock agent | อยู่ใน binary เดียวกับ probe (`--mock`) | กัน "ไม่ได้ build / path ผิด" |
 | permission ใน probe | **ปฏิเสธเป็นดีฟอลต์** และไม่เขียนไฟล์เลยแม้ใส่ `--allow` | อยากเห็นรูปร่างคำขอ ไม่ได้อยากปล่อย agent เข้าโปรเจกต์จริง |
+| L1/L2 | เก็บใน **ตาราง `summary` แยก** ไม่ใช่ `EventKind::Summary` event | summary เป็น metadata ของเทิร์น ไม่ใช่สิ่งที่ใครพูด — ใส่ใน ledger จะทำให้ `history()` กับตัวเลข dedup เพี้ยน |
+| ใครสร้าง L1/L2 | `chorus compact` เท่านั้น **ห้าม** ทำใน `assemble_context` |
+| compact หนึ่งรอบ | หยุดที่ `limit` **หรือ** เพดานเวลา 3 วิ (`CHORUS_COMPACT_BUDGET_MS`) แล้วแต่อันไหนถึงก่อน | มันใช้ serial queue ร่วมกับเทิร์น เพดานเวลาจึงเป็นเพดานที่ user ต้องรอด้วย · เช็ค*หลัง*เขียนเสมอ เพื่อให้ทุกรอบคืบหน้าอย่างน้อย 1 event |
+| โหมดส่งงาน | ไม่มีให้เลือก — ทุกเทิร์นวิ่งผ่าน relay เสมอ (chain ยาว 1 = single) | failover ติดมา default โดย user ไม่ต้องรู้จักคำว่า relay |
+| handoff | ปุ่มเดียว ไม่มีฟอร์ม (`handoff_auto` + `task_state`) | ให้คนกรอกสิ่งที่ ledger รู้อยู่แล้วคือการให้พิมพ์ซ้ำ |
+| รายการโมเดล | curated ใน `agents.rs` + override ด้วย env | **ACP ไม่มีเมธอดถามรายการโมเดล** อย่าเข้าใจผิดว่าเป็นข้อมูลจาก provider |
+| auth detection | `which <cli>` + เช็คว่ามีไฟล์ credential อยู่ไหม (`.exists()` เท่านั้น) | **ห้ามอ่าน/พิมพ์ไฟล์ credential เด็ดขาด** | read path ที่เรียก summariser = 1 model call ต่อ event ต่อเทิร์น (400 events → 800 HTTP) |
+| fallback ตอนยังไม่ compact | `Extractive` เสมอ ไม่ใช่ `best()` | `best()` อาจไปเรียก Ollama ซึ่งพา network เข้ามาบน critical path |
+| task state | derive จาก ledger (goal = ข้อความแรกของ user, pending/constraints = handoff brief ล่าสุด, done = Decision + L2 ที่เก็บไว้) | ไม่ต้องเพิ่ม state ใหม่ และไม่มีวันว่างบน session ที่พูดอะไรไปแล้ว |
+| MCP body | เพดาน 64 KB → 413 · `Origin` ใด ๆ → 403 · read timeout 30 นาที | `vec![0u8; content_length]` ตาม header = OOM จาก header บรรทัดเดียว · Origin guard คือกัน DNS-rebinding ตามที่ MCP spec แนะนำ |
+| bridge ของแต่ละเจ้า | override ได้ด้วย env (`CHORUS_CLAUDE_BRIDGE` ฯลฯ) | package ถูก rename มาแล้วครั้งหนึ่ง ไม่ควรต้อง rebuild เพื่อตามชื่อ |
 
 ---
 
@@ -174,6 +207,222 @@ evals/handoff/                          สไปก์ที่ 2 (README + เ
 ### 7.2 อย่าให้ agent เขียน memory ตรง ๆ
 ผ่าน MCP tool `memory_propose` → approve queue (`chorus memory` / Memory pane) — **ทำแล้ว**
 ปล่อยอิสระเมื่อไหร่ ความจำจะเต็มไปด้วยข้อสรุปผิดภายในไม่กี่วัน
+
+### 7.2b assemble_context ห้ามสร้างอะไรทั้งนั้น
+มันรันทุกเทิร์น ก่อน agent จะเห็น prompt ด้วยซ้ำ ถ้ามันเรียก summariser ขึ้นมาเมื่อไหร่
+session ที่มี 400 event จะกลายเป็น 800 model call ต่อหนึ่งเทิร์น — เคยเป็นแบบนั้นมาแล้ว
+และไม่มีใครเจอเพราะ default เป็น `Extractive` ที่เร็วจนมองไม่เห็น
+**อ่านจากตาราง `summary` เท่านั้น** งานสร้างอยู่ที่ `chorus compact`
+
+### 7.6b failover classifier ต้องตรงกับข้อความจริง
+`HandoffReason::from_failure` เคยหาแค่ `rate limit` / `429` / `quota` แต่ข้อความจริงคือ
+`usageLimitExceeded` (Codex) กับ `out of extra usage` (claude-agent-acp) ซึ่งไม่ตรงสักคำ →
+**ฟีเจอร์พาดหัวของแอปไม่ทำงานเลย** โดยที่เทสต์ 69 ตัวผ่านหมด เพราะ mock ถูกสั่งให้พูดคำที่ classifier รู้จัก
+เจอข้อความลิมิตแบบใหม่เมื่อไหร่ **เพิ่มทั้งใน `from_failure` และใน `tests/handoff.rs`**
+
+### 7.7 compaction ใช้ queue เดียวกับเทิร์นโดยตั้งใจ
+`Engine.compactIfIdle` วิ่งบน `queue` ตัวเดียวกับ `send` เพราะ engine handle ฝั่ง Rust
+ถือ SQLite connection ที่แตะจากสองเธรดพร้อมกันไม่ได้ — ความ serial ของ `queue` คือสิ่งที่กัน
+data race อยู่ตอนนี้ **อย่าย้ายไป queue ใหม่เพื่อให้ "ไม่บล็อก"** ถ้าจะขนานจริงต้องเปิด
+engine handle คนละตัว แต่ละพาสเลยตั้ง limit ไว้แค่ 40 event — session ยาว ๆ ไล่ตามทีละนิด
+ข้ามหลายเทิร์น แทนที่จะให้เทิร์นถัดไปรอพาสใหญ่พาสเดียว
+
+### 7.8 `cargo run -p chorus-cli` ไม่ได้ build binary ของ crate อื่น
+
+`acp-probe` อยู่ใน `chorus-acp` — `cargo run -p chorus-cli -- demo` build แค่ *library*
+ของ crate นั้น ไม่ได้ build binary ให้ ผลคือ demo ไปเรียก `target/debug/acp-probe`
+ตัวเก่าเงียบ ๆ แล้วแสดงพฤติกรรมของเมื่อวาน (เคยเกิดจริง: mock ที่แก้ path แล้ว
+ยังรายงาน `/tmp/mock/README.md`). `mock_bridge()` จึงเตือนก่อนรัน
+
+เทียบกับ **โค้ดของ chorus-acp** ไม่ใช่กับตัว binary เอง: `cargo build --workspace`
+ครั้งเดียว compile chorus-acp ก่อน chorus-cli อยู่แล้ว ถ้าเทียบ binary-กับ-binary
+มันจะเตือนทุกครั้งเพราะแก่กว่ากันเป็นมิลลิวินาที และจะ *ไม่* เตือนในเคสที่ควรเตือน
+(แก้ mock แล้ว cargo ไม่ rebuild อะไรเลย) — path ของ source ฝังตอน build ถ้าเป็น
+binary ที่ install แล้วก็ข้ามการเช็คไปเลย
+
+### 7.9 บน macOS Claude ไม่มีไฟล์ credential ให้เช็ค
+
+`claude` บน macOS ย้าย token เข้า login Keychain (service `Claude Code-credentials`)
+แล้ว **ลบ** `~/.claude/.credentials.json` ทิ้ง — เช็คแค่ไฟล์เลยขึ้น `needs_login`
+ตลอดกาลบนเครื่องที่เพิ่ง login สำเร็จ (เจอจริง 12 ก.ย. 2026) `claude_logged_in()`
+จึงเช็คไฟล์ก่อน (Linux / เครื่องที่วาง token เอง) แล้ว fallback ไป Keychain
+
+เช็ค Keychain ด้วย `security find-generic-password -s ...` **ห้ามใส่ `-w`** —
+`-w` พิมพ์ secret ออกมาและเด้ง prompt ขออนุญาต; ไม่ใส่ก็แค่ lookup แล้วเราอ่าน
+เฉพาะ exit status (44 = ไม่เจอ) โดย null ทั้ง stdout/stderr ไม่ให้ไบต์ของ
+credential เข้ามาใน process เลย — Codex ยังใช้ `~/.codex/auth.json` ตามเดิม
+
+### 7.10 ACP mode คุม Codex ไม่ได้ — `--read-only` ต้องบังคับเอง (วัดจริง 12 ก.ย. 2026)
+
+ทดลองกับ `@agentclientprotocol/codex-acp` ตัวจริง:
+
+- `session/set_mode` → ตอบ `{}` แต่โหมดไม่เปลี่ยน (ยังเป็น `agent`)
+- `session/set_config_option {configId:"mode", value:"read-only"}` → ตอบกลับ
+  `currentValue: "read-only"` **จริง** คือรับรู้และรายงานถูก
+- แต่ codex ยัง **เขียนไฟล์ได้** ทั้งใน cwd และ **นอก cwd** (`/tmp/outside9/O.txt`)
+  โดยไม่ส่ง `session/request_permission` แม้แต่ครั้งเดียว
+
+สรุป: `Policy::decide` เป็นแค่ "คำตอบ" ไม่ใช่การบังคับ — agent ที่ไม่ถาม ไม่มีอะไรหยุด
+`claude-agent-acp` หนักกว่า: ไม่ตอบทั้ง `set_config_option` และ `set_mode` เลย (`via: none`)
+
+เคยเขียนให้ **ไม่รันเทิร์น** ถ้า agent ไม่ยืนยันโหมด ปรากฏว่าผิดเลเวอร์ — มันบล็อก
+ทุกเทิร์นของ Claude ในแอป ขณะที่ Codex ซึ่ง *ยืนยัน* กลับเขียนไฟล์ได้อยู่ดี
+การยืนยันโหมดจึงทำนายอะไรไม่ได้เลย ตอนนี้เหลือแค่ `note_mode()` เตือนเฉย ๆ
+
+ของจริงที่รักษาสัญญาคือ snapshot shadow repo ก่อนเทิร์น แล้วเช็คหลังจบ ถ้ามีไฟล์เปลี่ยน
+→ `restore()` + `bail!` (`revert_if_touched`) ซึ่งไม่ต้องพึ่งความร่วมมือจาก agent เลย
+เงื่อนไขที่ทริกเกอร์: policy ที่จำกัด (CLI) หรือ — ในแอป — user กด Deny **หรือ agent
+ไม่ถามอะไรเลยสักครั้งแล้วเขียนไฟล์** (เคสของ Codex: คนนั่งอยู่หน้าโหมด "ถามก่อน"
+แต่ไม่เคยถูกถาม)
+
+**ตอนนี้มี Seatbelt แล้ว** (ดู 7.20) การย้อนไฟล์เหลือเป็นชั้นที่สอง ไม่ใช่ชั้นเดียว
+
+ห้ามโฆษณา `--read-only` ว่าเป็น sandbox จนกว่าจะมี Seatbelt
+
+### 7.11 done/pending ว่างเปล่าใน session จริง — mock หลอกเราเอง
+
+`task_state().done` เคยอ่านจาก Diff event ซึ่งเกิดเฉพาะตอน **client** เป็นคนเขียนไฟล์
+Codex shell ออกไปเขียนเอง → ไม่มี Diff event → brief บอก agent ถัดไปว่า "ไม่มีอะไรถูกแตะ"
+ทั้งที่เพิ่งสร้างไฟล์ไป เดโมดูแน่นเพราะ mock ยิง Decision + Diff ให้เอง
+
+แก้: อ่านจาก shadow repo (`Checkpoint::files_since`) ซึ่งเห็นทุกกรณี ใช้
+`git diff --name-only <base>` + `git ls-files --others` แทน `diff_since` เพราะอันนั้น
+`git add -A` ก่อน — mutate index บน read path ที่รันทุกเทิร์น และช้าใน repo ใหญ่
+กรอง `CLAUDE.md`/`AGENTS.md`/`GEMINI.md` ออก เพราะเป็นไฟล์ที่ **เราเขียนเอง**
+
+### 7.12 tool result ที่ไม่มีเนื้อ กิน context ฟรี
+
+ทุก tool call กิน 2 บรรทัดใน conversation tier และบรรทัดผลลัพธ์เป็น `X → completed`
+ที่ไม่เพิ่มข้อมูลอะไรจาก tool call ข้างบนเลย — วัดจาก session จริงคือ ~30% ของชั้นนั้น
+`is_bare_success()` ตัดเฉพาะ `completed|success|ok` เท่านั้น ส่วน `failed`/สถานะแปลก ๆ
+ปล่อยผ่านหมด เพราะค่าเสียหายของการทิ้งบรรทัดที่สำคัญสูงกว่า token ที่ประหยัดได้มาก
+
+### 7.13 เทสต์ที่ผูกกับความยาว path จะพังเฉพาะ macOS
+
+`assemble_context_reads_the_stored_rung...` ใช้ budget คงที่ 700 token และ fixture
+ที่ทุก event ซ้ำ absolute path — tempdir ของ macOS
+(`/private/var/folders/xx/<28 ตัว>/T/...`) ยาวกว่า `/tmp` ของ Linux ~70 ตัวอักษร
+เทิร์นเก่าสุดเลยหลุด budget ก่อนจะถูก demote ลง rung → ผ่านบน Linux พังบน macOS
+โดยไม่เกี่ยวกับ read path เลย แก้ด้วย `ShortDir` (path สั้นคงที่) ไม่ใช่ขยาย budget
+
+### 7.14 Picker ของ SwiftUI ที่ selection ไม่ตรง tag จะว่างเปล่าเงียบ ๆ
+
+ช่อง Agent ในแอปว่างมาตลอดเพราะ seed ด้วย `model = "codex"` (agent id) แต่ tag ของ
+Picker เป็น **model id** (`gpt-5.1-codex`) SwiftUI ไม่ error ไม่ fallback — มันเรนเดอร์ว่าง
+ทำให้แยกไม่ออกว่า detection พัง หรือแค่ยังไม่วาด แก้ด้วย `syncModelSelection()`
+ที่ seed จาก agent ที่ `ready` จริงหลัง `loadAgents()` กลับมา
+
+### 7.15 สิทธิ์เหลือสองปุ่ม
+
+เดิมมีสี่: ask / deny / read-only / allow — หลังจากรู้ว่า agent ไม่ถามอนุญาตเสมอไป
+deny กับ read-only ให้ผลเหมือนกันเป๊ะ (โหมดจำกัด + ย้อนไฟล์) ส่วน deny-ทุกอย่าง
+ใช้ไม่ได้จริงอยู่แล้ว (agent ที่อ่านไม่ได้ก็ตอบไม่ได้) เหลือ **ถามก่อน** กับ **ให้ทำเลย**
+ตัวเลือกที่ต่างกันแค่ในทฤษฎีคือตัวเลือกที่ทำให้คนต้องเดา
+
+### 7.16 Skill registry — เขียนที่เดียว ฉายตามที่แต่ละเจ้าอ่านได้
+
+ต้นฉบับอยู่ที่ `.chorus/skills/<name>/SKILL.md` แล้วฉายออกสองแบบ:
+
+- **Claude** ได้ skill จริง เขียนลง `.claude/skills/<name>/SKILL.md` ตาม path ที่ loader
+  มันหา (ยืนยันจาก code.claude.com/docs/en/skills 12 ก.ย. 2026)
+- **Codex / Gemini** ไม่มีระบบ skill เลย → ได้ index บรรทัดละ skill ใน AGENTS.md
+  (ชื่อ | ใช้เมื่อไหร่ | path) พอให้มันเปิดไฟล์อ่านเองได้ โดยไม่ต้องยัดทั้งเอกสารเข้า prompt
+
+**ห้ามใส่ index ให้ Claude ด้วย** — มันอ่านไฟล์จริงอยู่แล้ว ใส่ซ้ำ = จ่าย token ซ้ำ
+
+marker ของ skill ต้องอยู่ **ท้ายไฟล์** เพราะ frontmatter ต้องเป็นบรรทัดแรกไม่งั้น
+loader ของ Claude parse ไม่ออก → ต้องใช้ `drift_raw()` แยกจาก `drift()` ถ้าใช้ตัวเดิม
+ทุก skill จะถูกมองเป็น `Foreign` แล้ว**เลิกอัปเดตอย่างเงียบ ๆ**
+
+### 7.17 ข้อความ limit จริงตัวแรกที่เคยเห็น (12 ก.ย. 2026)
+
+```
+Internal error: You've hit your limit · resets 9:50pm (Asia/Bangkok)
+```
+
+จาก `claude-agent-acp` ระหว่างเทสต์ skill — **ไม่ตรงกับ key ไหนเลย** ที่ classifier มีอยู่
+ตอนนั้น (ไม่ใช่ "usage limit", ไม่ใช่ "rate limit", ไม่มี 429) เพราะ key ทุกตัวมาจาก
+eval log ซึ่งรู้แค่สำนวนที่บังเอิญอยู่ในนั้น เพิ่ม `"hit your limit"` แล้ว + เก็บข้อความ
+เต็มไว้ใน `tests/handoff.rs` **แบบคำต่อคำ** (ถ้า paraphrase เทสต์จะผ่านทั้งที่ของจริงยังพัง)
+
+หลังแก้ รัน `--chain claude,codex` ตอน Claude ติดลิมิตจริง → `relay: claude → codex
+(quota exhausted)` แล้ว codex ทำต่อได้ **ครั้งแรกที่ failover ทำงานกับลิมิตของจริง
+ไม่ใช่ของจำลอง**
+
+### 7.18 MCP config ก้อนเดียว — ACP ให้ client เป็นคนตัดสิน
+
+`session/new` รับ `mcpServers` และ **สิ่งที่อยู่ในนั้นคือทั้งหมดที่ agent เอื้อมถึงได้**
+ไม่เกี่ยวกับ config ของ CLI ตัวนั้นเลย → เก็บที่ `.chorus/mcp.json` ที่เดียว
+แล้วส่งชุดเดียวกันให้ทุกเจ้า (`chorus mcp import` ดูด `.mcp.json` เดิมมาให้)
+
+รูปแบบต่างกันตรงที่คนมักพลาด: `env` กับ `headers` ของ ACP เป็น
+**array ของ {name, value}** ไม่ใช่ object แบบที่ไฟล์ config ทุกตัวบนดิสก์เขียนกัน
+→ `mcp_config::pairs()` แปลงให้
+
+**ห้าม print ค่า env/headers** ทุกกรณี — `redact()` คืนแค่ *ชื่อ* ตัวแปร
+(`GITHUB_TOKEN` พอให้ debug ได้ ส่วนค่ามันพอให้คนอื่นเอาไปใช้) มีเทสต์กันไว้ว่า
+ค่าจริงต้องไม่โผล่ใน `{:?}` · `CHORUS_ACP_LOG` ที่ dump ทุกเฟรม **มีค่าจริง**
+จึงตั้งเป็น env var ที่ต้องพิมพ์เอง ไม่ใช่ flag
+
+### 7.19 รายชื่อโมเดลต้องถาม ไม่ใช่เดา
+
+เคยเขียนใน `agents.rs` ว่า "ACP ไม่มีเมธอดสำหรับ list model" — จริงเรื่องเมธอด
+แต่ผิดเรื่องข้อสรุป: **รายการอยู่ใน reply ของ `session/new`** (`models.availableModels`
++ `currentModelId`) ของเดาที่ใส่ไว้ผิดทั้งสองเจ้า
+
+| | ที่เดาไว้ | ของจริง (วัด 12 ก.ย. 2026) |
+|---|---|---|
+| Codex | `gpt-5.1-codex`, `-mini` | `gpt-6-astra` / `gpt-5.6-sol` / `terra` / `luna` / `gpt-5.5` × 6 ระดับ reasoning (27 ตัว) ดีฟอลต์ `gpt-5.6-luna[high]` |
+| Claude | `claude-opus-4-6`, `claude-sonnet-4-6` | `default` · `opus` · `haiku` |
+
+การถามต้องเปิด session จริง (spawn npx) → ช้าเกินกว่าจะทำตอนวาด picker
+`chorus models` จึงถามแล้ว cache ลง `~/.cache/chorus/models-<agent>.json`
+ส่วน `list_agents` อ่าน cache · ค่าเดาเหลือไว้เป็น fallback และ **บอกตัวเองว่าเป็นค่าเดา**
+ผ่าน `ModelSource::Fallback`
+
+**เลือกโมเดลมีผลจริงแล้ว** ผ่าน `Session::set_model()` → `CodexConfig.model` →
+`session/set_model` ตอนเปิด session (CLI: `--model ID` · FFI: `chorus_set_model`)
+
+⚠️ **id มีสอง namespace ห้ามสลับกัน** — พลาดแล้วได้ `-32602 Invalid params`:
+
+| ทาง | id ที่รับ | ตัวอย่าง |
+|---|---|---|
+| `session/set_model` | จาก `models.availableModels[].modelId` | `gpt-5.5[low]` |
+| `set_config_option {configId:"model"}` | id เปล่า ๆ + `reasoning_effort` แยก | `gpt-5.5` |
+
+เราโชว์ id แบบแรกให้ user เพราะมันบอกว่าจะรันอะไรจริง ๆ `pin_model()` เลยยิง
+`session/set_model` ก่อน แล้ว fallback เป็น config option โดยตัด `[...]` ทิ้ง
+(`session/set_model` สเปกยังระบุว่า unstable — fallback จึงไม่ใช่ของเผื่อ)
+
+ถ้าขอโมเดลแล้ว agent ตอบกลับเป็นคนละตัว **ต้องเตือน** ไม่ใช่เงียบ —
+คนที่คิดว่าสลับโมเดลแล้วกำลังอ่านผลจากโมเดลเดิมคือความผิดพลาดที่มองไม่เห็น
+
+### 7.20 Seatbelt — กันตอนเขียน ไม่ใช่ย้อนทีหลัง (วัดจริง 13 ก.ย. 2026)
+
+`sandbox::wrap()` ครอบคำสั่ง bridge ด้วย `sandbox-exec -p` ก่อน spawn
+โปรไฟล์คือ `(allow default)` + `(deny file-write*)` แล้วอนุญาตเขียนกลับเฉพาะที่จำเป็น
+
+**จำกัดแค่ `file-write*` เท่านั้น** — อ่าน/เน็ต/spawn ปล่อยหมด agent ที่อ่านเครื่อง
+ไม่ได้หรือต่อ API ตัวเองไม่ได้ไม่ใช่ agent และรูที่วัดเจอจริงคือการเขียน
+
+ที่ต้องอนุญาตกลับ ไม่งั้น agent พังแบบดูเหมือนบั๊กของเรา:
+`~/.codex` `~/.claude` (auth + session state) · `~/.npm` `~/.cache` `~/.config`
+`Library/Caches` · temp ทั้งหมด · `/dev`
+
+⚠️ **path ต้อง canonicalize** — macOS ให้ `/tmp` กับ `/var` เป็น symlink ไป `/private`
+และ Seatbelt แมตช์ path ที่ resolve แล้ว เขียนโปรไฟล์ด้วย `/tmp` = ไม่อนุญาตอะไรเลยเงียบ ๆ
+
+⚠️ **อย่าเทสต์นอก workspace ด้วยโฟลเดอร์ใน `/tmp`** — `/private/tmp` อยู่ใน allow list
+อยู่แล้ว (node ต้องใช้) เทสต์แรกผมวางไว้ที่ `/tmp/outside-sbx` เลยผ่านฉลุยและดูเหมือน
+sandbox ไม่ทำงาน ต้องใช้ `~/` ถึงจะวัดของจริง
+
+ผลจริง (Profile::Workspace, `--yes`): แก้ `repo.ts` ใน workspace **สำเร็จ** ·
+เขียน `~/chorus-sbx-out/O.txt` **ถูกปฏิเสธ** และ codex รายงานเองว่า
+"ระบบปฏิเสธสิทธิ์ (operation not permitted)" · `--read-only` codex ขออนุญาตก่อน
+แล้วโดน DENY → `stop: cancelled` ไม่มีไฟล์ถูกสร้าง
+
+ถ้าไม่มี `sandbox-exec` (ไม่ใช่ macOS) → `wrap` คืนคำสั่งเดิมพร้อมเหตุผล **และต้องพิมพ์บอก**
+sandbox ที่ทำให้คนทำงานไม่ได้คือ sandbox ที่โดนปิด — แต่ sandbox ที่ปิดอยู่เงียบ ๆ แย่กว่า
 
 ### 7.3 repo เงาสำหรับ checkpoint
 ต้องยึด `.gitignore` ของผู้ใช้ ไม่งั้น `.chorus/` จะโตกว่าโปรเจกต์จริง
@@ -231,11 +480,14 @@ transcript อยู่ที่ราก repo (`acp-probe-*.jsonl`, gitignored)
 
 **สรุปสไปก์ 1**: Q1 ✅ Q2 ✅ Q3 ✅ — ผ่านครบ · probe ได้ flag `--mode` (ส่ง `session/set_mode` หลัง `session/new`) ทำงานจริง
 
-### สไปก์ที่ 2 — handoff eval (ยังไม่เริ่ม)
-**นี่คือคำถามที่ตัดสินว่าแอปนี้มีค่าหรือเปล่า** ทำมือได้เลย ไม่ต้องมีแอป
-10 เคสจริง → เขียน brief → วางให้อีกโมเดล → ให้คะแนน → `python3 evals/handoff/score.py`
-เป้า ≥70% ถ้าต่ำกว่านั้นปัญหาอยู่ที่ format ของ brief ไม่ใช่ที่ engineering
-**และต้องแก้ตรงนั้นก่อนลงแรงเขียนแอปต่อ**
+### สไปก์ที่ 2 — handoff eval (ทำไปแล้ว 7 เคส · ผ่าน 7/7)
+`python3 evals/handoff/score.py` → 7/7 (100%) เป้าคือ ≥70%
+
+**แต่ยังอย่าเพิ่งเชื่อตัวเลขนี้เต็มร้อย** ทั้ง 7 เคสเป็นงานที่เลือกมาจาก repo ตัวเอง
+(in-domain ทั้งหมด) และคนเขียน brief คือคนให้คะแนนเอง สเปกเดิมบอกให้ใช้ *งานจริงของ Perth*
+ซึ่งยังไม่มีสักเคส — เคสที่ 8 เป็นต้นไปควรเป็นงานนอก repo นี้ และถ้าเป็นไปได้ให้คนอื่นให้คะแนน
+failure note ของแต่ละเคสมีค่ากว่าตัวเลขรวม (เคส 06 จับได้เองว่า agent พลาด `refresh()`
+เพราะชื่อฟังก์ชันไม่มีคำว่า checkpoint ให้ grep เจอ)
 
 ### Phase 1 (หลังสองสไปก์)
 - SwiftUI shell ตัวจริง — แชท, diff review, context inspector
