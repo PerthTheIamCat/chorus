@@ -53,6 +53,8 @@ fn an_agent_can_list_and_call_memory_propose() {
         }),
     );
     assert_eq!(init["result"]["serverInfo"]["name"], "chorus");
+    // The agent must be told when to call the tool, not just that it exists.
+    assert!(init["result"]["instructions"].as_str().unwrap().contains("memory_propose"));
 
     let tools = rpc(
         server.url(),
