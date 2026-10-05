@@ -234,6 +234,8 @@ final class Engine: ObservableObject {
                 self.memoryScope = nil
                 self.live = LiveTurn()
                 self.lastThoughts = ""
+                self.contextUsed = nil
+                self.contextWindow = nil
                 guard let h else {
                     self.sessionID = -1
                     self.events = []
@@ -758,7 +760,12 @@ final class Engine: ObservableObject {
             DispatchQueue.main.async {
                 self?.busy = false
                 self?.endLive()
-                if r?.ok != true, !Self.isStop(r?.error) { self?.lastError = r?.error ?? "turn failed" }
+                if let r, r.ok {
+                    self?.contextUsed = r.context_used
+                    self?.contextWindow = r.context_window
+                } else if !Self.isStop(r?.error) {
+                    self?.lastError = r?.error ?? "turn failed"
+                }
                 self?.refresh()
                 self?.compactIfIdle()
             }
