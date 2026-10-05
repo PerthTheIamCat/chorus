@@ -303,7 +303,7 @@ private struct IntegrationCard: View {
         } else if entry.updateAvailable {
             Button("อัปเดต…", action: onUpdate).buttonStyle(.borderedProminent).controlSize(.small)
         } else {
-            Button("ลบ…", role: .destructive, action: onRemove)
+            Button(entry.installedMethod == "external" ? "เลิกใช้…" : "ลบ…", role: .destructive, action: onRemove)
                 .buttonStyle(.bordered).controlSize(.small)
         }
     }
@@ -390,6 +390,7 @@ private struct InstallSheet: View {
     @State private var startedAt = Date()
 
     private var removing: Bool { kind == .remove }
+    private var external: Bool { entry.installedMethod == "external" }
     private var finished: CatalogActionResult? {
         guard started, !entry.isWorking, result?.id == entry.id else { return nil }
         return result
@@ -402,7 +403,7 @@ private struct InstallSheet: View {
         switch kind {
         case .install: "ติดตั้ง \(entry.title)"
         case .update: "อัปเดต \(entry.title)"
-        case .remove: "ลบ \(entry.title)"
+        case .remove: "\(external ? "เลิกใช้" : "ลบ") \(entry.title)"
         }
     }
 
@@ -411,6 +412,7 @@ private struct InstallSheet: View {
             return finished.succeeded ? (removing ? "ลบเรียบร้อย ไม่เหลืออะไรค้างไว้" : "พร้อมใช้งาน") : "ไม่สำเร็จ"
         }
         if entry.isWorking { return removing ? "กำลังลบ…" : "กำลังติดตั้ง…" }
+        if external { return "ติดตั้งไว้ก่อนแล้ว · จะเลิกใช้ใน Chorus แต่ไม่ลบตัวโปรแกรม" }
         return removing ? "จะลบเฉพาะสิ่งที่ Chorus เพิ่มไว้" : "สำหรับ Claude และ Codex"
     }
 
@@ -479,7 +481,7 @@ private struct InstallSheet: View {
                 } else {
                     Button("ยกเลิก", action: onDismiss)
                         .keyboardShortcut(.cancelAction)
-                    Button(removing ? "ลบ" : kind == .update ? "อัปเดต" : "ติดตั้ง") {
+                    Button(removing ? (external ? "เลิกใช้" : "ลบ") : kind == .update ? "อัปเดต" : "ติดตั้ง") {
                         started = true
                         startedAt = Date()
                         onConfirm()

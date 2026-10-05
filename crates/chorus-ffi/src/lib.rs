@@ -35,12 +35,8 @@ pub unsafe extern "C" fn chorus_catalog_list_json(project: *const c_char) -> *mu
         let enabled = integration_catalog::enabled_for(Path::new(project)).map_err(|e| e.to_string())?;
         let enabled: std::collections::BTreeSet<&str> = enabled.iter().map(|entry| entry.id).collect();
         let entries: Vec<_> = integration_catalog::catalog().iter().map(|entry| {
-            let observed = integration_catalog::homebrew_installed(entry).ok().flatten();
-            let installed = if entry.recipe.method == integration_catalog::InstallMethod::Homebrew {
-                observed.as_ref()
-            } else {
-                state.installed.get(entry.id)
-            };
+            let installed = integration_catalog::current_record(entry, &state);
+            let installed = installed.as_ref();
             serde_json::json!({
                 "id": entry.id, "title": entry.title, "source": entry.source,
                 "maintainer": entry.maintainer, "license": entry.license,

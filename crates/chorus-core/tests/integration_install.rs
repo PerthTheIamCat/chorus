@@ -51,6 +51,15 @@ fn unknown_action_is_rejected_by_plan() {
     assert!(cat::plan("rtk", "explode", Path::new("/tmp")).is_err());
 }
 
+/// PATH without any directory that already holds one of the tools under test,
+/// so the developer's own copies are not adopted instead of installed.
+fn path_without_tools() {
+    let cleaned: Vec<_> = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .filter(|d| !["serena", "graft", "headroom"].iter().any(|t| d.join(t).exists()))
+        .collect();
+    std::env::set_var("PATH", std::env::join_paths(cleaned).unwrap());
+}
+
 /// Needs network + npm. Real install of an npm tool into a temp HOME, then a
 /// removal that must leave nothing: not the package, not the npm cache.
 /// Run: cargo test -p chorus-core --test integration_install -- --ignored
@@ -59,9 +68,8 @@ fn unknown_action_is_rejected_by_plan() {
 fn npm_install_remove_leaves_nothing() {
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
-    let real_path = std::env::var_os("PATH");
     std::env::set_var("HOME", home.path());
-    if let Some(p) = real_path { std::env::set_var("PATH", p); }
+    path_without_tools();
     let project = home.path().join("demo");
     std::fs::create_dir_all(&project).unwrap();
     cat::perform("install_enable", "graft", &project).unwrap();
@@ -80,6 +88,7 @@ fn uv_install_remove_leaves_nothing() {
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     std::env::set_var("HOME", home.path());
+    path_without_tools();
     let project = home.path().join("demo");
     std::fs::create_dir_all(&project).unwrap();
     cat::perform("install_enable", "serena", &project).unwrap();
@@ -88,4 +97,47 @@ fn uv_install_remove_leaves_nothing() {
     assert!(!home.path().join(".chorus/tools/serena").exists());
     assert!(!home.path().join(".cache").exists(), "uv cache must stay inside the tool dir");
     assert!(cat::load_state().unwrap().installed.is_empty());
+}
+
+#[test]
+fn tool_already_on_the_mac_is_detected_and_never_deleted() {
+    use std::os::unix::fs::PermissionsExt;
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("HOME", home.path());
+    std::env::set_var("PATH", "/usr/bin:/bin"); // keep the developer's own serena out of it
+    let bin = home.path().join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let serena = bin.join("serena");
+    std::fs::write(&serena, "#!/bin/sh\necho serena 9.9.9\n").unwrap();
+    std::fs::set_permissions(&serena, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let entry = cat::get("serena").unwrap();
+    let record = cat::current_record(entry, &cat::load_state().unwrap()).expect("found on ~/.local/bin");
+    assert_eq!(record.method, cat::InstallMethod::External);
+    assert_eq!(record.version, "9.9.9");
+
+    let project = home.path().join("demo");
+    std::fs::create_dir_all(&project).unwrap();
+    cat::perform("enable", "serena", &project).unwrap();
+    assert_eq!(cat::enabled_for(&project).unwrap().len(), 1);
+    let plan = cat::plan("serena", "remove", &project).unwrap();
+    assert!(plan.items.iter().any(|i| i.kind == "keep"));
+
+    cat::perform("remove", "serena", &project).unwrap();
+    assert!(serena.exists(), "a tool Chorus did not install must survive removal");
+    assert!(cat::enabled_for(&project).unwrap().is_empty());
+}
+
+/// Machine-specific: prints what Chorus finds on this Mac. Run with --nocapture.
+#[test]
+#[ignore]
+fn show_what_this_mac_has() {
+    let state = cat::load_state().unwrap();
+    for entry in cat::catalog() {
+        match cat::current_record(entry, &state) {
+            Some(r) => println!("{:10} {:?} {} @ {}", entry.id, r.method, r.version, r.runtime_path.display()),
+            None => println!("{:10} not installed", entry.id),
+        }
+    }
 }

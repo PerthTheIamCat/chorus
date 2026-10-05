@@ -30,6 +30,8 @@ pub enum InstallMethod {
     Uv,
     CargoGit,
     Bundled,
+    /// Found on this Mac, installed by the user rather than by Chorus.
+    External,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -198,7 +200,7 @@ fn runner(method: InstallMethod) -> &'static str {
         InstallMethod::Npm => "npm",
         InstallMethod::Uv => "uv",
         InstallMethod::CargoGit => "cargo",
-        InstallMethod::Bundled => "",
+        InstallMethod::Bundled | InstallMethod::External => "",
     }
 }
 
@@ -230,6 +232,14 @@ fn search_path() -> Vec<PathBuf> {
     if let Ok(home) = home() {
         standard.push(home.join(".cargo/bin"));
         standard.push(home.join(".local/bin"));
+        standard.push(home.join(".bun/bin"));
+        standard.push(home.join(".volta/bin"));
+        if let Ok(rd) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+            let mut versions: Vec<_> = rd.flatten().map(|e| e.path().join("bin")).collect();
+            versions.sort();
+            versions.reverse();
+            standard.extend(versions);
+        }
     }
     for path in standard {
         if seen.insert(path.clone()) {
@@ -337,6 +347,48 @@ pub fn homebrew_installed(entry: &Integration) -> Result<Option<InstallRecord>, 
         method: InstallMethod::Homebrew, runtime_path: executable,
         artifact_integrity: None, owned_files: vec![], health,
     }))
+}
+
+/// A tool the user already has: the integration's executable on a standard
+/// search path. Chorus uses it as-is and never deletes it.
+pub fn external_installed(entry: &Integration) -> Option<InstallRecord> {
+    if matches!(entry.recipe.method, InstallMethod::Bundled) {
+        return None;
+    }
+    let executable = search_path().into_iter()
+        .map(|dir| dir.join(entry.recipe.executable))
+        .find(|candidate| is_executable_file(candidate))?;
+    let health = match Command::new(&executable).env("PATH", child_path()).args(entry.recipe.health_args).output() {
+        Ok(output) if output.status.success() => Health {
+            healthy: true,
+            detail: String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        },
+        Ok(output) => Health { healthy: false, detail: format!("version check exited with {}", output.status) },
+        Err(error) => Health { healthy: false, detail: error.to_string() },
+    };
+    let version = health.detail.split_whitespace()
+        .rev().find(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .unwrap_or(entry.reviewed_version).to_owned();
+    Some(InstallRecord {
+        id: entry.id.into(), version, source: entry.source.into(), license: entry.license.into(),
+        method: InstallMethod::External, runtime_path: executable,
+        artifact_integrity: None, owned_files: vec![], health,
+    })
+}
+
+/// What is installed right now: Chorus's own managed copy, else the Homebrew
+/// keg, else a tool the user installed themselves.
+pub fn current_record(entry: &Integration, state: &CatalogState) -> Option<InstallRecord> {
+    if entry.recipe.method == InstallMethod::Homebrew {
+        if let Some(record) = homebrew_installed(entry).ok().flatten() {
+            return Some(record);
+        }
+    } else if let Some(record) = state.installed.get(entry.id)
+        .filter(|r| r.method != InstallMethod::External && r.runtime_path.exists())
+    {
+        return Some(record.clone());
+    }
+    external_installed(entry)
 }
 
 fn install_uv_locked(entry: &Integration, root: &Path) -> Result<(PathBuf, String), CatalogError> {
@@ -521,6 +573,14 @@ pub fn install(id: &str) -> Result<InstallRecord, CatalogError> {
     let entry = get(id).ok_or_else(|| CatalogError::Unknown(id.into()))?;
     let mut state = load_state()?;
     let old = state.installed.get(id).map(|x| x.version.clone());
+    if entry.recipe.method != InstallMethod::Bundled && current_record(entry, &state).is_some_and(|r| r.method == InstallMethod::External) {
+        // Already on this Mac: use it, don't install a second copy.
+        let record = current_record(entry, &state).expect("checked above");
+        state.adopted.insert(id.into());
+        state.installed.insert(id.into(), record.clone());
+        save_state(&state)?;
+        return Ok(record);
+    }
     if entry.recipe.method == InstallMethod::Homebrew {
         if let Some(record) = homebrew_installed(entry)? {
             if !state.installed.contains_key(id) {
@@ -690,7 +750,7 @@ pub fn install(id: &str) -> Result<InstallRecord, CatalogError> {
                 ])
                 .arg(&root),
         ),
-        InstallMethod::Bundled => Ok(()),
+        InstallMethod::Bundled | InstallMethod::External => Ok(()),
     };
     if let Err(error) = install_result {
         let _ = std::fs::remove_dir_all(&root);
@@ -733,6 +793,7 @@ pub fn install(id: &str) -> Result<InstallRecord, CatalogError> {
         InstallMethod::CargoGit => root.join("bin").join(entry.recipe.executable),
         InstallMethod::Bundled => bundled_skill
             .ok_or_else(|| CatalogError::Install("bundled skill file was not created".into()))?,
+        InstallMethod::External => unreachable!("external tools are adopted, never installed"),
     };
     mark("verify");
     let health = if entry.recipe.method == InstallMethod::Bundled {
@@ -827,11 +888,7 @@ pub fn set_enabled(project: &Path, id: &str, enabled: bool) -> Result<(), Catalo
     let entry = get(id).ok_or_else(|| CatalogError::Unknown(id.into()))?;
     let key = project_key(project)?;
     let mut state = load_state()?;
-    let available = if entry.recipe.method == InstallMethod::Homebrew {
-        homebrew_installed(entry)?.is_some()
-    } else {
-        state.installed.contains_key(id)
-    };
+    let available = current_record(entry, &state).is_some();
     if enabled && !available {
         return Err(CatalogError::Install(format!("{id} is not installed")));
     }
@@ -856,8 +913,7 @@ pub fn enabled_for(project: &Path) -> Result<Vec<&'static Integration>, CatalogE
         .into_iter()
         .flatten()
         .filter_map(|id| get(id))
-        .filter(|entry| entry.recipe.method != InstallMethod::Homebrew
-            || homebrew_installed(entry).ok().flatten().is_some())
+        .filter(|entry| current_record(entry, &state).is_some())
         .collect())
 }
 
@@ -869,15 +925,8 @@ fn project_key(path: &Path) -> Result<String, CatalogError> {
 }
 
 pub fn installed() -> Result<Vec<InstallRecord>, CatalogError> {
-    let mut state = load_state()?;
-    for entry in CATALOG.iter().filter(|entry| entry.recipe.method == InstallMethod::Homebrew) {
-        if let Some(record) = homebrew_installed(entry).ok().flatten() {
-            state.installed.insert(entry.id.into(), record);
-        } else {
-            state.installed.remove(entry.id);
-        }
-    }
-    Ok(state.installed.into_values().collect())
+    let state = load_state()?;
+    Ok(CATALOG.iter().filter_map(|entry| current_record(entry, &state)).collect())
 }
 
 /// Remove a Homebrew formula, or a legacy Chorus-owned install. The caller
@@ -902,6 +951,7 @@ pub fn uninstall(id: &str) -> Result<(), CatalogError> {
     if let Some(record) = state.installed.remove(id) {
         remove_owned_files(&record)?;
     }
+    state.adopted.remove(id);
     remove_tool_dir(id)?;
     for ids in state.projects.values_mut() { ids.remove(id); }
     state.projects.retain(|_, ids| !ids.is_empty());
@@ -957,7 +1007,7 @@ pub fn cli_paths_for(project: &Path) -> Result<Vec<PathBuf>, CatalogError> {
         .into_iter()
         .filter(|e| e.modes.contains(&Mode::Cli))
         .filter_map(|e| {
-            homebrew_installed(e).ok().flatten().or_else(|| state.installed.get(e.id).cloned()).map(|r| {
+            current_record(e, &state).map(|r| {
                 r.runtime_path
                     .parent()
                     .unwrap_or(Path::new(""))
@@ -995,7 +1045,7 @@ pub fn project_mcp(project: &Path) -> Result<Vec<Value>, CatalogError> {
     Ok(enabled_for(project)?
         .into_iter()
         .filter(|e| e.modes.contains(&Mode::Mcp))
-        .filter_map(|e| homebrew_installed(e).ok().flatten().or_else(|| state.installed.get(e.id).cloned()).map(|r| server_for(e, &r, project)))
+        .filter_map(|e| current_record(e, &state).map(|r| server_for(e, &r, project)))
         .collect())
 }
 
@@ -1071,7 +1121,7 @@ pub fn plan(id: &str, action: &str, project: &Path) -> Result<Plan, CatalogError
         "install" | "install_enable" | "update" => {
             let verb = if action == "update" { "อัปเดต" } else { "ติดตั้ง" };
             if brew {
-                let already = homebrew_installed(entry).ok().flatten().is_some() && action != "update";
+                let already = current_record(entry, &state).is_some() && action != "update";
                 if already {
                     items.push(item("keep", "fetch", "ใช้ตัวที่มีอยู่แล้วใน Homebrew",
                         Some(format!("{} · ไม่ติดตั้งซ้ำ และจะไม่ถูกลบตอนเลิกใช้", entry.recipe.package))));
@@ -1110,7 +1160,14 @@ pub fn plan(id: &str, action: &str, project: &Path) -> Result<Plan, CatalogError
             }
             let tool_dir = tools_path()?.join(id);
             let owned: Vec<String> = if tool_dir.exists() { vec![display_path(&tool_dir)] } else { vec![] };
-            if brew {
+            let external = current_record(entry, &state).is_some_and(|r| r.method == InstallMethod::External);
+            if external || (brew && state.adopted.contains(id)) {
+                let at = current_record(entry, &state).map(|r| display_path(&r.runtime_path));
+                items.push(item("keep", "remove", "ไม่ลบตัวโปรแกรม", Some(match at {
+                    Some(path) => format!("{path} · มีอยู่ก่อนใช้ Chorus จึงเก็บไว้"),
+                    None => "มีอยู่ก่อนใช้ Chorus จึงเก็บไว้".into(),
+                })));
+            } else if brew {
                 if state.adopted.contains(id) {
                     items.push(item("keep", "remove", "ไม่ลบแพ็กเกจ Homebrew",
                         Some("มีอยู่ก่อนใช้ Chorus จึงเก็บไว้".into())));
@@ -1289,15 +1346,12 @@ fn newest_and_count(dir: &Path) -> (usize, Option<std::time::SystemTime>) {
 pub fn dashboard(id: &str, project: &Path) -> Result<Dashboard, CatalogError> {
     let entry = get(id).ok_or_else(|| CatalogError::Unknown(id.into()))?;
     let state = load_state()?;
-    let record = if entry.recipe.method == InstallMethod::Homebrew {
-        homebrew_installed(entry).ok().flatten()
-    } else {
-        state.installed.get(id).cloned()
-    }
-    .ok_or_else(|| CatalogError::Install(format!("{id} is not installed")))?;
+    let record = current_record(entry, &state)
+        .ok_or_else(|| CatalogError::Install(format!("{id} is not installed")))?;
 
     let managed = tools_path()?.join(id);
-    let disk_bytes = (entry.recipe.method != InstallMethod::Homebrew).then(|| dir_size(&managed));
+    let disk_bytes = (record.method != InstallMethod::Homebrew && record.method != InstallMethod::External)
+        .then(|| dir_size(&managed));
     let projects = state.projects.iter()
         .filter(|(_, ids)| ids.contains(id))
         .map(|(path, _)| project_name(Path::new(path)))
@@ -1357,7 +1411,7 @@ pub fn dashboard(id: &str, project: &Path) -> Result<Dashboard, CatalogError> {
         title: entry.title.into(),
         version: record.version,
         healthy: record.health.healthy,
-        location: display_path(if entry.recipe.method == InstallMethod::Homebrew { &record.runtime_path } else { &managed }),
+        location: display_path(if matches!(record.method, InstallMethod::Homebrew | InstallMethod::External) { &record.runtime_path } else { &managed }),
         disk_bytes,
         projects,
         metrics,
@@ -1370,12 +1424,8 @@ pub fn dashboard(id: &str, project: &Path) -> Result<Dashboard, CatalogError> {
 pub fn run_action(id: &str, key: &str) -> Result<(), CatalogError> {
     let entry = get(id).ok_or_else(|| CatalogError::Unknown(id.into()))?;
     let state = load_state()?;
-    let record = if entry.recipe.method == InstallMethod::Homebrew {
-        homebrew_installed(entry).ok().flatten()
-    } else {
-        state.installed.get(id).cloned()
-    }
-    .ok_or_else(|| CatalogError::Install(format!("{id} is not installed")))?;
+    let record = current_record(entry, &state)
+        .ok_or_else(|| CatalogError::Install(format!("{id} is not installed")))?;
     let args: &[&str] = match (id, key) {
         ("headroom", "dashboard") => &["dashboard"],
         _ => return Err(CatalogError::Install(format!("unknown action {key} for {id}"))),
