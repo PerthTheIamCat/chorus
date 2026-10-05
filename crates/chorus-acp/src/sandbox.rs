@@ -47,6 +47,9 @@ pub enum Profile {
 /// meant to be shown to the user — silently running unconfined is how a safety
 /// feature becomes a lie.
 pub fn wrap(cmd: &[String], cwd: &Path, profile: Profile) -> Result<Vec<String>, String> {
+    if std::env::var("CHORUS_SANDBOX").is_ok_and(|v| matches!(v.as_str(), "off" | "0" | "false")) {
+        return Err("ปิดด้วย CHORUS_SANDBOX=off".into());
+    }
     if !cfg!(target_os = "macos") {
         return Err("sandbox ใช้ได้เฉพาะ macOS".into());
     }
@@ -113,6 +116,25 @@ pub fn policy(cwd: &Path, profile: Profile) -> String {
         }
         s.push_str(&format!("(allow file-write* (subpath \"{p}\"))\n"));
     }
+    // Carve-outs *inside* the workspace. Seatbelt picks the last matching
+    // rule, so these must come after the allows above.
+    //
+    // `.chorus` holds the shadow repo that `revert_if_touched` trusts: an
+    // agent that can rewrite it can make its own writes look like nothing
+    // happened. `.git/hooks` and `.git/config` are the other kind of hole —
+    // a file written there is executed later by the user's own `git`,
+    // outside any sandbox, which turns "writes stay in the workspace" into
+    // "writes run anywhere".
+    if profile == Profile::Workspace {
+        let ws = canonical(cwd);
+        for rel in [".chorus", ".git/hooks", ".git/config"] {
+            let Some(p) = ws.join(rel).to_str().map(str::to_owned) else { continue };
+            if p.contains('"') {
+                continue;
+            }
+            s.push_str(&format!("(deny file-write* (subpath \"{p}\"))\n"));
+        }
+    }
     s
 }
 
@@ -157,5 +179,56 @@ mod tests {
         assert_eq!(out[0], "/usr/bin/sandbox-exec");
         assert_eq!(out[1], "-p");
         assert_eq!(&out[3..], &cmd[..], "the original command must survive intact");
+    }
+
+    /// Runs real `sandbox-exec`, not a string match on the profile: the only
+    /// way to know the profile says what we think it says.
+    #[cfg(target_os = "macos")]
+    mod enforced {
+        use super::*;
+        use std::process::Command;
+
+        /// `~/` on purpose: `/private/tmp` is on the allow list, so a scratch
+        /// dir there would pass whether or not the sandbox works.
+        fn scratch(name: &str) -> PathBuf {
+            let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+            let d = home.join(format!(".chorus-sbx-test-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        }
+
+        fn sh(ws: &Path, profile: Profile, script: &str) -> bool {
+            let cmd: Vec<String> = ["/bin/sh", "-c", script].map(String::from).to_vec();
+            let argv = wrap(&cmd, ws, profile).expect("sandbox-exec available");
+            Command::new(&argv[0])
+                .args(&argv[1..])
+                .current_dir(ws)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        }
+
+        #[test]
+        fn writes_inside_pass_outside_and_protected_paths_fail() {
+            let ws = scratch("ws");
+            let out = scratch("out");
+            std::fs::create_dir_all(ws.join(".chorus")).unwrap();
+            std::fs::create_dir_all(ws.join(".git/hooks")).unwrap();
+
+            let p = Profile::Workspace;
+            assert!(sh(&ws, p, "echo x > ok.txt"), "workspace write must work");
+            assert!(!sh(&ws, p, &format!("echo x > {}/no.txt", out.display())), "outside write leaked");
+            assert!(!sh(&ws, p, "echo x > .chorus/tamper"), ".chorus writable");
+            assert!(!sh(&ws, p, "echo x > .git/hooks/pre-commit"), "git hook writable");
+            assert!(!sh(&ws, p, "echo x > .git/config"), "git config writable");
+            assert!(sh(&ws, p, "echo x > .git/index-ish"), "rest of .git must stay writable");
+            assert!(!sh(&ws, Profile::ReadOnly, "echo x > ro.txt"), "read-only profile wrote");
+
+            assert!(ws.join("ok.txt").exists());
+            assert!(!out.join("no.txt").exists());
+            let _ = std::fs::remove_dir_all(&ws);
+            let _ = std::fs::remove_dir_all(&out);
+        }
     }
 }
