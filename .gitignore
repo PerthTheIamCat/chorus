@@ -84,3 +84,6 @@ _to_delete/
 
 # saved-page cruft from artifact .html — keep .md only
 docs/ref/*_files/
+
+# graft index cache
+graft/
