@@ -39,7 +39,52 @@ struct CatalogIntegration: Identifiable, Hashable {
     var installerURL: URL? {
         switch missingInstaller {
         case "brew": URL(string: "https://brew.sh/")
+        case "npm": URL(string: "https://nodejs.org/en/download")
+        case "uv": URL(string: "https://docs.astral.sh/uv/getting-started/installation/")
+        case "cargo": URL(string: "https://rustup.rs/")
         default: nil
+        }
+    }
+}
+
+struct PlanItem: Decodable, Identifiable {
+    let kind: String
+    let phase: String
+    let title: String
+    let detail: String?
+    var id: String { "\(phase)-\(title)-\(detail ?? "")" }
+}
+
+struct InstallPlan: Decodable {
+    let id: String
+    let action: String
+    let items: [PlanItem]
+}
+
+struct CatalogProgress: Decodable, Equatable {
+    let id: String
+    let current: String
+    let done: [String]
+    var detail: String = ""
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        current = try c.decode(String.self, forKey: .current)
+        done = try c.decode([String].self, forKey: .done)
+        detail = (try? c.decode(String.self, forKey: .detail)) ?? ""
+    }
+    private enum CodingKeys: String, CodingKey { case id, current, done, detail }
+
+    /// One short word for the phase the card and sheet show while it runs.
+    var phaseLabel: String {
+        switch current {
+        case "fetch": "กำลังดาวน์โหลดและติดตั้ง"
+        case "verify": "กำลังตรวจสอบ"
+        case "enable": "กำลังเปิดใช้"
+        case "disable": "กำลังเลิกใช้"
+        case "remove": "กำลังลบ"
+        default: "กำลังเริ่ม"
         }
     }
 }
@@ -51,12 +96,12 @@ struct CatalogActionResult: Equatable {
     var succeeded: Bool { error == nil }
 }
 
-private enum CatalogActionKind { case install, update, remove }
+enum CatalogActionKind: String { case install = "install_enable", update, remove }
 
 private struct CatalogActionRequest: Identifiable {
     let entryID: String
     let kind: CatalogActionKind
-    var id: String { "\(entryID)-\(kind)" }
+    var id: String { "\(entryID)-\(kind.rawValue)" }
 }
 
 /// Curated integration browser. State changes are emitted to the owner so that
@@ -67,6 +112,10 @@ struct CatalogView: View {
     let automaticUpdates: Bool
     let backgroundStatus: String?
     let actionResult: CatalogActionResult?
+    let progress: CatalogProgress?
+    let requestedInstall: String?
+    let onRequestHandled: () -> Void
+    let onLoadPlan: (String, String, @escaping (InstallPlan?, String?) -> Void) -> Void
     let onAutomaticUpdatesChanged: (Bool) -> Void
     let onInstall: (String) -> Void
     let onUpdate: (String) -> Void
@@ -75,13 +124,13 @@ struct CatalogView: View {
 
     @State private var query = ""
     @State private var requestedAction: CatalogActionRequest?
-
+    @State private var dismissedResultID: String?
 
     private var filteredEntries: [CatalogIntegration] {
         let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !search.isEmpty else { return entries }
         return entries.filter { entry in
-            [entry.title, entry.maintainer, entry.license, entry.actions.joined(separator: " ")]
+            [entry.title, entry.maintainer, entry.actions.joined(separator: " ")]
                 .contains { $0.localizedCaseInsensitiveContains(search) }
         }
     }
@@ -90,7 +139,7 @@ struct CatalogView: View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("เครื่องมือเสริม").font(.title2.bold())
-                Text("ตรวจสถานะผ่าน Homebrew แล้วเลือกเปิดใช้แยกตามโปรเจกต์")
+                Text("ติดตั้งครั้งเดียว เปิดใช้แยกตามโปรเจกต์ · ลบได้ในคลิกเดียว")
                     .font(.callout).foregroundStyle(.secondary)
             }
 
@@ -105,22 +154,27 @@ struct CatalogView: View {
                 .accessibilityElement(children: .combine)
             }
 
+            if requestedAction == nil, let result = actionResult, result.id != dismissedResultID {
+                ResultBanner(result: result, title: entries.first { $0.id == result.id }?.title ?? result.id,
+                             onDismiss: { dismissedResultID = result.id })
+            }
+
             SettingsGroup(title: "การอัปเดต") {
                 SettingsRow(title: "อัปเดตผ่าน Homebrew อัตโนมัติ",
-                            detail: "เมื่อเวอร์ชันเก่ากว่าที่ Chorus ตรวจไว้ Homebrew จะใช้สูตรล่าสุดและ Chorus จะตรวจสุขภาพอีกครั้ง") {
+                            detail: "เฉพาะเวอร์ชันที่ Chorus ตรวจแล้ว") {
                     Toggle("", isOn: Binding(
                         get: { automaticUpdates },
                         set: { onAutomaticUpdatesChanged($0) }
                     ))
                     .labelsHidden()
                     .toggleStyle(.switch)
-                    .accessibilityLabel("ติดตั้งเวอร์ชันที่ Chorus อนุมัติอัตโนมัติ")
+                    .accessibilityLabel("อัปเดตเครื่องมืออัตโนมัติ")
                 }
             }
 
-            TextField("ค้นหา integration…", text: $query)
+            TextField("ค้นหาเครื่องมือ…", text: $query)
                 .textFieldStyle(.roundedBorder)
-                .accessibilityLabel("ค้นหา integration")
+                .accessibilityLabel("ค้นหาเครื่องมือ")
 
             if filteredEntries.isEmpty {
                 ContentUnavailableView.search(text: query)
@@ -130,6 +184,11 @@ struct CatalogView: View {
                     IntegrationCard(
                         entry: entry,
                         projectName: projectName,
+                        progress: progress?.id == entry.id ? progress : nil,
+                        onShowProgress: {
+                            requestedAction = .init(entryID: entry.id,
+                                                    kind: !entry.isInstalled ? .install : entry.updateAvailable ? .update : .remove)
+                        },
                         onInstall: { requestedAction = .init(entryID: entry.id, kind: .install) },
                         onUpdate: { requestedAction = .init(entryID: entry.id, kind: .update) },
                         onRemove: { requestedAction = .init(entryID: entry.id, kind: .remove) },
@@ -139,26 +198,39 @@ struct CatalogView: View {
             }
         }
         .animation(.easeOut(duration: 0.16), value: filteredEntries.map(\.id))
+        .onAppear(perform: openRequestedInstall)
+        .onChange(of: requestedInstall) { _, _ in openRequestedInstall() }
         .sheet(item: $requestedAction) { request in
             if let entry = entries.first(where: { $0.id == request.entryID }) {
-                CatalogActionSheet(entry: entry, projectName: projectName, kind: request.kind,
-                                   result: actionResult,
-                                   onDismiss: { requestedAction = nil },
-                                   onConfirm: {
-                                       switch request.kind {
-                                       case .install: onInstall(entry.id)
-                                       case .update: onUpdate(entry.id)
-                                       case .remove: onRemove(entry.id)
-                                       }
-                                   })
+                InstallSheet(entry: entry, projectName: projectName, kind: request.kind,
+                             result: actionResult, progress: progress,
+                             loadPlan: onLoadPlan,
+                             onDismiss: { requestedAction = nil },
+                             onConfirm: {
+                                 dismissedResultID = nil
+                                 switch request.kind {
+                                 case .install: onInstall(entry.id)
+                                 case .update: onUpdate(entry.id)
+                                 case .remove: onRemove(entry.id)
+                                 }
+                             })
             }
         }
+    }
+
+    private func openRequestedInstall() {
+        guard let id = requestedInstall,
+              let entry = entries.first(where: { $0.id == id }), !entry.isInstalled else { return }
+        requestedAction = .init(entryID: id, kind: .install)
+        onRequestHandled()
     }
 }
 
 private struct IntegrationCard: View {
     let entry: CatalogIntegration
     let projectName: String
+    let progress: CatalogProgress?
+    let onShowProgress: () -> Void
     let onInstall: () -> Void
     let onUpdate: () -> Void
     let onRemove: () -> Void
@@ -169,92 +241,48 @@ private struct IntegrationCard: View {
         return entry.isHealthy == true ? .green : (entry.isHealthy == false ? .orange : .secondary)
     }
 
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: icon)
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(.tint)
-                    .frame(width: 34, height: 34)
-                    .background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
+        HStack(alignment: .center, spacing: 12) {
+            IntegrationIcon(id: entry.id, size: 38)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 8) {
-                        Text(entry.title).font(.headline)
-                        Text(entry.modes.joined(separator: " · ").uppercased())
-                            .font(.system(size: 9, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(entry.title).font(.headline)
+                Text(entry.actions.first ?? entry.maintainer)
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                if entry.isWorking {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ProgressView().progressViewStyle(.linear).controlSize(.small)
+                        Text([progress?.phaseLabel ?? "รอคิว", progress?.detail].compactMap { $0 }
+                            .filter { !$0.isEmpty }.joined(separator: " · "))
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     }
-                    Text("\(entry.maintainer) · \(entry.license) · reviewed \(entry.reviewedVersion)")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-                Spacer(minLength: 8)
-                actionButton
-            }
-
-            if entry.isInstalled {
-                HStack(spacing: 6) {
-                    Circle().fill(statusColor).frame(width: 6, height: 6)
-                    Text(installStatus).font(.caption).foregroundStyle(.secondary)
-                    if let integrity = entry.integrity, !integrity.isEmpty {
-                        Text("·").foregroundStyle(.tertiary)
-                        Text("Integrity: \(integrity)").font(.caption2.monospaced()).foregroundStyle(.tertiary)
-                            .lineLimit(1).truncationMode(.middle)
-                            .textSelection(.enabled)
+                    .frame(maxWidth: 320, alignment: .leading)
+                } else if entry.isInstalled {
+                    HStack(spacing: 6) {
+                        Circle().fill(statusColor).frame(width: 6, height: 6)
+                        Text(installStatus).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
+                } else if let missing = entry.missingInstaller {
+                    Text("ต้องมี \(missing) ก่อน")
+                        .font(.caption).foregroundStyle(.orange)
                 }
             }
+            Spacer(minLength: 8)
 
-            Divider()
-
-            detailSection("ทำอะไรได้", values: entry.actions)
-            detailSection("สิทธิ์และการเข้าถึง", values: entry.projectAccess)
-            HStack(alignment: .top, spacing: 5) {
-                Text("เครือข่าย").font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                Text(entry.networkBehavior).font(.caption).foregroundStyle(.secondary)
-            }
-            if !entry.requiredRuntimes.isEmpty {
-                HStack(alignment: .top, spacing: 5) {
-                    Text("ต้องมี").font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                    Text(entry.requiredRuntimes.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary)
+            if entry.isInstalled && !entry.isWorking {
+                VStack(alignment: .trailing, spacing: 3) {
+                    Toggle("", isOn: Binding(get: { entry.isEnabledForProject }, set: { onProjectEnableChanged($0) }))
+                        .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                        .disabled(projectName.isEmpty || entry.isHealthy == false)
+                    Text(projectName.isEmpty ? "เลือกโปรเจกต์ก่อน"
+                         : entry.isEnabledForProject ? "เปิดใช้กับ \(projectName)" : "ปิดอยู่ใน \(projectName)")
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 }
+                .help("เปิดให้ Claude และ Codex ใช้เครื่องมือนี้ในโปรเจกต์ปัจจุบัน")
             }
-            if let missing = entry.missingInstaller, !entry.isInstalled {
-                Text(missing == "Homebrew formula"
-                     ? "ยังไม่มีสูตร Homebrew ที่ Chorus ตรวจสอบแล้วสำหรับเครื่องมือนี้"
-                     : "ยังไม่มี \(missing) สำหรับติดตั้งเครื่องมือนี้")
-                    .font(.caption).foregroundStyle(.orange)
-            }
-            if !entry.requiredSecretNames.isEmpty {
-                HStack(alignment: .top, spacing: 5) {
-                    Text("ชื่อตัวแปรลับ").font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                    Text(entry.requiredSecretNames.joined(separator: ", ")).font(.caption.monospaced()).foregroundStyle(.secondary)
-                }
-            }
-
-            HStack(spacing: 6) {
-                Link(destination: entry.sourceURL) {
-                    Label("ซอร์สและรายละเอียด", systemImage: "arrow.up.right.square")
-                        .font(.caption)
-                }
-                Spacer()
-                if entry.isInstalled {
-                    Toggle(isOn: Binding(
-                        get: { entry.isEnabledForProject },
-                        set: { onProjectEnableChanged($0) }
-                    )) {
-                        Text(projectName.isEmpty ? "เลือกโปรเจกต์ก่อนเปิดใช้" : "เปิดใช้กับ \(projectName)")
-                            .font(.caption)
-                    }
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                    .disabled(projectName.isEmpty || entry.isHealthy != true || entry.isWorking)
-                }
-            }
+            actionButton
         }
-        .padding(14)
+        .padding(12)
         .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -265,38 +293,65 @@ private struct IntegrationCard: View {
     @ViewBuilder
     private var actionButton: some View {
         if entry.isWorking {
-            ProgressView().controlSize(.small).frame(width: 74)
+            Button("ดู", action: onShowProgress).buttonStyle(.bordered).controlSize(.small)
         } else if let missing = entry.missingInstaller, !entry.isInstalled,
                   let url = entry.installerURL {
             Link("วิธีติดตั้ง \(missing)", destination: url)
-                .buttonStyle(.borderedProminent).controlSize(.small)
-        } else if entry.brewFormula == nil && entry.id != "chorus-review" && !entry.isInstalled {
-            Button("รอสูตร Homebrew") {}
-                .buttonStyle(.bordered).controlSize(.small).disabled(true)
-        } else if !entry.isInstalled {
-            Button(projectName.isEmpty ? "ติดตั้ง" : "ติดตั้งและเปิดใช้", action: onInstall)
-                .buttonStyle(.borderedProminent).controlSize(.small)
-        } else if entry.updateAvailable {
-            Button("อัปเดต", action: onUpdate).buttonStyle(.borderedProminent).controlSize(.small)
-        } else {
-            Button("ลบ…", role: .destructive, action: onRemove)
                 .buttonStyle(.bordered).controlSize(.small)
-                .help("ตรวจรายละเอียดก่อนลบเครื่องมือนี้จาก Mac")
+        } else if !entry.isInstalled {
+            Button("ติดตั้ง…", action: onInstall).buttonStyle(.borderedProminent).controlSize(.small)
+        } else if entry.updateAvailable {
+            Button("อัปเดต…", action: onUpdate).buttonStyle(.borderedProminent).controlSize(.small)
+        } else {
+            Button(entry.installedMethod == "external" ? "เลิกใช้…" : "ลบ…", role: .destructive, action: onRemove)
+                .buttonStyle(.bordered).controlSize(.small)
         }
     }
 
     private var installStatus: String {
-        if entry.installedMethod != "homebrew" && entry.installedMethod != "bundled" {
-            return "ติดตั้งแบบเดิม · ลบได้จากปุ่มนี้ แต่ยังย้ายไป Homebrew ไม่ได้"
+        if entry.updateAvailable { return "มีเวอร์ชันใหม่ · \(entry.installedVersion ?? "")" }
+        if entry.isHealthy == false { return "ใช้งานไม่ได้ · \(entry.healthMessage ?? "ตรวจรายละเอียด")" }
+        return "พร้อมใช้ · \(entry.installedVersion ?? entry.reviewedVersion)"
+    }
+}
+
+private struct ResultBanner: View {
+    let result: CatalogActionResult
+    let title: String
+    let onDismiss: () -> Void
+
+    private var verb: String {
+        switch result.action {
+        case "remove": "ลบ"
+        case "update": "อัปเดต"
+        case "enable": "เปิดใช้"
+        case "disable": "เลิกใช้"
+        default: "ติดตั้ง"
         }
-        if entry.updateAvailable { return "ติดตั้ง \(entry.installedVersion ?? "") · มีเวอร์ชันที่อนุมัติใหม่" }
-        if entry.isHealthy == false { return "ตรวจสุขภาพไม่ผ่าน · \(entry.healthMessage ?? "ตรวจสอบรายละเอียด")" }
-        if entry.isHealthy == true { return "พร้อมใช้ · \(entry.installedVersion ?? entry.reviewedVersion)" }
-        return "ยังไม่ได้ยืนยันสุขภาพการติดตั้ง · \(entry.installedVersion ?? entry.reviewedVersion)"
     }
 
-    private var icon: String {
-        switch entry.id {
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 9) {
+            Image(systemName: result.succeeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(result.succeeded ? .green : .red)
+            Text(result.succeeded ? "\(verb) \(title) เรียบร้อย" : "\(verb) \(title) ไม่สำเร็จ: \(result.error ?? "")")
+                .font(.callout).textSelection(.enabled)
+            Spacer(minLength: 6)
+            Button(action: onDismiss) { Image(systemName: "xmark").font(.caption.weight(.semibold)) }
+                .buttonStyle(.plain).foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background((result.succeeded ? Color.green : Color.red).opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+struct IntegrationIcon: View {
+    let id: String
+    var size: CGFloat = 38
+
+    private var symbol: String {
+        switch id {
         case "graft": "point.3.connected.trianglepath.dotted"
         case "serena": "sparkle.magnifyingglass"
         case "rtk": "terminal"
@@ -305,143 +360,199 @@ private struct IntegrationCard: View {
         }
     }
 
-    @ViewBuilder
-    private func detailSection(_ title: String, values: [String]) -> some View {
-        if !values.isEmpty {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                ForEach(values, id: \.self) { value in
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Image(systemName: "circle.fill").font(.system(size: 3)).foregroundStyle(.tertiary)
-                        Text(value).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-        }
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: size * 0.46, weight: .medium))
+            .foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(LinearGradient(colors: [Color.accentColor, Color.accentColor.opacity(0.72)],
+                                       startPoint: .top, endPoint: .bottom),
+                        in: RoundedRectangle(cornerRadius: size * 0.23, style: .continuous))
     }
 }
 
-private struct CatalogActionSheet: View {
+/// Apple-style install sheet: shows exactly what will be created or removed,
+/// then the same list ticks off live while it runs. The list comes from the
+/// core, so the preview and the actual change cannot disagree.
+struct InstallSheet: View {
     let entry: CatalogIntegration
     let projectName: String
     let kind: CatalogActionKind
     let result: CatalogActionResult?
+    let progress: CatalogProgress?
+    let loadPlan: (String, String, @escaping (InstallPlan?, String?) -> Void) -> Void
     let onDismiss: () -> Void
     let onConfirm: () -> Void
 
+    @State private var plan: InstallPlan?
+    @State private var planError: String?
     @State private var started = false
+    @State private var startedAt = Date()
 
-    private var matchingResult: CatalogActionResult? {
-        guard started, result?.id == entry.id else { return nil }
+    private var removing: Bool { kind == .remove }
+    private var external: Bool { entry.installedMethod == "external" }
+    private var finished: CatalogActionResult? {
+        guard started, !entry.isWorking, result?.id == entry.id else { return nil }
         return result
     }
+    private var planAction: String {
+        kind == .install && projectName.isEmpty ? "install" : kind.rawValue
+    }
 
-    private var isRemoving: Bool { kind == .remove }
-    private var verb: String {
+    private var title: String {
         switch kind {
-        case .install: "ติดตั้ง"
-        case .update: "อัปเดต"
-        case .remove: "ลบ"
+        case .install: "ติดตั้ง \(entry.title)"
+        case .update: "อัปเดต \(entry.title)"
+        case .remove: "\(external ? "เลิกใช้" : "ลบ") \(entry.title)"
         }
     }
 
+    private var subtitle: String {
+        if let finished {
+            return finished.succeeded ? (removing ? "ลบเรียบร้อย ไม่เหลืออะไรค้างไว้" : "พร้อมใช้งาน") : "ไม่สำเร็จ"
+        }
+        if entry.isWorking { return removing ? "กำลังลบ…" : "กำลังติดตั้ง…" }
+        if external { return "ติดตั้งไว้ก่อนแล้ว · จะเลิกใช้ใน Chorus แต่ไม่ลบตัวโปรแกรม" }
+        return removing ? "จะลบเฉพาะสิ่งที่ Chorus เพิ่มไว้" : "สำหรับ Claude และ Codex"
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack(alignment: .top, spacing: 14) {
-                Image(systemName: isRemoving ? "trash" : "shippingbox")
-                    .font(.system(size: 24, weight: .medium))
-                    .foregroundStyle(isRemoving ? Color.red : Color.accentColor)
-                    .frame(width: 48, height: 48)
-                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("\(verb) \(entry.title)").font(.title2.bold())
-                    Text(isRemoving ? "ตรวจรายการที่จะลบจาก Mac ก่อนดำเนินการ" : "ตรวจรายการที่จะติดตั้งก่อนดำเนินการ")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 11) {
-                Text("Chorus จะทำสิ่งต่อไปนี้").font(.headline)
-                planRow("1", commandDescription)
-                planRow("2", isRemoving ? "ปิดการใช้งานในทุกโปรเจกต์ของ Chorus" : "ตรวจว่าเครื่องมือเปิดใช้งานได้")
-                if !isRemoving && !projectName.isEmpty {
-                    planRow("3", "เปิดใช้กับโปรเจกต์ \(projectName)")
-                }
-            }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
-
-            if !started {
-                if isRemoving, entry.brewFormula != nil {
-                    Text("การลบผ่าน Homebrew อาจกระทบแอปอื่นที่ใช้เครื่องมือนี้ด้วย")
-                        .font(.callout).foregroundStyle(.orange)
-                } else {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("การเข้าถึงหลังเปิดใช้").font(.callout.weight(.semibold))
-                        ForEach(entry.projectAccess, id: \.self) { access in
-                            Label(access, systemImage: "checkmark.shield")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        Text(entry.networkBehavior).font(.caption).foregroundStyle(.secondary)
+        VStack(spacing: 18) {
+            VStack(spacing: 10) {
+                ZStack {
+                    IntegrationIcon(id: entry.id, size: 64)
+                        .saturation(removing ? 0.2 : 1)
+                    if let finished {
+                        Image(systemName: finished.succeeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .font(.system(size: 22))
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, finished.succeeded ? Color.green : Color.red)
+                            .offset(x: 26, y: 26)
+                            .transition(.scale.combined(with: .opacity))
                     }
                 }
-            } else if entry.isWorking {
-                HStack(spacing: 10) {
-                    ProgressView().controlSize(.small)
-                    Text(progressDescription)
-                        .font(.callout)
+                Text(title).font(.title2.weight(.semibold))
+                Text(subtitle).font(.callout).foregroundStyle(.secondary)
+            }
+            .animation(.spring(duration: 0.3), value: finished?.succeeded)
+
+            VStack(spacing: 0) {
+                if let plan {
+                    ForEach(Array(plan.items.enumerated()), id: \.element.id) { index, item in
+                        if index > 0 { Divider().padding(.leading, 46) }
+                        PlanRow(item: item, state: rowState(item))
+                    }
+                } else if let planError {
+                    Label(planError, systemImage: "exclamationmark.triangle")
+                        .font(.callout).foregroundStyle(.orange).padding(14)
+                } else {
+                    ProgressView().controlSize(.small).padding(18)
                 }
-                .accessibilityElement(children: .combine)
-            } else if let matchingResult {
-                Label(matchingResult.error ?? "\(verb) \(entry.title) สำเร็จ", systemImage: matchingResult.succeeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                    .foregroundStyle(matchingResult.succeeded ? .green : .red)
-                    .font(.callout)
-                    .textSelection(.enabled)
+            }
+            .frame(maxWidth: .infinity)
+            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+            if started, entry.isWorking {
+                TimelineView(.periodic(from: startedAt, by: 1)) { context in
+                    HStack(spacing: 8) {
+                        Text([progress?.detail ?? ""].filter { !$0.isEmpty }.first ?? progress?.phaseLabel ?? "กำลังเริ่ม")
+                            .lineLimit(1).truncationMode(.middle)
+                        Spacer(minLength: 8)
+                        Text("\(Int(context.date.timeIntervalSince(startedAt))) วิ").monospacedDigit()
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
+                }
+            } else if let message = finished?.error {
+                Text(message).font(.caption).foregroundStyle(.red)
+                    .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            } else if !started && !removing && !entry.projectAccess.isEmpty {
+                Label(entry.projectAccess[0], systemImage: "lock.shield")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             HStack {
                 Spacer()
-                Button(started ? "ปิด" : "ยกเลิก", action: onDismiss)
-                    .disabled(entry.isWorking)
-                if !started {
-                    Button(isRemoving ? "ลบจาก Mac" : entry.brewFormula == nil ? verb : "\(verb)ด้วย Homebrew") {
+                if finished != nil {
+                    Button("เสร็จสิ้น", action: onDismiss).buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                } else if entry.isWorking {
+                    Button("ทำต่อในพื้นหลัง", action: onDismiss)
+                } else {
+                    Button("ยกเลิก", action: onDismiss)
+                        .keyboardShortcut(.cancelAction)
+                    Button(removing ? (external ? "เลิกใช้" : "ลบ") : kind == .update ? "อัปเดต" : "ติดตั้ง") {
                         started = true
+                        startedAt = Date()
                         onConfirm()
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(isRemoving ? .red : .accentColor)
+                    .tint(removing ? .red : .accentColor)
                     .keyboardShortcut(.defaultAction)
+                    .disabled(plan == nil || entry.isWorking || started)
                 }
             }
         }
         .padding(24)
-        .frame(width: 520)
+        .frame(width: 440)
+        .onAppear {
+            if entry.isWorking { started = true }
+            loadPlan(entry.id, planAction) { plan, error in
+                self.plan = plan
+                self.planError = error
+            }
+        }
     }
 
-    private var commandDescription: String {
-        if let formula = entry.brewFormula {
-            return "\(isRemoving ? "brew uninstall" : kind == .update ? "brew upgrade" : "brew install") \(formula)"
+    private func rowState(_ item: PlanItem) -> PlanRow.Phase {
+        guard started else { return .pending }
+        if let finished { return finished.succeeded ? .done : (progress?.current == item.phase ? .failed : .pending) }
+        if progress?.done.contains(item.phase) == true { return .done }
+        if progress?.current == item.phase { return .running }
+        return .pending
+    }
+}
+
+private struct PlanRow: View {
+    enum Phase { case pending, running, done, failed }
+    let item: PlanItem
+    let state: Phase
+
+    private var symbol: String {
+        switch item.kind {
+        case "package": "shippingbox"
+        case "file": "doc"
+        case "state": "list.bullet.rectangle"
+        case "check": "stethoscope"
+        case "project": "folder"
+        case "keep": "hand.raised"
+        default: "circle"
         }
-        if isRemoving, entry.installedMethod != "bundled" {
-            return "ลบการติดตั้งเดิมที่ Chorus จัดเก็บไว้"
-        }
-        return isRemoving ? "ลบ skill ที่ Chorus จัดเก็บไว้" : "เพิ่ม skill ที่มากับ Chorus"
     }
 
-    private var progressDescription: String {
-        if entry.brewFormula != nil {
-            return isRemoving ? "Homebrew กำลังลบและตรวจสอบสถานะ…" : "Homebrew กำลังติดตั้งและตรวจสอบสถานะ…"
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: symbol)
+                .font(.system(size: 14))
+                .foregroundStyle(item.kind == "keep" ? Color.orange : Color.secondary)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title).font(.callout)
+                if let detail = item.detail {
+                    Text(detail).font(.caption.monospaced()).foregroundStyle(.secondary)
+                        .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
+                }
+            }
+            Spacer(minLength: 6)
+            switch state {
+            case .pending: EmptyView()
+            case .running: ProgressView().controlSize(.small)
+            case .done: Image(systemName: "checkmark").foregroundStyle(.green).transition(.scale)
+            case .failed: Image(systemName: "xmark").foregroundStyle(.red)
+            }
         }
-        return isRemoving ? "กำลังลบและตรวจสอบสถานะ…" : "กำลังติดตั้งและตรวจสอบสถานะ…"
-    }
-
-    private func planRow(_ number: String, _ title: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text(number).font(.caption.bold()).foregroundStyle(.secondary)
-                .frame(width: 19, height: 19)
-                .background(Color.primary.opacity(0.07), in: Circle())
-            Text(title).font(.callout).fixedSize(horizontal: false, vertical: true)
-        }
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .animation(.easeOut(duration: 0.15), value: state)
+        .accessibilityElement(children: .combine)
     }
 }

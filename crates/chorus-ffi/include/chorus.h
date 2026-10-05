@@ -43,6 +43,21 @@ char *chorus_catalog_list_json(const char *project);
 char *chorus_catalog_action_json(const char *project, const char *id,
                                  const char *action);
 
+/* What an action would create or remove ({"ok":true,"plan":{items:[...]}}).
+ * Touches nothing. Same arguments as chorus_catalog_action_json. */
+char *chorus_catalog_plan_json(const char *project, const char *id,
+                               const char *action);
+
+/* Per-integration dashboard: {"ok":true,"dashboard":{...}}. Read-only. */
+char *chorus_catalog_dashboard_json(const char *project, const char *id);
+
+/* Run a "run" action: {"ok":true,"result":{"ok":bool,"output":"..."}}.
+ * Confirm the action's effects with the user first. */
+char *chorus_catalog_run_json(const char *project, const char *id, const char *key);
+
+/* Phase of the running catalog action: {"ok":true,"progress":null|{id,current,done}}. */
+char *chorus_catalog_progress_json(void);
+
 /* Import original bytes and optional prepared text or normalized image.
  * Pass NULL for absent strings/data. Prepared text and normalized image are
  * mutually exclusive. JSON: {"ok":true,"attachment":{"id":N,"name":"...",

@@ -35,12 +35,8 @@ pub unsafe extern "C" fn chorus_catalog_list_json(project: *const c_char) -> *mu
         let enabled = integration_catalog::enabled_for(Path::new(project)).map_err(|e| e.to_string())?;
         let enabled: std::collections::BTreeSet<&str> = enabled.iter().map(|entry| entry.id).collect();
         let entries: Vec<_> = integration_catalog::catalog().iter().map(|entry| {
-            let observed = integration_catalog::homebrew_installed(entry).ok().flatten();
-            let installed = if entry.recipe.method == integration_catalog::InstallMethod::Homebrew {
-                observed.as_ref()
-            } else {
-                state.installed.get(entry.id)
-            };
+            let installed = integration_catalog::current_record(entry, &state);
+            let installed = installed.as_ref();
             serde_json::json!({
                 "id": entry.id, "title": entry.title, "source": entry.source,
                 "maintainer": entry.maintainer, "license": entry.license,
@@ -77,20 +73,71 @@ pub unsafe extern "C" fn chorus_catalog_action_json(
         return err("catalog action arguments must be valid UTF-8");
     };
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
-        match action {
-            "install" => integration_catalog::install(id).map(|_| ()).map_err(|e| e.to_string()),
-            "update" => integration_catalog::update(id).map(|_| ()).map_err(|e| e.to_string()),
-            "remove" => integration_catalog::uninstall(id).map_err(|e| e.to_string()),
-            "enable" => integration_catalog::set_enabled(Path::new(project), id, true).map_err(|e| e.to_string()),
-            "disable" => integration_catalog::set_enabled(Path::new(project), id, false).map_err(|e| e.to_string()),
-            _ => Err(format!("unknown catalog action: {action}")),
-        }
+        integration_catalog::perform(action, id, Path::new(project)).map_err(|e| e.to_string())
     }));
     match result {
         Ok(Ok(())) => out("{\"ok\":true}".to_string()),
         Ok(Err(error)) => err(error),
         Err(_) => err("panic in catalog action"),
     }
+}
+
+/// What `action` would create, change or remove. Same arguments as
+/// `chorus_catalog_action_json`; nothing is touched.
+///
+/// # Safety
+/// All pointers must point to valid NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_catalog_plan_json(
+    project: *const c_char, id: *const c_char, action: *const c_char,
+) -> *mut c_char {
+    let (Some(project), Some(id), Some(action)) = (borrow(project), borrow(id), borrow(action)) else {
+        return err("catalog plan arguments must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| integration_catalog::plan(id, action, Path::new(project)))) {
+        Ok(Ok(plan)) => out(serde_json::json!({"ok":true,"plan":plan}).to_string()),
+        Ok(Err(error)) => err(error),
+        Err(_) => err("panic in catalog plan"),
+    }
+}
+
+/// Dashboard data for one installed integration, scoped to `project`.
+///
+/// # Safety
+/// All pointers must point to valid NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_catalog_dashboard_json(project: *const c_char, id: *const c_char) -> *mut c_char {
+    let (Some(project), Some(id)) = (borrow(project), borrow(id)) else {
+        return err("dashboard arguments must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| integration_catalog::dashboard(id, Path::new(project)))) {
+        Ok(Ok(d)) => out(serde_json::json!({"ok":true,"dashboard":d}).to_string()),
+        Ok(Err(error)) => err(error),
+        Err(_) => err("panic in catalog dashboard"),
+    }
+}
+
+/// Run one of an integration's `run` actions. The shell must have shown the
+/// action's `effects` and got a yes first.
+///
+/// # Safety
+/// All pointers must point to valid NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_catalog_run_json(project: *const c_char, id: *const c_char, key: *const c_char) -> *mut c_char {
+    let (Some(project), Some(id), Some(key)) = (borrow(project), borrow(id), borrow(key)) else {
+        return err("run arguments must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| integration_catalog::run_action(id, key, Path::new(project)))) {
+        Ok(Ok(result)) => out(serde_json::json!({"ok":true,"result":result}).to_string()),
+        Ok(Err(error)) => err(error),
+        Err(_) => err("panic in catalog run"),
+    }
+}
+
+/// Position of the running catalog action, or `{"ok":true,"progress":null}`.
+#[no_mangle]
+pub extern "C" fn chorus_catalog_progress_json() -> *mut c_char {
+    out(serde_json::json!({"ok":true,"progress":integration_catalog::progress()}).to_string())
 }
 
 /// Opaque handle. One per open session.

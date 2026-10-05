@@ -69,12 +69,18 @@ struct SettingsSheet: View {
                                     automaticUpdates: autoCatalogUpdates,
                                     backgroundStatus: engine.catalogBackgroundStatus,
                                     actionResult: engine.catalogActionResult,
+                                    progress: engine.catalogProgress,
+                                    requestedInstall: engine.requestedInstall,
+                                    onRequestHandled: { engine.requestedInstall = nil },
+                                    onLoadPlan: { id, action, done in
+                                        engine.loadCatalogPlan(project: workspace, id: id, action: action, completion: done)
+                                    },
                                     onAutomaticUpdatesChanged: { value in
                                         autoCatalogUpdates = value
                                         if value { engine.loadCatalog(project: workspace, automaticUpdates: true) }
                                     },
                                     onInstall: { engine.catalogAction(project: workspace, id: $0,
-                                                                      action: workspace.isEmpty ? "install" : "installAndEnable") },
+                                                                      action: workspace.isEmpty ? "install" : "install_enable") },
                                     onUpdate: { engine.catalogAction(project: workspace, id: $0, action: "update") },
                                     onRemove: { engine.catalogAction(project: workspace, id: $0, action: "remove") },
                                     onProjectEnableChanged: { id, enabled in

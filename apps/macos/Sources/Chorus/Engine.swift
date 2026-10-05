@@ -62,6 +62,22 @@ private struct ImportedAttachmentResult: Decodable {
     let error: String?
 }
 
+private struct CatalogPlanResult: Decodable {
+    let ok: Bool
+    let error: String?
+    let plan: InstallPlan?
+}
+
+private struct DashboardResult: Decodable {
+    let ok: Bool
+    let error: String?
+    let dashboard: ToolDashboard?
+}
+
+private struct CatalogProgressResult: Decodable {
+    let progress: CatalogProgress?
+}
+
 private struct CatalogListResult: Decodable {
     struct Entry: Decodable {
         struct Installed: Decodable {
@@ -165,6 +181,10 @@ final class Engine: ObservableObject {
     @Published var catalogActionResult: CatalogActionResult?
     @Published var catalogWorking: Set<String> = []
     @Published var catalogBackgroundStatus: String?
+    @Published var catalogProgress: CatalogProgress?
+    /// An integration another screen wants the install sheet opened for.
+    @Published var requestedInstall: String?
+    private var catalogProgressTimer: Timer?
     @Published var routerModels: [String]?
     @Published var routerChecking = false
     @Published var routerDownloading = false
@@ -568,6 +588,70 @@ final class Engine: ObservableObject {
         }
     }
 
+    func loadDashboard(project: String, id: String, completion: @escaping (ToolDashboard?, String?) -> Void) {
+        catalogQueue.async {
+            let json = project.withCString { path in
+                id.withCString { Self.string(from: chorus_catalog_dashboard_json(path, $0)) }
+            }
+            let result = Self.decode(DashboardResult.self, json)
+            DispatchQueue.main.async { completion(result?.dashboard, result?.ok == true ? nil : (result?.error ?? "โหลดแดชบอร์ดไม่ได้")) }
+        }
+    }
+
+    private struct ToolActionResult: Decodable {
+        let ok: Bool
+        let error: String?
+        let result: ToolActionOutput?
+    }
+
+    func runToolAction(project: String, id: String, key: String,
+                       completion: @escaping (ToolActionOutput?, String?) -> Void) {
+        catalogQueue.async {
+            let json = project.withCString { path in
+                id.withCString { identifier in
+                    key.withCString { Self.string(from: chorus_catalog_run_json(path, identifier, $0)) }
+                }
+            }
+            let result = Self.decode(ToolActionResult.self, json)
+            DispatchQueue.main.async { completion(result?.result, result?.ok == true ? nil : (result?.error ?? "สั่งงานไม่ได้")) }
+        }
+    }
+
+    /// Ask the core what `action` would create or remove. Touches nothing.
+    func loadCatalogPlan(project: String, id: String, action: String,
+                         completion: @escaping (InstallPlan?, String?) -> Void) {
+        catalogQueue.async {
+            let json = project.withCString { path in
+                id.withCString { identifier in
+                    action.withCString { operation in
+                        Self.string(from: chorus_catalog_plan_json(path, identifier, operation))
+                    }
+                }
+            }
+            let result = Self.decode(CatalogPlanResult.self, json)
+            DispatchQueue.main.async { completion(result?.plan, result?.ok == true ? nil : (result?.error ?? "อ่านรายการไม่ได้")) }
+        }
+    }
+
+    private func pollCatalogProgress() {
+        catalogProgressTimer?.invalidate()
+        catalogProgressTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            // A separate queue: the action holds `catalogQueue` until it ends.
+            DispatchQueue.global(qos: .userInitiated).async {
+                let json = Self.string(from: chorus_catalog_progress_json())
+                let progress = Self.decode(CatalogProgressResult.self, json)?.progress
+                DispatchQueue.main.async { if progress != nil { self?.catalogProgress = progress } }
+            }
+        }
+    }
+
+    private func stopCatalogProgress() {
+        catalogProgressTimer?.invalidate()
+        catalogProgressTimer = nil
+        catalogProgress = nil
+    }
+
+    /// `action`: install, install_enable, update, remove, enable, disable.
     func catalogAction(project: String, id: String, action: String) {
         catalogActionError = nil
         catalogActionResult = nil
@@ -577,29 +661,22 @@ final class Engine: ObservableObject {
             if entry.id == id { entry.isWorking = true }
             return entry
         }
+        pollCatalogProgress()
         catalogQueue.async { [weak self] in
-            func perform(_ command: String) -> SimpleResult? {
-                let json = project.withCString { path in
-                    id.withCString { identifier in
-                        command.withCString { operation in
-                            Self.string(from: chorus_catalog_action_json(path, identifier, operation))
-                        }
+            let json = project.withCString { path in
+                id.withCString { identifier in
+                    action.withCString { operation in
+                        Self.string(from: chorus_catalog_action_json(path, identifier, operation))
                     }
                 }
-                return Self.decode(SimpleResult.self, json)
             }
-            let result: SimpleResult?
-            if action == "installAndEnable" {
-                let installed = perform("install")
-                result = installed?.ok == true ? perform("enable") : installed
-            } else {
-                result = perform(action)
-            }
+            let result = Self.decode(SimpleResult.self, json)
             DispatchQueue.main.async {
+                self?.stopCatalogProgress()
                 self?.catalogWorking.remove(id)
-                self?.catalogActionError = result?.ok == true ? nil : (result?.error ?? "จัดการเครื่องมือไม่สำเร็จ")
-                self?.catalogActionResult = CatalogActionResult(id: id, action: action,
-                                                                  error: result?.ok == true ? nil : (result?.error ?? "จัดการเครื่องมือไม่สำเร็จ"))
+                let failure = result?.ok == true ? nil : (result?.error ?? "จัดการเครื่องมือไม่สำเร็จ")
+                self?.catalogActionError = failure
+                self?.catalogActionResult = CatalogActionResult(id: id, action: action, error: failure)
                 self?.loadCatalog(project: project)
             }
         }
