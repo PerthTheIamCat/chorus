@@ -59,11 +59,13 @@ struct ContentView: View {
     @State private var lastPrompt = ""
 
     @State private var rightTab = RightTab.context
+    @State private var showPalette = false
+    @State private var showAgentSettings = false
     @State private var confirmRevert = false
     @State private var rejected: Set<UUID> = []
 
     enum RightTab: String, CaseIterable {
-        case sessions = "เซสชัน", context = "คอนเท็กซ์", changes = "ที่แก้ไป", memory = "ความจำ"
+        case context = "คอนเท็กซ์", changes = "ที่แก้ไป", memory = "ความจำ"
     }
 
     var body: some View {
@@ -82,7 +84,6 @@ struct ContentView: View {
                     .padding(8)
                     Divider()
                     switch rightTab {
-                    case .sessions: sessionsPane
                     case .context: contextPane
                     case .changes: changesPane
                     case .memory: memoryPane
@@ -119,6 +120,11 @@ struct ContentView: View {
         .onAppear { engine.loadAgents() }
         .onChange(of: engine.agents) { _ in syncModelSelection() }
         .onChange(of: model) { m in applyModel(m) }
+        .sheet(isPresented: $showPalette) { palette }
+        .background(
+            Button("") { showPalette = true }
+                .keyboardShortcut("k", modifiers: .command).opacity(0)
+        )
         .sheet(isPresented: $showSettings) {
             SettingsSheet().environmentObject(engine)
         }
@@ -246,7 +252,12 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity)
                 }
 
-                sidebarSection("เอเจนต์") {
+                sidebarSection("เซสชัน") {
+                    sessionList
+                }
+
+                DisclosureGroup("เอเจนต์และสิทธิ์", isExpanded: $showAgentSettings) {
+                  VStack(alignment: .leading, spacing: 6) {
                     if engine.agents.isEmpty {
                         Text("กำลังดูว่ามีตัวไหนใช้ได้บ้าง…")
                             .font(.caption).foregroundStyle(.secondary)
@@ -286,7 +297,10 @@ struct ContentView: View {
                     Text(permission.hint)
                         .font(.caption2).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                  }
+                  .padding(.top, 6)
                 }
+                .font(.subheadline.bold())
 
                 if engine.sessionID >= 0 {
                     Button("ถามหลายตัวพร้อมกันแล้วเทียบ") {
@@ -446,31 +460,105 @@ struct ContentView: View {
     }
 
     private var composer: some View {
-        HStack(alignment: .bottom, spacing: 8) {
+        VStack(spacing: 6) {
             TextEditor(text: $draft)
-                .frame(minHeight: 44, maxHeight: 120)
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
-            Button {
-                let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !text.isEmpty else { return }
-                draft = ""
-                lastPrompt = text
-                if permission == .ask {
-                    engine.sendInteractive(text, agent: model)
-                } else {
-                    // Always the relay path, even for one agent: a chain of one
-                    // behaves exactly like a single turn, and the user never has
-                    // to know the word "relay" to get failover.
-                    engine.sendRelay(text, agents: relayChain, level: permission.rawValue)
+                .font(.body)
+                .frame(minHeight: 44, maxHeight: 140)
+                .scrollContentBackground(.hidden)
+            HStack(spacing: 8) {
+                // Agent chip: who answers the next turn. `@codex …` at the start
+                // of a message overrides it for that turn only.
+                Menu {
+                    ForEach(engine.agents) { a in
+                        ForEach(a.models, id: \.id) { m in
+                            Button(a.ready ? m.label : "\(m.label) — ยังไม่ได้ login") { model = m.id }
+                                .disabled(!a.ready)
+                        }
+                    }
+                } label: {
+                    Label(agentFor(model)?.label ?? "เลือกเอเจนต์", systemImage: "person.crop.circle")
+                        .font(.caption)
                 }
-            } label: {
-                if engine.busy { ProgressView().controlSize(.small) }
-                else { Image(systemName: "arrow.up.circle.fill").font(.title2) }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                Text("@agent ข้ามตัว · ⌘K คำสั่ง")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                Spacer()
+                Button(action: submit) {
+                    if engine.busy { ProgressView().controlSize(.small) }
+                    else { Image(systemName: "arrow.up.circle.fill").font(.title2) }
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(engine.busy || engine.sessionID < 0)
+                .help("ส่ง (⌘↩)")
             }
-            .buttonStyle(.plain)
-            .disabled(engine.busy || engine.sessionID < 0)
         }
         .padding(10)
+        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
+        .padding(10)
+    }
+
+    /// `@codex fix this` → ("codex's default model", "fix this"). Matches agent
+    /// id or label, case-insensitively; anything else is sent untouched.
+    private func route(_ text: String) -> (model: String, text: String) {
+        guard text.hasPrefix("@") else { return (model, text) }
+        let parts = text.dropFirst().split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+        guard let tag = parts.first?.lowercased(),
+              let a = engine.agents.first(where: { $0.ready && ($0.id.lowercased() == tag || $0.label.lowercased() == tag) })
+        else { return (model, text) }
+        return (a.defaultModel, parts.count > 1 ? String(parts[1]) : "")
+    }
+
+    private func submit() {
+        let raw = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let (target, text) = route(raw)
+        guard !text.isEmpty, !engine.busy, engine.sessionID >= 0 else { return }
+        draft = ""
+        lastPrompt = text
+        if permission == .ask {
+            engine.sendInteractive(text, agent: target)
+        } else {
+            // Always the relay path, even for one agent: a chain of one
+            // behaves exactly like a single turn, and the user never has
+            // to know the word "relay" to get failover.
+            var chain = [target]
+            for a in engine.agents where a.ready && a.defaultModel != target && a.id != agentFor(target)?.id {
+                chain.append(a.defaultModel)
+            }
+            engine.sendRelay(text, agents: chain.joined(separator: ","), level: permission.rawValue)
+        }
+    }
+
+    // MARK: command palette (⌘K)
+
+    private struct PaletteItem: Identifiable {
+        let id = UUID()
+        let title: String
+        let icon: String
+        let run: () -> Void
+    }
+
+    private var paletteItems: [PaletteItem] {
+        var items: [PaletteItem] = []
+        for a in engine.agents where a.ready {
+            items.append(.init(title: "สลับไปใช้ \(a.label)", icon: "person.crop.circle") { model = a.defaultModel })
+            if engine.sessionID >= 0 && a.id != currentAgentID {
+                items.append(.init(title: "ส่งต่องานให้ \(a.label)", icon: "arrow.left.arrow.right") {
+                    engine.handoffAuto(to: a.defaultModel, level: max(permission.rawValue, 0))
+                })
+            }
+        }
+        items.append(.init(title: "เลือกโฟลเดอร์โปรเจกต์…", icon: "folder") { pickFolder() })
+        if engine.sessionID >= 0 {
+            items.append(.init(title: "Snapshot ตอนนี้", icon: "camera") { engine.snapshot() })
+        }
+        items.append(.init(title: "ตั้งค่า", icon: "gearshape") { showSettings = true })
+        return items
+    }
+
+    private var palette: some View {
+        PaletteSheet(items: paletteItems.map { ($0.title, $0.icon, $0.run) }) { showPalette = false }
     }
 
     // MARK: context pane — budget + last agent
@@ -586,74 +674,60 @@ struct ContentView: View {
         .frame(minWidth: 640, minHeight: 460)
     }
 
-    /// Every past conversation in this project. The app's own memory is the
-    /// selling point; not being able to see what it remembers was odd.
-    private var sessionsPane: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("เซสชันทั้งหมด").font(.headline)
-                Spacer()
-                Button {
-                    engine.loadSessions(db: dbPath)
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.borderless)
-                .disabled(workspace.isEmpty)
-            }
+    /// Every past conversation in this project, in the sidebar where Claude,
+    /// Codex and Conductor put theirs — the app's own memory is the selling
+    /// point, so it should be the first thing on the left, not a hidden tab.
+    private var sessionList: some View {
+        VStack(alignment: .leading, spacing: 6) {
             if engine.sessions.isEmpty {
                 Text(workspace.isEmpty
                      ? "เลือกโฟลเดอร์โปรเจกต์ก่อน"
                      : "ยังไม่มี session ในโปรเจกต์นี้")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 6) {
-                    ForEach(engine.sessions) { s in
-                        Button {
-                            engine.reopen(db: dbPath, sessionID: s.id)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(spacing: 6) {
-                                    Text("#\(s.id)")
-                                        .font(.caption2.monospaced())
-                                        .foregroundStyle(.tertiary)
-                                    Text(s.goal.isEmpty ? s.title : s.goal)
-                                        .font(.caption.weight(.medium))
-                                        .lineLimit(2)
-                                        .multilineTextAlignment(.leading)
-                                    Spacer(minLength: 0)
-                                }
-                                HStack(spacing: 5) {
-                                    ForEach(s.agents, id: \.self) { a in
-                                        Text(a)
-                                            .font(.caption2)
-                                            .padding(.horizontal, 4).padding(.vertical, 1)
-                                            .background(.quaternary, in: Capsule())
-                                    }
-                                    Text("\(s.events) events")
-                                        .font(.caption2).foregroundStyle(.tertiary)
-                                    if s.forked_from != nil {
-                                        Image(systemName: "arrow.triangle.branch")
-                                            .font(.caption2).foregroundStyle(.tertiary)
-                                    }
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(7)
-                            .background(
-                                s.id == engine.sessionID ? Color.accentColor.opacity(0.15) : Color.clear,
-                                in: RoundedRectangle(cornerRadius: 6))
-                            .contentShape(Rectangle())
+            ForEach(engine.sessions) { s in
+                Button {
+                    engine.reopen(db: dbPath, sessionID: s.id)
+                } label: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text("#\(s.id)")
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.tertiary)
+                            Text(s.goal.isEmpty ? s.title : s.goal)
+                                .font(.caption.weight(.medium))
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                            Spacer(minLength: 0)
                         }
-                        .buttonStyle(.plain)
+                        HStack(spacing: 5) {
+                            ForEach(s.agents, id: \.self) { a in
+                                Text(a)
+                                    .font(.caption2)
+                                    .padding(.horizontal, 4).padding(.vertical, 1)
+                                    .background(.quaternary, in: Capsule())
+                            }
+                            Text("\(s.events) events")
+                                .font(.caption2).foregroundStyle(.tertiary)
+                            if s.forked_from != nil {
+                                Image(systemName: "arrow.triangle.branch")
+                                    .font(.caption2).foregroundStyle(.tertiary)
+                            }
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(7)
+                    .background(
+                        s.id == engine.sessionID ? Color.accentColor.opacity(0.15) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 6))
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
             }
         }
-        .padding(12)
-        .frame(maxHeight: .infinity, alignment: .top)
         .onAppear { if !workspace.isEmpty { engine.loadSessions(db: dbPath) } }
+        .onChange(of: workspace) { _ in if !workspace.isEmpty { engine.loadSessions(db: dbPath) } }
+        .onChange(of: engine.sessionID) { _ in if !workspace.isEmpty { engine.loadSessions(db: dbPath) } }
     }
 
     private var dbPath: String {
@@ -1039,5 +1113,40 @@ struct SettingsSheet: View {
         case "needs_login": "ยังไม่ได้ login"
         default: "ยังไม่ได้ติดตั้ง CLI"
         }
+    }
+}
+
+
+/// ⌘K: type to filter, ↩ runs the first match.
+struct PaletteSheet: View {
+    let items: [(title: String, icon: String, run: () -> Void)]
+    let dismiss: () -> Void
+    @State private var query = ""
+
+    private var shown: [(title: String, icon: String, run: () -> Void)] {
+        query.isEmpty ? items : items.filter { $0.title.localizedCaseInsensitiveContains(query) }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TextField("พิมพ์คำสั่ง…", text: $query)
+                .textFieldStyle(.plain).font(.title3).padding(14)
+                .onSubmit { if let f = shown.first { dismiss(); f.run() } }
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(shown.enumerated()), id: \.offset) { _, item in
+                        Button { dismiss(); item.run() } label: {
+                            Label(item.title, systemImage: item.icon)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 12).padding(.vertical, 7)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }.padding(6)
+            }
+        }
+        .frame(width: 460, height: 320)
     }
 }
