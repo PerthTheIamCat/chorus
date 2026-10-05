@@ -60,6 +60,8 @@ struct ContentView: View {
 
     @State private var rightTab = RightTab.context
     @State private var showPalette = false
+    @State private var queued: [(model: String, text: String)] = []
+    @State private var hint: String?
     @State private var showAgentSettings = false
     @State private var confirmRevert = false
     @State private var rejected: Set<UUID> = []
@@ -118,6 +120,7 @@ struct ContentView: View {
             }
         }
         .onAppear { engine.loadAgents() }
+        .onChange(of: engine.busy) { _ in flushQueue() }
         .onChange(of: engine.agents) { _ in syncModelSelection() }
         .onChange(of: model) { m in applyModel(m) }
         .sheet(isPresented: $showPalette) { palette }
@@ -461,6 +464,22 @@ struct ContentView: View {
 
     private var composer: some View {
         VStack(spacing: 6) {
+            if !queued.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(Array(queued.enumerated()), id: \.offset) { i, q in
+                        HStack(spacing: 6) {
+                            Image(systemName: "clock").font(.caption2)
+                            Text(q.text).font(.caption).lineLimit(1)
+                            Spacer()
+                            Button { queued.remove(at: i) } label: { Image(systemName: "xmark.circle.fill") }
+                                .buttonStyle(.plain).foregroundStyle(.secondary)
+                        }
+                    }
+                    Text("รอคิว — จะส่งต่อเมื่อเทิร์นนี้จบ").font(.caption2).foregroundStyle(.tertiary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if let hint { Text(hint).font(.caption).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading) }
             TextEditor(text: $draft)
                 .font(.body)
                 .frame(minHeight: 44, maxHeight: 140)
@@ -485,13 +504,13 @@ struct ContentView: View {
                     .font(.caption2).foregroundStyle(.tertiary)
                 Spacer()
                 Button(action: submit) {
-                    if engine.busy { ProgressView().controlSize(.small) }
+                    if engine.busy { Image(systemName: "text.badge.plus").font(.title2) }
                     else { Image(systemName: "arrow.up.circle.fill").font(.title2) }
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(engine.busy || engine.sessionID < 0)
-                .help("ส่ง (⌘↩)")
+                .disabled(engine.sessionID < 0)
+                .help(engine.busy ? "เข้าคิว (⌘↩)" : "ส่ง (⌘↩)")
             }
         }
         .padding(10)
@@ -513,8 +532,20 @@ struct ContentView: View {
     private func submit() {
         let raw = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let (target, text) = route(raw)
-        guard !text.isEmpty, !engine.busy, engine.sessionID >= 0 else { return }
+        guard engine.sessionID >= 0, !raw.isEmpty else { return }
+        guard !text.isEmpty else {
+            hint = "พิมพ์ข้อความต่อจาก \(raw) ด้วย"
+            return
+        }
+        hint = nil
         draft = ""
+        // Busy: line it up behind the running turn (Cursor-style queue)
+        // instead of dropping the keystroke on a disabled button.
+        if engine.busy { queued.append((target, text)); return }
+        dispatch(target, text)
+    }
+
+    private func dispatch(_ target: String, _ text: String) {
         lastPrompt = text
         if permission == .ask {
             engine.sendInteractive(text, agent: target)
@@ -528,6 +559,12 @@ struct ContentView: View {
             }
             engine.sendRelay(text, agents: chain.joined(separator: ","), level: permission.rawValue)
         }
+    }
+
+    private func flushQueue() {
+        guard !engine.busy, !queued.isEmpty, engine.lastError == nil else { return }
+        let next = queued.removeFirst()
+        dispatch(next.model, next.text)
     }
 
     // MARK: command palette (⌘K)
