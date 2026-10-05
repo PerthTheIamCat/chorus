@@ -421,6 +421,8 @@ sandbox ไม่ทำงาน ต้องใช้ `~/` ถึงจะว�
 "ระบบปฏิเสธสิทธิ์ (operation not permitted)" · `--read-only` codex ขออนุญาตก่อน
 แล้วโดน DENY → `stop: cancelled` ไม่มีไฟล์ถูกสร้าง
 
+**carve-out ในตัว workspace** (Workspace profile): `.chorus/` (shadow repo ที่ `revert_if_touched` เชื่อ — agent แก้ได้ = ซ่อนร่องรอยตัวเองได้) · `.git/hooks` · `.git/config` (ไฟล์ที่เขียนตรงนี้ `git` ของ user รันทีหลังนอก sandbox) — Seatbelt เลือกกฎ*ตัวสุดท้าย* จึงต้อง `deny` ต่อท้าย `allow` · ปิดได้ด้วย `CHORUS_SANDBOX=off` (ยังพิมพ์เตือน) · เทสต์ `enforced::` รัน `sandbox-exec` จริง ไม่ใช่ string match · รัน codex จริง 5 ต.ค. 2026: เขียนใน workspace ได้ · `.git/hooks/pre-commit` กับ `~/…` โดน "operation not permitted"
+
 ถ้าไม่มี `sandbox-exec` (ไม่ใช่ macOS) → `wrap` คืนคำสั่งเดิมพร้อมเหตุผล **และต้องพิมพ์บอก**
 sandbox ที่ทำให้คนทำงานไม่ได้คือ sandbox ที่โดนปิด — แต่ sandbox ที่ปิดอยู่เงียบ ๆ แย่กว่า
 
