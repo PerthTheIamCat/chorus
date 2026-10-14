@@ -91,3 +91,8 @@ graft/
 # graphify cache & output
 graphify-out/
 .graphify_detect.json
+
+# Packaging artifacts
+*.dmg
+apps/macos/dist/
+dist/

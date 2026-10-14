@@ -22,10 +22,10 @@ BUNDLE_ID="dev.chorus.app"
 
 echo "── cargo build ($MODE) ──"
 if [ "$MODE" = "release" ]; then
-    (cd ../.. && cargo build --release -p chorus-ffi -p chorus-acp --bin antigravity-acp -p chorus-daemon --bin chorusd)
+    (cd ../.. && cargo build --release -p chorus-ffi --lib && cargo build --release -p chorus-acp --bin antigravity-acp -p chorus-daemon --bin chorusd)
     sed -i '' 's/let target = "debug"/let target = "release"/' Package.swift
 else
-    (cd ../.. && cargo build -p chorus-ffi -p chorus-acp --bin antigravity-acp -p chorus-daemon --bin chorusd)
+    (cd ../.. && cargo build -p chorus-ffi --lib && cargo build -p chorus-acp --bin antigravity-acp -p chorus-daemon --bin chorusd)
     sed -i '' 's/let target = "release"/let target = "debug"/' Package.swift
 fi
 
