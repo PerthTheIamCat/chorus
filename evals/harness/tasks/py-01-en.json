@@ -1,0 +1,12 @@
+{
+  "task_id": "py-01-en",
+  "language": "en",
+  "domain": "python",
+  "difficulty": "trivial",
+  "prompt_th": "แก้บั๊ก mutable default argument items=[] ในฟังก์ชัน load_config ให้ใช้ None และกำหนดค่าใหม่ภายในฟังก์ชัน",
+  "prompt_en": "Fix mutable default argument items=[] bug in load_config function to use None with internal initialization",
+  "test_command": "pytest tests/test_config.py",
+  "expected_files": [
+    "src/scripts/config.py"
+  ]
+}

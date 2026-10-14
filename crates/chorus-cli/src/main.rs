@@ -60,9 +60,10 @@ fn main() -> Result<()> {
         }
         "doctor" => doctor_cmd(),
         "demo" => demo_cmd(&args[1..]),
+        "agent" => agent_cmd(&args[1..]),
         other => {
             eprintln!(
-                "unknown command {other:?}; try: chorus demo | doctor | bench | run | handoff | memory | compare | compact | context | skills | mcp | models"
+                "unknown command {other:?}; try: chorus agent | demo | doctor | bench | run | handoff | memory | compare | compact | context | skills | mcp | models"
             );
             std::process::exit(2);
         }
@@ -1326,3 +1327,149 @@ fn doctor_cmd() -> Result<()> {
     }
     Ok(())
 }
+
+/// `chorus agent <subcommand> [options]`
+///
+/// Dual Control Surface CLI companion for agent orchestration and task visibility.
+fn agent_cmd(args: &[String]) -> Result<()> {
+    use chorus_core::{agent_control, roles, Store};
+
+    let sub = args.first().map(String::as_str).unwrap_or("help");
+    let mut db: Option<PathBuf> = None;
+    let mut session_id: Option<i64> = None;
+    let mut rest: Vec<&String> = Vec::new();
+    let mut it = args.iter().skip(1);
+    let mut worktree = false;
+    let mut join_mode = "compact".to_string();
+    let mut name_hint: Option<String> = None;
+    let mut save_role = false;
+
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--db" => db = it.next().map(PathBuf::from),
+            "--session" => session_id = it.next().and_then(|v| v.parse().ok()),
+            "--worktree" => worktree = true,
+            "--mode" => join_mode = it.next().cloned().unwrap_or_else(|| "compact".into()),
+            "--name" => name_hint = it.next().cloned(),
+            "--save" => save_role = true,
+            _ => rest.push(a),
+        }
+    }
+
+    let db_path = db.unwrap_or_else(|| PathBuf::from(".chorus/store.sqlite3"));
+
+    match sub {
+        "list" => {
+            let store = Store::open(&db_path).context("open store")?;
+            let agents = agent_control::list_subagents(store.conn(), session_id)?;
+            if agents.is_empty() {
+                println!("No subagents found.");
+                return Ok(());
+            }
+            println!("ID | Role | Status | Task | Worktree");
+            println!("---+------+--------+------+---------");
+            for a in agents {
+                println!(
+                    "{} | {} | {} | {} | {}",
+                    a.id,
+                    a.role,
+                    a.status.as_str(),
+                    a.task.chars().take(40).collect::<String>(),
+                    a.worktree.as_deref().unwrap_or("-")
+                );
+            }
+        }
+        "spawn" => {
+            let role = rest.first().context("agent spawn <role> <task>")?;
+            let task = rest.get(1).context("agent spawn <role> <task>")?;
+            let store = Store::open(&db_path).context("open store")?;
+            let cwd = std::env::current_dir()?.to_string_lossy().to_string();
+            let agent = agent_control::spawn_agent(
+                store.conn(),
+                session_id,
+                role,
+                task,
+                worktree,
+                &cwd,
+            )?;
+            println!("Spawned child agent #{} (role: {})", agent.id, agent.role);
+        }
+        "message" => {
+            let id: i64 = rest.first().and_then(|s| s.parse().ok()).context("agent message <id> <text>")?;
+            let text = rest.get(1).context("agent message <id> <text>")?;
+            let store = Store::open(&db_path).context("open store")?;
+            let msg = agent_control::send_message(store.conn(), id, text)?;
+            println!("Sent message to agent #{}: {}", id, msg.content);
+        }
+        "wait" => {
+            let id: Option<i64> = rest.first().and_then(|s| s.parse().ok());
+            let store = Store::open(&db_path).context("open store")?;
+            let rep = agent_control::wait_agent(store.conn(), session_id, id, 30)?;
+            println!("Wait report: all_done={}, running={:?}, completed={:?}", rep.all_done, rep.running, rep.completed);
+        }
+        "collect" => {
+            let id: Option<i64> = rest.first().and_then(|s| s.parse().ok());
+            let ids_vec = id.map(|i| vec![i]);
+            let store = Store::open(&db_path).context("open store")?;
+            let brief = agent_control::collect_results(store.conn(), session_id, ids_vec.as_deref(), &join_mode)?;
+            print!("{}", brief.rendered_markdown);
+        }
+        "cancel" => {
+            let id: i64 = rest.first().and_then(|s| s.parse().ok()).context("agent cancel <id>")?;
+            let store = Store::open(&db_path).context("open store")?;
+            let agent = agent_control::cancel_agent(store.conn(), id, None)?;
+            println!("Cancelled agent #{}", agent.id);
+        }
+        "roles" => {
+            let cwd = std::env::current_dir()?;
+            let loaded = roles::load_roles(&cwd);
+            println!("Available Agent Roles:");
+            for r in loaded {
+                println!("- {} : {}", r.name, r.description);
+            }
+        }
+        "synthesize-role" => {
+            let task = rest.first().context("agent synthesize-role <task> [--name <name>] [--save]")?;
+            let role = roles::synthesize_role(task, worktree, name_hint.as_deref());
+            println!("{}", role.to_markdown());
+            if save_role {
+                let cwd = std::env::current_dir()?;
+                let p = role.save_to_dir(&cwd)?;
+                println!("Saved role definition to {}", p.display());
+            }
+        }
+        "checklist" => {
+            let store = Store::open(&db_path).context("open store")?;
+            let sess = session_id.unwrap_or(1);
+            let items = agent_control::get_checklist(store.conn(), sess)?;
+            if items.is_empty() {
+                println!("No checklist items for session #{sess}.");
+            } else {
+                for i in items {
+                    let marker = if i.done { "[x]" } else if i.in_progress { "[~]" } else { "[ ]" };
+                    println!("{} {}", marker, i.text);
+                }
+            }
+        }
+        "jump" => {
+            let path = rest.first().context("agent jump <path> [line]")?;
+            let line: Option<u32> = rest.get(1).and_then(|s| s.parse().ok());
+            let store = Store::open(&db_path).context("open store")?;
+            let sess = session_id.unwrap_or(1);
+            let jump = agent_control::jump_to_file(store.conn(), sess, path, line)?;
+            println!("Jump directive recorded: {}:{:?}", jump.path, jump.line);
+        }
+        "review" => {
+            let summary = rest.first().context("agent review <summary>")?;
+            let store = Store::open(&db_path).context("open store")?;
+            let sess = session_id.unwrap_or(1);
+            let req = agent_control::request_review(store.conn(), sess, summary, &serde_json::json!([]))?;
+            println!("Review request #{} created: status={}", req.id, req.status);
+        }
+        _ => {
+            eprintln!("Usage: chorus agent <list|spawn|message|wait|collect|cancel|roles|synthesize-role|checklist|jump|review> [options]");
+        }
+    }
+    Ok(())
+}
+

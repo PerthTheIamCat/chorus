@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -199,6 +200,19 @@ char *chorus_route_json(const char *task_json, const char *candidates_json,
 char *chorus_router_models_json(const char *model);
 char *chorus_router_pull_json(const char *model);
 
+/* 1-Click In-Process Model Storage & Lifecycle Management.
+ * JSON: {"ok":true,"models":[{"status":"not_installed"|"ready"|"corrupted",...}]} */
+char *chorus_model_manager_list_json(void);
+
+/* Atomically verify and install a downloaded temporary file into
+ * ~/Library/Application Support/Chorus/models/
+ * JSON: {"ok":true,"path":"..."} */
+char *chorus_model_manager_finalize_json(const char *temp_path, const char *model_id);
+
+/* Delete a local model file to reclaim disk space.
+ * JSON: {"ok":true,"deleted":bool} */
+char *chorus_model_manager_delete_json(const char *model_id);
+
 /* Compare mode: fork the session per agent, run `prompt` on each.
  * JSON: {"ok":true,"branches":[{"agent":"...","session_id":N,
  *        "message":"...","stop_reason":"...","error":null}, ...]} */
@@ -273,5 +287,54 @@ char *chorus_auth_status(const char *agent_id);
  * `allow`) is asked of the caller.
  * JSON: {"ok":true,"to":"...","goal":"...","echo_back":"..."} */
 char *chorus_handoff_auto(ChorusEngine *e, const char *to, int level);
+
+/* File tree and workspace navigation */
+char *chorus_file_tree_json(const char *cwd, const char *focus_file, int max_depth);
+
+/* Myers diff with spacer line pre-alignment */
+char *chorus_aligned_diff_json(const char *old_text, const char *new_text, const char *path);
+
+/* Inline review comments and steering loop */
+char *chorus_add_review_comment(ChorusEngine *e, const char *path, int line, const char *comment, const char *snippet);
+char *chorus_pending_review_comments(ChorusEngine *e);
+char *chorus_clear_review_comments(ChorusEngine *e);
+char *chorus_review_steering_prompt(ChorusEngine *e);
+
+/* Git worktree orchestration */
+char *chorus_create_worktree(const char *cwd, const char *role);
+char *chorus_list_worktrees(const char *cwd);
+char *chorus_merge_worktree(const char *cwd, const char *branch);
+char *chorus_remove_worktree(const char *cwd, const char *branch);
+
+/* Monetary Cost Accounting */
+double chorus_session_cost_usd(const char *db_path, int64_t session_id);
+
+/* In-process fast routing and learning memory flywheel */
+char *chorus_route_fast_json(const char *prompt);
+char *chorus_router_list_learned_json(const char *db_path);
+char *chorus_router_record_learned_json(const char *db_path, const char *prompt, const char *model, const char *agent, const char *reason);
+char *chorus_router_clear_learned_json(const char *db_path);
+
+/* Cross-session search and export */
+char *chorus_search_sessions_json(const char *db_path, const char *query);
+char *chorus_export_session_md(const char *db_path, int64_t session_id);
+
+/* Agent roles and AI role synthesis */
+char *chorus_list_roles(const char *cwd);
+char *chorus_save_role(const char *cwd, const char *role_json);
+char *chorus_delete_role(const char *cwd, const char *name);
+char *chorus_synthesize_role(const char *task, bool write_mode, const char *name_hint);
+
+/* Super App & Autonomous Harness APIs */
+char *chorus_checkpoint_list_json(const char *db, int64_t session_id);
+char *chorus_checkpoint_rewind_json(const char *db, const char *ws, int64_t session_id, int64_t target_seq, const char *mode);
+char *chorus_repo_map_generate_json(const char *ws, uint32_t max_tokens);
+char *chorus_verify_workspace_json(const char *ws);
+char *chorus_structural_diff_json(const char *old_code, const char *new_code);
+
+/* Remote Companion & Pairing Management (Phase 6) */
+char *chorus_pairing_initiate_json(void);
+char *chorus_pairing_devices_json(void);
+char *chorus_pairing_revoke_json(const char *device_id);
 
 #endif /* CHORUS_H */

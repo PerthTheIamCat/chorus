@@ -87,3 +87,7 @@ docs/ref/*_files/
 
 # graft index cache
 graft/
+
+# graphify cache & output
+graphify-out/
+.graphify_detect.json

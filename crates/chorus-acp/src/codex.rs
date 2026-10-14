@@ -32,6 +32,32 @@ pub const DEFAULT_BRIDGE: &[&str] = &["npx", "-y", "@agentclientprotocol/codex-a
 pub const CLAUDE_BRIDGE: &[&str] = &["npx", "-y", "@zed-industries/claude-agent-acp"];
 pub const CLAUDE_BRIDGE_LEGACY: &[&str] = &["npx", "-y", "@zed-industries/claude-code-acp"];
 
+fn find_binary(name: &str) -> Option<PathBuf> {
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let candidates = [
+            home.join(".local/bin").join(name),
+            home.join(".cargo/bin").join(name),
+            home.join(".npm-global/bin").join(name),
+            PathBuf::from("/opt/homebrew/bin").join(name),
+            PathBuf::from("/usr/local/bin").join(name),
+        ];
+        for c in candidates {
+            if c.is_file() {
+                return Some(c);
+            }
+        }
+    }
+    None
+}
+
 /// The ACP command for a given agent name. Every one of these speaks the
 /// same protocol (`Agent` + this module handle it); they differ only in
 /// which process to spawn. An unknown name falls back to the Codex bridge.
@@ -45,6 +71,8 @@ pub fn bridge_for(agent_name: &str) -> Vec<String> {
     let n = agent_name.to_lowercase();
     let (env_key, cmd): (&str, &[&str]) = if n.contains("claude") {
         ("CHORUS_CLAUDE_BRIDGE", CLAUDE_BRIDGE)
+    } else if n.contains("antigravity") || n.contains("agy") {
+        ("CHORUS_ANTIGRAVITY_BRIDGE", &["antigravity-acp"])
     } else if n.contains("gemini") {
         ("CHORUS_GEMINI_BRIDGE", &["gemini", "--experimental-acp"])
     } else {
@@ -54,6 +82,42 @@ pub fn bridge_for(agent_name: &str) -> Vec<String> {
         let parts: Vec<String> = v.split_whitespace().map(|s| s.to_string()).collect();
         if !parts.is_empty() {
             return parts;
+        }
+    }
+    if n.contains("claude") {
+        for candidate in ["claude-agent-acp", "claude-code-acp"] {
+            if let Some(p) = find_binary(candidate) {
+                return vec![p.to_string_lossy().to_string()];
+            }
+        }
+    } else if n.contains("antigravity") || n.contains("agy") {
+        if let Some(p) = find_binary("antigravity-acp") {
+            return vec![p.to_string_lossy().to_string()];
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let candidate = dir.join("antigravity-acp");
+                if candidate.exists() {
+                    return vec![candidate.to_string_lossy().to_string()];
+                }
+            }
+        }
+        for rel in [
+            "target/debug/antigravity-acp",
+            "target/release/antigravity-acp",
+            "../../target/debug/antigravity-acp",
+            "../../target/release/antigravity-acp",
+        ] {
+            let target_candidate = std::path::Path::new(rel);
+            if target_candidate.is_file() {
+                if let Ok(p) = target_candidate.canonicalize() {
+                    return vec![p.to_string_lossy().to_string()];
+                }
+            }
+        }
+    } else if n.contains("codex") {
+        if let Some(p) = find_binary("codex-acp") {
+            return vec![p.to_string_lossy().to_string()];
         }
     }
     cmd.iter().map(|s| s.to_string()).collect()
@@ -788,8 +852,23 @@ impl Accumulator {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                if let Some(id) = update.get("toolCallId").and_then(Value::as_str) {
+                let id = update.get("toolCallId").and_then(Value::as_str).unwrap_or("");
+                if !id.is_empty() {
                     self.titles.insert(id.to_string(), title.clone());
+                }
+                // Subagent Normalizer: Normalize Claude Task tool call into SubagentSpawned
+                if title == "Task" || kind == "task" {
+                    let task_desc = update.get("rawInput")
+                        .and_then(|v| v.get("description").or_else(|| v.get("prompt")))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let child_id = format!("task-{}", if id.is_empty() { "subagent" } else { id });
+                    self.events.push(AgentEvent::SubagentSpawned {
+                        session_id: child_id,
+                        parent_session_id: self.root_session_id.clone(),
+                        name: "Claude Task Subagent".to_string(),
+                        task: task_desc.to_string(),
+                    });
                 }
                 self.events.push(AgentEvent::ToolCall { title, kind });
             }
@@ -890,14 +969,23 @@ impl Accumulator {
 
 fn chunk_text(update: &Value) -> Option<String> {
     let content = update.get("content")?;
+    if let Some(s) = content.as_str() {
+        return Some(s.to_string());
+    }
     if let Some(t) = content.get("text").and_then(Value::as_str) {
         return Some(t.to_string());
     }
-    // Some builds send content as an array of typed parts.
+    // Some builds send content as an array of typed parts or strings.
     if let Some(arr) = content.as_array() {
         let joined: String = arr
             .iter()
-            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .filter_map(|p| {
+                if let Some(s) = p.as_str() {
+                    Some(s)
+                } else {
+                    p.get("text").and_then(Value::as_str)
+                }
+            })
             .collect();
         if !joined.is_empty() {
             return Some(joined);

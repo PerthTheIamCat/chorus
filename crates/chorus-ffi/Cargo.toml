@@ -14,5 +14,6 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [dependencies]
 chorus-cli = { path = "../chorus-cli" }
 chorus-core = { path = "../chorus-core" }
+chorus-daemon = { path = "../chorus-daemon" }
 serde = { workspace = true }
 serde_json = { workspace = true }

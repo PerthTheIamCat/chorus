@@ -1,0 +1,14 @@
+{
+  "task_id": "ts-08-th",
+  "language": "th",
+  "domain": "typescript",
+  "difficulty": "architectural",
+  "prompt_th": "ออกแบบระบบ reliable webhook dispatching พร้อม HMAC-SHA256 signature, exponential backoff retry และ Dead Letter Queue (DLQ)",
+  "prompt_en": "Architect reliable webhook dispatching pipeline with HMAC-SHA256 signatures, exponential backoff retries, and Dead Letter Queue (DLQ)",
+  "test_command": "pnpm test test/webhooks/dispatcher.test.ts",
+  "expected_files": [
+    "packages/webhooks/src/dispatcher.ts",
+    "packages/webhooks/src/signature.ts",
+    "packages/webhooks/src/dlq.ts"
+  ]
+}

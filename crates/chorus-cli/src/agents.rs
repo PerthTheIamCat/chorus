@@ -262,6 +262,97 @@ fn codex_models() -> Vec<ModelChoice> {
     })
 }
 
+fn antigravity_models() -> Vec<ModelChoice> {
+    parse_models_env("CHORUS_ANTIGRAVITY_MODELS").unwrap_or_else(|| {
+        vec![
+            ModelChoice {
+                id: "gemini-3.8-flash[high]".into(),
+                label: "Gemini 3.8 Flash (High)".into(),
+                is_default: true,
+            },
+            ModelChoice {
+                id: "gemini-3.8-flash[medium]".into(),
+                label: "Gemini 3.8 Flash (Medium)".into(),
+                is_default: false,
+            },
+            ModelChoice {
+                id: "gemini-3.8-flash[low]".into(),
+                label: "Gemini 3.8 Flash (Low)".into(),
+                is_default: false,
+            },
+            ModelChoice {
+                id: "gemini-3.7-flash[high]".into(),
+                label: "Gemini 3.7 Flash (High)".into(),
+                is_default: false,
+            },
+            ModelChoice {
+                id: "gemini-3.7-flash[medium]".into(),
+                label: "Gemini 3.7 Flash (Medium)".into(),
+                is_default: false,
+            },
+            ModelChoice {
+                id: "gemini-3.7-flash[low]".into(),
+                label: "Gemini 3.7 Flash (Low)".into(),
+                is_default: false,
+            },
+            ModelChoice {
+                id: "gemini-3.1-pro[high]".into(),
+                label: "Gemini 3.1 Pro (High)".into(),
+                is_default: false,
+            },
+            ModelChoice {
+                id: "gemini-3.1-pro[low]".into(),
+                label: "Gemini 3.1 Pro (Low)".into(),
+                is_default: false,
+            },
+            ModelChoice {
+                id: "claude-opus-5-5[high]".into(),
+                label: "Claude Opus 5.5 (High)".into(),
+                is_default: false,
+            },
+            ModelChoice {
+                id: "claude-opus-5-5[medium]".into(),
+                label: "Claude Opus 5.5 (Medium)".into(),
+                is_default: false,
+            },
+            ModelChoice {
+                id: "claude-opus-5-5[low]".into(),
+                label: "Claude Opus 5.5 (Low)".into(),
+                is_default: false,
+            },
+            ModelChoice {
+                id: "claude-sonnet-5-5[high]".into(),
+                label: "Claude Sonnet 5.5 (High)".into(),
+                is_default: false,
+            },
+            ModelChoice {
+                id: "claude-sonnet-5-5[medium]".into(),
+                label: "Claude Sonnet 5.5 (Medium)".into(),
+                is_default: false,
+            },
+            ModelChoice {
+                id: "claude-sonnet-5-5[low]".into(),
+                label: "Claude Sonnet 5.5 (Low)".into(),
+                is_default: false,
+            },
+            ModelChoice {
+                id: "gpt-oss-120b[medium]".into(),
+                label: "GPT-OSS 120B (Medium)".into(),
+                is_default: false,
+            },
+        ]
+    })
+}
+
+pub(crate) fn antigravity_logged_in() -> bool {
+    if let Some(h) = home_dir() {
+        if h.join(".gemini/antigravity").exists() {
+            return true;
+        }
+    }
+    cli_on_path("agy")
+}
+
 /// Shared shape for one provider's check: CLI on `PATH`, then whether the
 /// caller could find credentials at all (never their contents).
 fn check(
@@ -385,7 +476,8 @@ pub fn claude_auth_status(config_dir: Option<&std::path::Path>) -> Option<bool> 
 /// Detect one agent's current runnability. Cheap and non-blocking: a
 /// `which` shell-out and a file-existence check, nothing more.
 pub fn auth_status(agent_id: &str) -> AgentInfo {
-    if agent_id.to_lowercase().contains("claude") {
+    let aid = agent_id.to_lowercase();
+    if aid.contains("claude") {
         let dir = std::env::var_os("CLAUDE_CONFIG_DIR")
             .map(PathBuf::from)
             .or_else(|| home_dir().map(|h| h.join(".claude")));
@@ -400,6 +492,16 @@ pub fn auth_status(agent_id: &str) -> AgentInfo {
             "npm install -g @anthropic-ai/claude-code",
             claude_logged_in(&cred) && !crate::limits::auth_failed("claude"),
             models_for("claude", "CHORUS_CLAUDE_MODELS", claude_models),
+        )
+    } else if aid.contains("antigravity") || aid.contains("agy") {
+        check(
+            "antigravity",
+            "Antigravity",
+            "agy",
+            "agy login",
+            "brew install antigravity หรือติดตั้ง agy CLI",
+            antigravity_logged_in() && !crate::limits::auth_failed("antigravity"),
+            models_for("antigravity", "CHORUS_ANTIGRAVITY_MODELS", antigravity_models),
         )
     } else {
         let dir = std::env::var_os("CODEX_HOME")
@@ -419,9 +521,13 @@ pub fn auth_status(agent_id: &str) -> AgentInfo {
 }
 
 /// Every agent Chorus knows how to bridge to, with its current runnability.
-/// Always returns both entries — this is a status report, not a filter; an
+/// Always returns all entries — this is a status report, not a filter; an
 /// agent that can't run yet still needs to show up so the user knows what
 /// to fix.
 pub fn list_agents() -> Vec<AgentInfo> {
-    vec![auth_status("claude"), auth_status("codex")]
+    vec![
+        auth_status("claude"),
+        auth_status("codex"),
+        auth_status("antigravity"),
+    ]
 }

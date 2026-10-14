@@ -77,7 +77,7 @@ impl Policy {
             Policy::AllowAll => true,
             Policy::ReadOnly => {
                 let k = ask.kind.to_lowercase();
-                k == "read" || k.contains("read") || k == "fetch" || k == "search"
+                matches!(k.as_str(), "read" | "fetch" | "search")
             }
         };
         if allow {
@@ -423,6 +423,10 @@ impl Session {
 
     pub fn delete_attachment(&self, id: i64) -> Result<()> {
         Ok(attachments::delete(self.store.conn(), self.sess, id)?)
+    }
+
+    pub fn store(&self) -> &Store {
+        &self.store
     }
 
     /// Force one ACP command for every agent (tests, or a pinned install).
@@ -1309,6 +1313,7 @@ impl Session {
         let command = match sandbox::wrap(bridge, &self.cwd, profile) {
             Ok(c) => c,
             Err(why) => {
+                anyhow::ensure!(mode != "read-only", "Cannot enforce read-only sandbox: {why}");
                 if self.log_permissions {
                     eprintln!("  ⚠  ไม่ได้เปิด sandbox ({why}) — เหลือแค่ย้อนไฟล์หลังเทิร์น");
                 }
@@ -1386,7 +1391,12 @@ impl Session {
             prompt_text.push_str(
                 "\n\n(Chorus: if the user asks you to remember something, or states a durable \
                  project fact, call the `memory_propose` tool with it. Do not just say you \
-                 remembered it.)\n",
+                 remembered it.)\n\
+                 (Chorus: Multi-agent orchestration is enabled. For complex, multi-step, or exploratory \
+                 tasks, you can act as Lead Orchestrator: decompose objectives, spawn subagents via \
+                 `chorus_spawn_agent` (roles: investigator, builder, reviewer, or custom roles in \
+                 isolated git worktrees), coordinate them with `chorus_wait_agent` and \
+                 `chorus_collect_results`, and track your progress with `chorus_update_checklist`.)\n",
             );
         }
         let available: Vec<_> = attachments::list(self.store.conn(), self.sess)?
@@ -1923,4 +1933,22 @@ pub fn list_sessions(db: &Path) -> Result<Vec<SessionSummary>> {
             }
         })
         .collect())
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    #[test]
+    fn read_only_never_grants_unknown_or_mixed_permission_kinds() {
+        for kind in ["read/write", "read-write", "read_and_delete", "thread", "execute", "", "other"] {
+            let ask = PermissionAsk { tool: "fixture".into(), kind: kind.into(), detail: "synthetic request".into() };
+            assert_eq!(Policy::ReadOnly.decide(&ask), Permission::Deny, "kind: {kind}");
+        }
+        for kind in ["read", "READ", "fetch", "search"] {
+            let ask = PermissionAsk { tool: "fixture".into(), kind: kind.into(), detail: "synthetic request".into() };
+            assert_eq!(Policy::ReadOnly.decide(&ask), Permission::Allow, "kind: {kind}");
+            assert_eq!(Policy::DenyAll.decide(&ask), Permission::Deny);
+        }
+    }
 }

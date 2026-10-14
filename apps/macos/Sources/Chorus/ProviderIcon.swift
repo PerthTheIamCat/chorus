@@ -9,13 +9,16 @@ struct ProviderIcon: View {
     var size: CGFloat = 15
 
     private var key: String {
-        provider.lowercased().split(separator: ":", maxSplits: 1).first.map(String.init) ?? provider.lowercased()
+        let raw = provider.lowercased()
+        let withoutColon = raw.split(separator: ":", maxSplits: 1).first.map(String.init) ?? raw
+        return withoutColon.split(separator: "@", maxSplits: 1).first.map(String.init) ?? withoutColon
     }
 
     private var asset: String? {
         switch key {
         case "codex", "openai": "provider-openai"
         case "claude", "anthropic": "provider-claude"
+        case "antigravity", "agy": "provider-gemini"
         case "gemini", "google": "provider-gemini"
         default: nil
         }
@@ -25,6 +28,7 @@ struct ProviderIcon: View {
         switch key {
         case "codex", "openai": "circle.hexagongrid"
         case "claude", "anthropic": "sparkle"
+        case "antigravity", "agy": "atom"
         case "gemini", "google": "sparkles"
         default: "cpu"
         }

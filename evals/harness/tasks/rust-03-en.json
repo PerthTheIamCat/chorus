@@ -1,0 +1,13 @@
+{
+  "task_id": "rust-03-en",
+  "language": "en",
+  "domain": "rust",
+  "difficulty": "medium",
+  "prompt_th": "สร้างฟังก์ชัน retry ด้วย exponential backoff พร้อม jitter สำหรับ HTTP client ในการเรียก downstream service",
+  "prompt_en": "Implement exponential backoff retry with full jitter for the HTTP client when calling downstream services",
+  "test_command": "cargo test -p http_client test_exponential_backoff_retry",
+  "expected_files": [
+    "crates/http-client/src/retry.rs",
+    "crates/http-client/src/client.rs"
+  ]
+}

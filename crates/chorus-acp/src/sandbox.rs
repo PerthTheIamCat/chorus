@@ -25,9 +25,8 @@
 //!
 //! `sandbox-exec` is macOS's Seatbelt, marked deprecated by Apple for years
 //! and still what everything uses, Chrome and Codex's own sandbox included.
-//! If it is missing, [`wrap`] returns the command unchanged rather than
-//! refusing to run: the caller says so out loud, and the revert guard is still
-//! there. A sandbox that stops people from working gets turned off.
+//! If it is missing, [`wrap`] returns an error. Restrictive callers must refuse
+//! to run rather than silently downgrade to an unconfined agent.
 
 use std::path::{Path, PathBuf};
 
@@ -59,7 +58,7 @@ pub fn wrap(cmd: &[String], cwd: &Path, profile: Profile) -> Result<Vec<String>,
     if cmd.is_empty() {
         return Err("คำสั่งว่าง".into());
     }
-    let profile_text = policy(cwd, profile);
+    let profile_text = checked_policy(cwd, profile)?;
     let mut out = vec![
         "/usr/bin/sandbox-exec".to_string(),
         "-p".to_string(),
@@ -86,6 +85,17 @@ fn regex_escape(s: &str) -> String {
 /// to clean up, and one more thing an attacker could swap between write and
 /// exec.
 pub fn policy(cwd: &Path, profile: Profile) -> String {
+    // Keep the public string API fail-closed; spawning uses the checked builder
+    // so it can report an invalid metadata path before starting the agent.
+    checked_policy(cwd, profile).unwrap_or_else(|_| "(version 1)\n(deny default)\n".into())
+}
+
+fn checked_policy(cwd: &Path, profile: Profile) -> Result<String, String> {
+    let ws = cwd
+        .canonicalize()
+        .map_err(|e| format!("resolve sandbox workspace: {e}"))?;
+    checked_path(&ws)?;
+    let mut guards = git_guards(&ws, profile)?;
     let mut allow: Vec<PathBuf> = Vec::new();
 
     // Temp. Node, npx and every agent write here constantly.
@@ -101,8 +111,16 @@ pub fn policy(cwd: &Path, profile: Profile) -> String {
     // user — and it does break login.
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         for rel in [
-            ".codex", ".claude", ".config", ".cache", ".npm", ".local/share",
-            ".local/state", "Library/Caches", "Library/Logs", ".bun/install/cache",
+            ".codex",
+            ".claude",
+            ".config",
+            ".cache",
+            ".npm",
+            ".local/share",
+            ".local/state",
+            "Library/Caches",
+            "Library/Logs",
+            ".bun/install/cache",
             // Extra accounts: each one is a CODEX_HOME / CLAUDE_CONFIG_DIR here.
             ".chorus/accounts",
         ] {
@@ -152,17 +170,148 @@ pub fn policy(cwd: &Path, profile: Profile) -> String {
     // a file written there is executed later by the user's own `git`,
     // outside any sandbox, which turns "writes stay in the workspace" into
     // "writes run anywhere".
-    if profile == Profile::Workspace {
+    if profile == Profile::ReadOnly {
+        // The workspace can itself be under an allowed temp/cache directory.
+        // An explicit deny keeps read-only meaningful in that case too.
         let ws = canonical(cwd);
-        for rel in [".chorus", ".git/hooks", ".git/config"] {
-            let Some(p) = ws.join(rel).to_str().map(str::to_owned) else { continue };
-            if p.contains('"') {
-                continue;
-            }
+        if let Some(p) = ws.to_str().filter(|p| !p.contains('"')) {
             s.push_str(&format!("(deny file-write* (subpath \"{p}\"))\n"));
         }
     }
-    s
+    // Protect routing entries themselves as well as their resolved targets.
+    // A linked worktree's shared hooks/config may live in an allowed temp tree.
+    let shadow = ws.join(".chorus");
+    guards.push((protected_target(&shadow)?, false));
+    guards.push((shadow, false));
+    // A protected file's absolute path changes if an ancestor is renamed.
+    // Literal directory denies seal that namespace without blocking writes
+    // to ordinary children (index, refs and workspace files).
+    let ancestors: Vec<_> = guards
+        .iter()
+        .flat_map(|(path, _)| path.parent().into_iter().flat_map(Path::ancestors))
+        .map(|path| (path.to_path_buf(), true))
+        .collect();
+    guards.extend(ancestors);
+    guards.sort();
+    guards.dedup();
+    for (path, literal) in guards {
+        let p = checked_path(&path)?;
+        let filter = if literal { "literal" } else { "subpath" };
+        s.push_str(&format!("(deny file-write* ({filter} \"{p}\"))\n"));
+    }
+    Ok(s)
+}
+
+// Never silently omit a protection rule for a path we cannot represent safely.
+fn checked_path(path: &Path) -> Result<&str, String> {
+    path.to_str()
+        .filter(|p| !p.contains(['"', '\\', '\n', '\r']))
+        .ok_or_else(|| "sandbox path cannot be safely represented".into())
+}
+
+fn protected_target(path: &Path) -> Result<PathBuf, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => path
+            .canonicalize()
+            .map_err(|e| format!("resolve protected metadata symlink: {e}")),
+        Ok(_) => Ok(canonical(path)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(e) => Err(format!("inspect protected metadata: {e}")),
+    }
+}
+
+fn metadata_pointer(path: &Path, prefix: &str) -> Result<PathBuf, String> {
+    use std::io::Read;
+    if !std::fs::metadata(path)
+        .map_err(|e| format!("inspect Git metadata pointer: {e}"))?
+        .is_file()
+    {
+        return Err("Git metadata pointer is not a regular file".into());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(4097).read_to_end(&mut bytes))
+        .map_err(|e| format!("read Git metadata pointer: {e}"))?;
+    if bytes.len() > 4096 {
+        return Err("Git metadata pointer exceeds 4096 bytes".into());
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| "invalid Git metadata pointer encoding")?;
+    let value = text
+        .strip_prefix(prefix)
+        .ok_or("invalid Git metadata pointer")?
+        .trim_end_matches(['\r', '\n']);
+    if value.is_empty() || value.contains(['\r', '\n']) {
+        return Err("invalid Git metadata pointer path".into());
+    }
+    let target = path
+        .parent()
+        .ok_or("Git metadata pointer has no parent")?
+        .join(value);
+    target
+        .canonicalize()
+        .map_err(|e| format!("resolve Git metadata pointer: {e}"))
+}
+
+fn git_guards(ws: &Path, profile: Profile) -> Result<Vec<(PathBuf, bool)>, String> {
+    let mut guards = Vec::new();
+    // Also seal a future .git entry in a non-repository workspace.
+    let mut entry = ws.join(".git");
+    for ancestor in ws.ancestors() {
+        let candidate = ancestor.join(".git");
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(_) => {
+                entry = candidate;
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("inspect Git metadata: {e}")),
+        }
+    }
+    guards.push((entry.clone(), true));
+    // The conventional paths remain protected even before metadata exists.
+    for rel in ["hooks", "config", "config.worktree", "commondir"] {
+        guards.push((entry.join(rel), false));
+    }
+    if let Some(root) = entry.parent() {
+        let shadow = root.join(".chorus");
+        guards.push((protected_target(&shadow)?, false));
+        guards.push((shadow, false));
+    }
+    match std::fs::symlink_metadata(&entry) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(guards),
+        Err(e) => return Err(format!("inspect Git metadata: {e}")),
+        Ok(_) => {}
+    }
+    let git_dir = if entry.is_dir() {
+        entry
+            .canonicalize()
+            .map_err(|e| format!("resolve Git directory: {e}"))?
+    } else {
+        metadata_pointer(&entry, "gitdir: ")?
+    };
+    if !git_dir.is_dir() {
+        return Err("Git metadata target is not a directory".into());
+    }
+    let common_pointer = git_dir.join("commondir");
+    let common_dir = match std::fs::symlink_metadata(&common_pointer) {
+        Ok(_) => metadata_pointer(&common_pointer, "")?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => git_dir.clone(),
+        Err(e) => return Err(format!("inspect Git common directory: {e}")),
+    };
+    if !common_dir.is_dir() {
+        return Err("Git common metadata target is not a directory".into());
+    }
+    for dir in [git_dir, common_dir] {
+        // Deny replacement of the directory without denying normal index/ref
+        // writes in Workspace mode. ReadOnly also protects external metadata.
+        guards.push((dir.clone(), profile == Profile::Workspace));
+        for rel in ["hooks", "config", "config.worktree", "commondir"] {
+            let path = dir.join(rel);
+            guards.push((protected_target(&path)?, false));
+            guards.push((path, false));
+        }
+    }
+    Ok(guards)
 }
 
 /// macOS hands out `/tmp` and `/var` as symlinks into `/private`, and Seatbelt
@@ -185,17 +334,24 @@ mod tests {
         let resolved = resolved.to_str().unwrap();
 
         assert!(ws.contains(&format!("(subpath \"{resolved}\")")), "{ws}");
-        assert!(ws.starts_with("(version 1)\n(allow default)\n(deny file-write*)"), "{ws}");
-        // Both profiles share the temp allowance, so the read-only one is only
-        // meaningfully different when cwd is outside temp — assert the shape,
-        // not a substring that temp happens to satisfy.
-        assert!(ro.lines().count() < ws.lines().count(), "read-only allowed as much as workspace");
+        assert!(
+            ws.starts_with("(version 1)\n(allow default)\n(deny file-write*)"),
+            "{ws}"
+        );
+        // Temp is allowed in both; ReadOnly needs an explicit workspace deny.
+        assert!(
+            ro.contains(&format!("(deny file-write* (subpath \"{resolved}\"))")),
+            "{ro}"
+        );
     }
 
     #[test]
     fn paths_are_resolved_through_the_private_symlink() {
         let p = policy(Path::new("/tmp"), Profile::Workspace);
-        assert!(p.contains("/private/tmp"), "Seatbelt matches resolved paths: {p}");
+        assert!(
+            p.contains("/private/tmp"),
+            "Seatbelt matches resolved paths: {p}"
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -205,7 +361,11 @@ mod tests {
         let out = wrap(&cmd, Path::new("/tmp"), Profile::Workspace).unwrap();
         assert_eq!(out[0], "/usr/bin/sandbox-exec");
         assert_eq!(out[1], "-p");
-        assert_eq!(&out[3..], &cmd[..], "the original command must survive intact");
+        assert_eq!(
+            &out[3..],
+            &cmd[..],
+            "the original command must survive intact"
+        );
     }
 
     /// Runs real `sandbox-exec`, not a string match on the profile: the only
@@ -245,17 +405,172 @@ mod tests {
 
             let p = Profile::Workspace;
             assert!(sh(&ws, p, "echo x > ok.txt"), "workspace write must work");
-            assert!(!sh(&ws, p, &format!("echo x > {}/no.txt", out.display())), "outside write leaked");
+            assert!(
+                !sh(&ws, p, &format!("echo x > {}/no.txt", out.display())),
+                "outside write leaked"
+            );
             assert!(!sh(&ws, p, "echo x > .chorus/tamper"), ".chorus writable");
-            assert!(!sh(&ws, p, "echo x > .git/hooks/pre-commit"), "git hook writable");
+            assert!(
+                !sh(&ws, p, "echo x > .git/hooks/pre-commit"),
+                "git hook writable"
+            );
             assert!(!sh(&ws, p, "echo x > .git/config"), "git config writable");
-            assert!(sh(&ws, p, "echo x > .git/index-ish"), "rest of .git must stay writable");
-            assert!(!sh(&ws, Profile::ReadOnly, "echo x > ro.txt"), "read-only profile wrote");
+            assert!(
+                sh(&ws, p, "echo x > .git/index-ish"),
+                "rest of .git must stay writable"
+            );
+            assert!(
+                !sh(&ws, Profile::ReadOnly, "echo x > ro.txt"),
+                "read-only profile wrote"
+            );
 
             assert!(ws.join("ok.txt").exists());
             assert!(!out.join("no.txt").exists());
             let _ = std::fs::remove_dir_all(&ws);
             let _ = std::fs::remove_dir_all(&out);
+        }
+
+        #[test]
+        fn linked_worktree_metadata_is_protected() {
+            let ws =
+                std::env::temp_dir().join(format!("chorus-linked-sandbox-{}", std::process::id()));
+            let admin = ws.join("admin");
+            let common = ws.join("common");
+            let tree = ws.join("tree");
+            std::fs::create_dir_all(&admin).unwrap();
+            std::fs::create_dir_all(common.join("hooks")).unwrap();
+            std::fs::create_dir_all(tree.join("nested")).unwrap();
+            std::fs::create_dir_all(tree.join(".chorus")).unwrap();
+            std::fs::write(tree.join(".git"), "gitdir: ../admin\n").unwrap();
+            std::fs::write(admin.join("commondir"), "../common\n").unwrap();
+            std::fs::write(common.join("config"), "fixture").unwrap();
+            let p = Profile::Workspace;
+            assert!(sh(&tree, p, "echo allowed > ordinary.txt"));
+            assert!(sh(&tree, p, "echo allowed > ../admin/index"));
+            let relocated = ws.with_extension("relocated");
+            let moved = sh(
+                &tree,
+                p,
+                &format!("mv '{}' '{}'", ws.display(), relocated.display()),
+            );
+            if moved {
+                std::fs::rename(&relocated, &ws).unwrap();
+            }
+            assert!(
+                !moved,
+                "metadata ancestor can be relocated outside protection"
+            );
+            for script in [
+                "echo changed > ../common/config",
+                "echo changed > ../common/hooks/pre-commit",
+                "echo changed > ../admin/config.worktree",
+                "echo changed > ../admin/commondir",
+                "echo changed > .git",
+                "echo replacement > staging; mv staging ../common/config",
+                "echo replacement > staging; mv staging ../admin/commondir",
+                "echo replacement > staging; mv staging .git",
+                "mv ../common ../relocated-common",
+                "mv ../admin ../relocated-admin",
+            ] {
+                assert!(!sh(&tree, p, script), "metadata write leaked: {script}");
+            }
+            assert!(!sh(
+                &tree.join("nested"),
+                p,
+                "echo changed > ../../common/config"
+            ));
+            assert!(!sh(
+                &tree.join("nested"),
+                p,
+                "echo changed > ../.chorus/tamper"
+            ));
+            assert!(!sh(
+                &tree,
+                Profile::ReadOnly,
+                "echo changed > ../admin/index"
+            ));
+            assert_eq!(
+                std::fs::read_to_string(common.join("config")).unwrap(),
+                "fixture"
+            );
+            std::fs::remove_dir_all(ws).unwrap();
+        }
+
+        #[test]
+        fn symlinked_metadata_and_shadow_targets_are_protected() {
+            use std::os::unix::fs::symlink;
+            let ws =
+                std::env::temp_dir().join(format!("chorus-symlink-sandbox-{}", std::process::id()));
+            let tree = ws.join("tree");
+            let admin = ws.join("admin");
+            let hooks = ws.join("hooks");
+            let shadow = ws.join("shadow");
+            for dir in [&tree, &admin, &hooks, &shadow] {
+                std::fs::create_dir_all(dir).unwrap();
+            }
+            std::fs::write(ws.join("configuration"), "fixture").unwrap();
+            symlink(&admin, tree.join(".git")).unwrap();
+            symlink(&hooks, admin.join("hooks")).unwrap();
+            symlink(ws.join("configuration"), admin.join("config")).unwrap();
+            symlink(&shadow, tree.join(".chorus")).unwrap();
+            for script in [
+                "echo changed > ../configuration",
+                "echo changed > ../hooks/pre-commit",
+                "echo changed > ../shadow/tamper",
+                "rm .git",
+                "rm .chorus",
+                "rm ../admin/hooks",
+                "rm ../admin/config",
+            ] {
+                assert!(
+                    !sh(&tree, Profile::Workspace, script),
+                    "symlink guard leaked: {script}"
+                );
+            }
+            assert!(sh(&tree, Profile::Workspace, "echo allowed > .git/index"));
+            std::fs::remove_dir_all(ws).unwrap();
+        }
+
+        #[test]
+        fn invalid_metadata_and_unsafe_workspace_paths_fail_closed() {
+            let ws =
+                std::env::temp_dir().join(format!("chorus-invalid-sandbox-{}", std::process::id()));
+            std::fs::create_dir_all(&ws).unwrap();
+            std::fs::write(ws.join(".git"), "gitdir: missing\n").unwrap();
+            let cmd = vec!["/bin/sh".to_string()];
+            assert!(wrap(&cmd, &ws, Profile::Workspace).is_err());
+            assert_eq!(
+                policy(&ws, Profile::Workspace),
+                "(version 1)\n(deny default)\n"
+            );
+            std::fs::write(ws.join(".git"), "x".repeat(4097)).unwrap();
+            assert!(wrap(&cmd, &ws, Profile::Workspace).is_err());
+            let quoted = ws.join("quoted\"path");
+            std::fs::create_dir_all(&quoted).unwrap();
+            assert!(wrap(&cmd, &quoted, Profile::ReadOnly).is_err());
+            std::fs::remove_dir_all(ws).unwrap();
+        }
+
+        #[test]
+        fn dangling_protected_symlinks_fail_closed() {
+            use std::os::unix::fs::symlink;
+            let ws = std::env::temp_dir()
+                .join(format!("chorus-dangling-sandbox-{}", std::process::id()));
+            std::fs::create_dir_all(ws.join(".git")).unwrap();
+            symlink(ws.join("missing"), ws.join(".git/hooks")).unwrap();
+            assert!(checked_policy(&ws, Profile::Workspace).is_err());
+            std::fs::remove_dir_all(ws).unwrap();
+        }
+
+        #[test]
+        fn read_only_workspace_inside_temp_is_still_protected() {
+            let ws =
+                std::env::temp_dir().join(format!("chorus-readonly-temp-{}", std::process::id()));
+            std::fs::create_dir_all(&ws).unwrap();
+            assert!(!sh(&ws, Profile::ReadOnly, "echo x > forbidden.txt"));
+            assert!(!ws.join("forbidden.txt").exists());
+            assert!(sh(&ws, Profile::Workspace, "echo x > allowed.txt"));
+            let _ = std::fs::remove_dir_all(ws);
         }
     }
 }

@@ -1,0 +1,14 @@
+{
+  "task_id": "rust-08-en",
+  "language": "en",
+  "domain": "rust",
+  "difficulty": "architectural",
+  "prompt_th": "สร้าง distributed consensus state machine ตามโปรโตคอล Raft รองรับ leader election, term renewal และ replicated log commit",
+  "prompt_en": "Implement distributed consensus state machine following Raft protocol supporting leader election, term renewal, and replicated log commits",
+  "test_command": "cargo test -p raft test_leader_election_and_replication",
+  "expected_files": [
+    "crates/raft/src/state_machine.rs",
+    "crates/raft/src/election.rs",
+    "crates/raft/src/replication.rs"
+  ]
+}

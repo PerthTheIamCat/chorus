@@ -1,0 +1,13 @@
+{
+  "task_id": "py-06-th",
+  "language": "th",
+  "domain": "python",
+  "difficulty": "hard",
+  "prompt_th": "แก้ไข deadlock ใน async multiprocessing pipeline ที่เกิดจาก multiprocessing queue contention และ fork safety บน macOS",
+  "prompt_en": "Fix deadlock in asynchronous multiprocessing pipeline caused by queue contention and fork safety issues on macOS",
+  "test_command": "pytest tests/test_pipeline_multiprocessing.py",
+  "expected_files": [
+    "src/pipeline/executor.py",
+    "src/pipeline/worker.py"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "task_id": "py-03-th",
+  "language": "th",
+  "domain": "python",
+  "difficulty": "medium",
+  "prompt_th": "เขียนฟังก์ชัน streaming chunked export ข้อมูลขนาดใหญ่จาก SQLite ไปยังไฟล์ Apache Parquet โดยจำกัด memory ไม่เกิน 128MB",
+  "prompt_en": "Implement streaming chunked export of large datasets from SQLite to Apache Parquet capping memory usage under 128MB",
+  "test_command": "pytest tests/test_parquet_export.py",
+  "expected_files": [
+    "src/data/parquet_exporter.py"
+  ]
+}

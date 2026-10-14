@@ -1,0 +1,12 @@
+{
+  "task_id": "py-02-th",
+  "language": "th",
+  "domain": "python",
+  "difficulty": "trivial",
+  "prompt_th": "เพิ่มอาร์กิวเมนต์ --dry-run ใน argparse CLI ของสคริปต์ database migration เพื่อพิมพ์แผนคำสั่ง SQL โดยไม่ execute",
+  "prompt_en": "Add --dry-run CLI flag to database migration argparse script to print planned SQL statements without executing",
+  "test_command": "pytest tests/test_migration_cli.py",
+  "expected_files": [
+    "src/scripts/migrate.py"
+  ]
+}

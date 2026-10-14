@@ -1,0 +1,592 @@
+import SwiftUI
+import AppKit
+
+/// High-fidelity Diff Viewer and Inline Review Feedback Loop (Ticket 15).
+/// Features Unified & Split views with Rust spacer alignment, gutter hover comments,
+/// and one-click steering loop ("Send to Agent ⌘↩").
+struct DiffReviewerView: View {
+    @ObservedObject var engine: Engine
+    var workspace: String = ""
+    var isMaximized: Bool = false
+    var onToggleMaximize: (() -> Void)? = nil
+    var onSendSteeringPrompt: (String) -> Void
+
+    @State private var viewMode: ViewMode = .unified
+    @State private var scope: DiffScope = .session
+    @State private var selectedFile: String = ""
+    @State private var pendingComments: [Engine.ReviewComment] = []
+    @State private var commentingLine: Int? = nil
+    @State private var commentText: String = ""
+    @State private var structuralAnalysis: Engine.StructuralDiffAnalysis? = nil
+    @State private var isAnalyzingStructural: Bool = false
+    @State private var verificationResult: Engine.VerificationResult? = nil
+    @State private var isVerifying: Bool = false
+    @State private var showVerificationSheet: Bool = false
+
+    enum ViewMode: String, CaseIterable {
+        case unified = "Unified"
+        case split = "Split"
+    }
+
+    enum DiffScope: String, CaseIterable {
+        case latestTurn = "Latest Turn"
+        case currentAgent = "Current Agent"
+        case session = "Full Session"
+    }
+
+    private var allHunks: [DiffHunk] {
+        parseHunks(engine.workingDiff)
+    }
+
+    private var filesWithDiffs: [String] {
+        let hunks = allHunks
+        return hunks.map(\.file).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+    }
+
+    private var activeHunks: [DiffHunk] {
+        let hunks = allHunks
+        if selectedFile.isEmpty {
+            return hunks
+        }
+        return hunks.filter { $0.file == selectedFile }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header Controls
+            VStack(spacing: 6) {
+                // Row 1: Mode + Scope + Maximize
+                HStack(spacing: 8) {
+                    Picker("", selection: $viewMode) {
+                        ForEach(ViewMode.allCases, id: \.self) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 160)
+
+                    Picker("", selection: $scope) {
+                        ForEach(DiffScope.allCases, id: \.self) { sc in
+                            Text(sc.rawValue).tag(sc)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 130)
+
+                    Spacer()
+
+                    if let onToggleMaximize {
+                        PanelMaximizeButton(isMaximized: isMaximized, onToggle: onToggleMaximize)
+                    }
+                }
+
+                // Row 2: Diff Stats Badge + AST Analysis + Verification Loop
+                HStack(spacing: 8) {
+                    let totalAdd = allHunks.map(\.addCount).reduce(0, +)
+                    let totalDel = allHunks.map(\.delCount).reduce(0, +)
+                    HStack(spacing: 4) {
+                        Text("+\(totalAdd)")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundColor(.green)
+                        Text("-\(totalDel)")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundColor(.red)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.04))
+                    .cornerRadius(4)
+
+                    Spacer()
+
+                    // AST Structural Diff Analysis Button
+                    Button {
+                        runStructuralDiff()
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "wand.and.stars")
+                                .font(.system(size: 10))
+                            if isAnalyzingStructural {
+                                ProgressView().controlSize(.mini)
+                            } else if let sa = structuralAnalysis {
+                                Text(sa.is_purely_cosmetic ? "Cosmetic" : "Sem:\(sa.semantic_lines)")
+                                    .font(.system(size: 9.5, weight: .semibold))
+                            } else {
+                                Text("AST")
+                                    .font(.system(size: 9.5))
+                            }
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .help("วิเคราะห์ AST: แยกโค้ดจริง (Semantic) ออกจาก Whitespace/Formatting (Cosmetic)")
+
+                    // Verification Loop Button
+                    Button {
+                        runVerification()
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: verificationResult == nil ? "checkmark.shield" : (verificationResult?.passed == true ? "checkmark.shield.fill" : "exclamationmark.triangle.fill"))
+                                .font(.system(size: 10))
+                                .foregroundColor(verificationResult == nil ? .secondary : (verificationResult?.passed == true ? .green : .orange))
+                            if isVerifying {
+                                ProgressView().controlSize(.mini)
+                            } else if let v = verificationResult {
+                                Text(v.passed ? "Pass" : "\(v.findings.count) err")
+                                    .font(.system(size: 9.5, weight: .semibold))
+                            } else {
+                                Text("Verify")
+                                    .font(.system(size: 9.5))
+                            }
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .help("ตรวจความถูกต้องของ workspace ด้วย Fast Compiler/Linter Loop")
+                    .popover(isPresented: $showVerificationSheet) {
+                        VerificationFindingsPopover(result: verificationResult)
+                    }
+                }
+
+                // File Selector Bar
+                let files = filesWithDiffs
+                if files.count > 1 {
+                    HStack(spacing: 6) {
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+
+                        Picker("", selection: $selectedFile) {
+                            Text("ทุกไฟล์ที่แก้ (\(files.count) ไฟล์)").tag("")
+                            ForEach(files, id: \.self) { f in
+                                Text((f as NSString).lastPathComponent).tag(f)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .font(.system(size: 11))
+
+                        Spacer()
+                    }
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color(NSColor.controlBackgroundColor))
+
+            Divider()
+
+            // Diff Content Area
+            let hunks = activeHunks
+            if !hunks.isEmpty {
+                ScrollView([.vertical, .horizontal]) {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(hunks) { hunk in
+                            VStack(alignment: .leading, spacing: 0) {
+                                // Hunk Header
+                                HStack {
+                                    Text((hunk.file as NSString).lastPathComponent)
+                                        .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                                        .foregroundColor(.primary)
+                                    Text(hunk.header)
+                                        .font(.system(size: 9.5, design: .monospaced))
+                                        .foregroundColor(.secondary)
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.primary.opacity(0.05))
+
+                                // Lines
+                                if viewMode == .unified {
+                                    ForEach(Array(hunk.lines.enumerated()), id: \.offset) { idx, line in
+                                        UnifiedLineRow(
+                                            line: line,
+                                            lineNum: idx + 1,
+                                            onAddComment: { l in
+                                                commentingLine = l
+                                            }
+                                        )
+
+                                        if let target = commentingLine, target == idx + 1 {
+                                            InlineCommentEditor(
+                                                line: target,
+                                                commentText: $commentText,
+                                                onSave: {
+                                                    saveComment(line: target, file: hunk.file)
+                                                },
+                                                onCancel: {
+                                                    commentingLine = nil
+                                                    commentText = ""
+                                                }
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    // Split View Mode with wide columns
+                                    ForEach(Array(hunk.lines.enumerated()), id: \.offset) { idx, line in
+                                        SplitLineRow(
+                                            line: line,
+                                            lineNum: idx + 1,
+                                            onAddComment: { l in
+                                                commentingLine = l
+                                            }
+                                        )
+
+                                        if let target = commentingLine, target == idx + 1 {
+                                            InlineCommentEditor(
+                                                line: target,
+                                                commentText: $commentText,
+                                                onSave: {
+                                                    saveComment(line: target, file: hunk.file)
+                                                },
+                                                onCancel: {
+                                                    commentingLine = nil
+                                                    commentText = ""
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            .background(Color.primary.opacity(0.02))
+                            .cornerRadius(6)
+                        }
+                    }
+                    .padding(8)
+                }
+                .chorusScrollIndicators()
+            } else {
+                VStack(spacing: 8) {
+                    Spacer()
+                    Image(systemName: "checkmark.circle")
+                        .font(.system(size: 24))
+                        .foregroundColor(.secondary)
+                    Text("ยังไม่มีการแก้ไขไฟล์ในเซสชันนี้")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+            }
+
+            // Floating Review Action Bar (Bottom)
+            if !pendingComments.isEmpty {
+                Divider()
+                HStack(spacing: 10) {
+                    Image(systemName: "bubble.left.and.exclamationmark.bubble.right.fill")
+                        .foregroundColor(.orange)
+                        .font(.system(size: 12))
+
+                    Text("\(pendingComments.count) คอมเมนต์รีวิวที่ค้างอยู่")
+                        .font(.system(size: 11, weight: .medium))
+
+                    Spacer()
+
+                    Button("ล้าง") {
+                        engine.clearReviewComments()
+                        refreshComments()
+                    }
+                    .font(.system(size: 11))
+
+                    Button(action: sendToAgent) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "paperplane.fill")
+                                .font(.system(size: 10))
+                            Text("Send to Agent (⌘↩)")
+                                .font(.system(size: 11, weight: .bold))
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.blue)
+                        .cornerRadius(5)
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(.return, modifiers: .command)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color(NSColor.windowBackgroundColor))
+            }
+        }
+        .onAppear {
+            refreshComments()
+            if let first = filesWithDiffs.first {
+                selectedFile = first
+            }
+        }
+    }
+
+    private func refreshComments() {
+        engine.fetchPendingReviewComments { comments in
+            self.pendingComments = comments
+        }
+    }
+
+    private func saveComment(line: Int, file: String) {
+        guard !commentText.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        engine.addReviewComment(
+            path: file.isEmpty ? "workspace" : file,
+            line: line,
+            comment: commentText,
+            snippet: nil
+        )
+        commentingLine = nil
+        commentText = ""
+        refreshComments()
+    }
+
+    private func sendToAgent() {
+        engine.fetchReviewSteeringPrompt { prompt in
+            if !prompt.isEmpty {
+                onSendSteeringPrompt(prompt)
+                engine.clearReviewComments()
+                refreshComments()
+            }
+        }
+    }
+
+    private func runStructuralDiff() {
+        guard !engine.workingDiff.isEmpty else { return }
+        isAnalyzingStructural = true
+        var oldLines: [String] = []
+        var newLines: [String] = []
+        for line in engine.workingDiff.components(separatedBy: "\n") {
+            if line.hasPrefix("-") && !line.hasPrefix("---") {
+                oldLines.append(String(line.dropFirst()))
+            } else if line.hasPrefix("+") && !line.hasPrefix("+++") {
+                newLines.append(String(line.dropFirst()))
+            } else if !line.hasPrefix("@@") && !line.hasPrefix("diff ") && !line.hasPrefix("index ") {
+                oldLines.append(line)
+                newLines.append(line)
+            }
+        }
+        let oldCode = oldLines.joined(separator: "\n")
+        let newCode = newLines.joined(separator: "\n")
+        engine.analyzeStructuralDiff(oldCode: oldCode, newCode: newCode) { analysis, _ in
+            self.structuralAnalysis = analysis
+            self.isAnalyzingStructural = false
+        }
+    }
+
+    private func runVerification() {
+        let ws = workspace.isEmpty ? NSHomeDirectory() : workspace
+        isVerifying = true
+        engine.verifyWorkspace(workspace: ws) { result, _ in
+            self.verificationResult = result
+            self.isVerifying = false
+            self.showVerificationSheet = true
+        }
+    }
+}
+
+struct VerificationFindingsPopover: View {
+    let result: Engine.VerificationResult?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(result?.passed == true ? "Verification Passed" : "Findings Detected",
+                      systemImage: result?.passed == true ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .font(.headline)
+                    .foregroundColor(result?.passed == true ? .green : .orange)
+                Spacer()
+                if let tool = result?.tool_used {
+                    Text(tool)
+                        .font(.caption.monospaced())
+                        .foregroundColor(.secondary)
+                }
+            }
+            Divider()
+            if let findings = result?.findings, !findings.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(findings) { f in
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 4) {
+                                    Text(f.file)
+                                        .font(.caption.weight(.bold))
+                                    if f.line > 0 {
+                                        Text(":\(f.line)")
+                                            .font(.caption.monospaced())
+                                            .foregroundColor(.secondary)
+                                    }
+                                    Spacer()
+                                    Text(f.severity.uppercased())
+                                        .font(.system(size: 9, weight: .bold))
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 1)
+                                        .background(f.severity == "error" ? Color.red.opacity(0.15) : Color.orange.opacity(0.15))
+                                        .foregroundColor(f.severity == "error" ? .red : .orange)
+                                        .cornerRadius(3)
+                                }
+                                Text(f.message)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.primary)
+                            }
+                            .padding(6)
+                            .background(Color.primary.opacity(0.03))
+                            .cornerRadius(6)
+                        }
+                    }
+                }
+                .frame(maxHeight: 220)
+            } else {
+                Text("Zero lint or compiler diagnostics. Clean workspace.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(12)
+        .frame(width: 340)
+    }
+}
+
+private struct UnifiedLineRow: View {
+    let line: String
+    let lineNum: Int
+    var onAddComment: (Int) -> Void
+
+    @State private var isHovered = false
+
+    private var isAdd: Bool { line.hasPrefix("+") }
+    private var isDel: Bool { line.hasPrefix("-") }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("\(lineNum)")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundColor(.secondary.opacity(0.5))
+                .frame(width: 28, alignment: .trailing)
+
+            Text(isAdd ? "+" : (isDel ? "-" : " "))
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundColor(isAdd ? .green : (isDel ? .red : .clear))
+                .frame(width: 10)
+
+            Text(line.isEmpty ? " " : (line.hasPrefix("+") || line.hasPrefix("-") ? String(line.dropFirst()) : line))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(isAdd ? .green : (isDel ? .red : .primary))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+
+            Spacer(minLength: 8)
+
+            if isHovered {
+                Button(action: { onAddComment(lineNum) }) {
+                    Image(systemName: "plus.bubble.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.blue)
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 4)
+            }
+        }
+        .padding(.vertical, 1)
+        .padding(.horizontal, 4)
+        .background(isAdd ? Color.green.opacity(0.08) : (isDel ? Color.red.opacity(0.08) : Color.clear))
+        .onHover { isHovered = $0 }
+    }
+}
+
+private struct SplitLineRow: View {
+    let line: String
+    let lineNum: Int
+    var onAddComment: (Int) -> Void
+
+    @State private var isHovered = false
+
+    private var isAdd: Bool { line.hasPrefix("+") }
+    private var isDel: Bool { line.hasPrefix("-") }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            // Left (Original / Deleted)
+            HStack(spacing: 6) {
+                Text(isDel ? "\(lineNum)" : " ")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary.opacity(0.5))
+                    .frame(width: 28, alignment: .trailing)
+
+                Text(isDel ? String(line.dropFirst()) : (!isAdd ? line : " "))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(isDel ? .red : .secondary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+
+                Spacer(minLength: 8)
+            }
+            .frame(minWidth: 280, alignment: .leading)
+            .background(isDel ? Color.red.opacity(0.08) : Color.clear)
+
+            Divider()
+
+            // Right (Added / Current)
+            HStack(spacing: 6) {
+                Text(isAdd ? "\(lineNum)" : " ")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary.opacity(0.5))
+                    .frame(width: 28, alignment: .trailing)
+
+                Text(isAdd ? String(line.dropFirst()) : (!isDel ? line : " "))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(isAdd ? .green : .primary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+
+                Spacer(minLength: 8)
+
+                if isHovered && (isAdd || !isDel) {
+                    Button(action: { onAddComment(lineNum) }) {
+                        Image(systemName: "plus.bubble.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.blue)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 4)
+                }
+            }
+            .frame(minWidth: 280, alignment: .leading)
+            .background(isAdd ? Color.green.opacity(0.08) : Color.clear)
+        }
+        .onHover { isHovered = $0 }
+    }
+}
+
+private struct InlineCommentEditor: View {
+    let line: Int
+    @Binding var commentText: String
+    var onSave: () -> Void
+    var onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("คอมเมนต์รีวิวที่บรรทัด \(line)")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+                Spacer()
+            }
+
+            TextEditor(text: $commentText)
+                .font(.system(size: 11))
+                .frame(height: 48)
+                .padding(4)
+                .background(Color(NSColor.textBackgroundColor))
+                .cornerRadius(4)
+
+            HStack {
+                Spacer()
+                Button("ยกเลิก", action: onCancel)
+                    .font(.system(size: 11))
+                Button("บันทึกคอมเมนต์", action: onSave)
+                    .font(.system(size: 11, weight: .bold))
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(8)
+        .background(Color.orange.opacity(0.08))
+        .cornerRadius(6)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+    }
+}

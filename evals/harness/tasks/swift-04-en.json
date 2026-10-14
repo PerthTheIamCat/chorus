@@ -1,0 +1,13 @@
+{
+  "task_id": "swift-04-en",
+  "language": "en",
+  "domain": "swift",
+  "difficulty": "medium",
+  "prompt_th": "เพิ่ม keyboard shortcut Command+Option+R สำหรับเปิด review panel พร้อม validation ไม่ให้ชนกับเมนูระบบ",
+  "prompt_en": "Add keyboard shortcut Command+Option+R to trigger the review panel with conflict validation against system menus",
+  "test_command": "swift test --filter KeyboardShortcutsTests",
+  "expected_files": [
+    "ChorusApp/Commands/KeyCommands.swift",
+    "ChorusApp/Views/ReviewSheet.swift"
+  ]
+}

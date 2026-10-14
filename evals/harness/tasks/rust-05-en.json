@@ -1,0 +1,13 @@
+{
+  "task_id": "rust-05-en",
+  "language": "en",
+  "domain": "rust",
+  "difficulty": "hard",
+  "prompt_th": "แก้ race condition ระหว่าง thread อ่านและเขียน frame ใน WAL โดยใช้ sequence barrier และ memory ordering แบบ Acquire-Release",
+  "prompt_en": "Fix race condition between concurrent WAL frame readers and writers using a sequence barrier with Acquire-Release memory ordering",
+  "test_command": "cargo test -p wal test_concurrent_read_write_consistency",
+  "expected_files": [
+    "crates/storage/src/wal.rs",
+    "crates/storage/src/frame.rs"
+  ]
+}

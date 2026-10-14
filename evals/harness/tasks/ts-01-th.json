@@ -1,0 +1,12 @@
+{
+  "task_id": "ts-01-th",
+  "language": "th",
+  "domain": "typescript",
+  "difficulty": "trivial",
+  "prompt_th": "แก้คำสะกดผิดใน error payload message ของ HTTP 404 จาก Resouce not found เป็น Resource not found",
+  "prompt_en": "Fix typo in HTTP 404 error payload message from Resouce not found to Resource not found",
+  "test_command": "pnpm test test/api/errors.test.ts",
+  "expected_files": [
+    "packages/api/src/errors.ts"
+  ]
+}

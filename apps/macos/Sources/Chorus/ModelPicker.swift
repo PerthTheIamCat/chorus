@@ -40,8 +40,14 @@ extension Engine.AgentInfo {
             // "5.6 Luna (high)" → "5.6 Luna", but keep "Opus (1M context)":
             // only an effort suffix is redundant once effort has its own chip.
             var label = m.label
-            if let e = ModelID(m.id).effort, label.hasSuffix("(\(e))") {
-                label = String(label.dropLast(e.count + 2)).trimmingCharacters(in: .whitespaces)
+            if let e = ModelID(m.id).effort {
+                let suffixLower = "(\(e.lowercased()))"
+                let suffixCap = "(\(e.capitalized))"
+                if label.hasSuffix(suffixCap) {
+                    label = String(label.dropLast(suffixCap.count)).trimmingCharacters(in: .whitespaces)
+                } else if label.hasSuffix(suffixLower) {
+                    label = String(label.dropLast(suffixLower.count)).trimmingCharacters(in: .whitespaces)
+                }
             }
             out.append((b, label))
         }

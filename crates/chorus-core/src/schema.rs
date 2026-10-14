@@ -14,7 +14,7 @@
 use crate::Result;
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Create (or upgrade) the schema. Safe to call on every open.
 pub fn migrate(conn: &Connection) -> Result<()> {
@@ -145,7 +145,59 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             accessed_ms INTEGER NOT NULL
         );
 
-        -- TODO(phase-1): vec0 table for embeddings
+        -- v6: agent control surface
+        CREATE TABLE IF NOT EXISTS subagent (
+            id            INTEGER PRIMARY KEY,
+            parent_sess   INTEGER REFERENCES session(id),
+            child_sess    INTEGER REFERENCES session(id),
+            role          TEXT NOT NULL,
+            task          TEXT NOT NULL,
+            worktree      TEXT,
+            status        TEXT NOT NULL CHECK(status IN ('running','completed','failed','cancelled')),
+            summary       TEXT,
+            diff_stat     TEXT,
+            files_touched TEXT,
+            created_ms    INTEGER NOT NULL,
+            updated_ms    INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_subagent_parent ON subagent(parent_sess, id);
+
+        CREATE TABLE IF NOT EXISTS subagent_message (
+            id          INTEGER PRIMARY KEY,
+            subagent_id INTEGER NOT NULL REFERENCES subagent(id) ON DELETE CASCADE,
+            direction   TEXT NOT NULL,
+            content     TEXT NOT NULL,
+            created_ms  INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_subagent_msg ON subagent_message(subagent_id, id);
+
+        CREATE TABLE IF NOT EXISTS task_checklist (
+            id         INTEGER PRIMARY KEY,
+            sess       INTEGER REFERENCES session(id) ON DELETE CASCADE,
+            items_json TEXT NOT NULL,
+            updated_ms INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_checklist_sess ON task_checklist(sess);
+
+        CREATE TABLE IF NOT EXISTS review_request (
+            id          INTEGER PRIMARY KEY,
+            sess        INTEGER REFERENCES session(id) ON DELETE CASCADE,
+            summary     TEXT NOT NULL,
+            hunks_json  TEXT NOT NULL,
+            status      TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+            created_ms  INTEGER NOT NULL,
+            resolved_ms INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_review_sess ON review_request(sess, id);
+
+        CREATE TABLE IF NOT EXISTS ui_navigation (
+            id         INTEGER PRIMARY KEY,
+            sess       INTEGER REFERENCES session(id) ON DELETE CASCADE,
+            path       TEXT NOT NULL,
+            line       INTEGER,
+            created_ms INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_navigation_sess ON ui_navigation(sess, id);
 
         COMMIT;
         "#,

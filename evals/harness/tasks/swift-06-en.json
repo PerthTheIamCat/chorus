@@ -1,0 +1,13 @@
+{
+  "task_id": "swift-06-en",
+  "language": "en",
+  "domain": "swift",
+  "difficulty": "hard",
+  "prompt_th": "ทำ virtualized list rendering สำหรับ large unified diff ขนาด 100,000 บรรทัดพร้อม asynchronous syntax highlighting",
+  "prompt_en": "Implement virtualized list rendering for large unified diffs exceeding 100,000 lines with asynchronous syntax highlighting",
+  "test_command": "swift test --filter VirtualizedDiffViewTests",
+  "expected_files": [
+    "ChorusApp/Views/Diff/VirtualizedDiffList.swift",
+    "ChorusApp/Highlighting/SyntaxStyler.swift"
+  ]
+}

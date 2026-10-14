@@ -1,0 +1,13 @@
+{
+  "task_id": "rust-06-en",
+  "language": "en",
+  "domain": "rust",
+  "difficulty": "hard",
+  "prompt_th": "ปรับปรุง zero-copy streaming parser ให้รองรับ chunked binary payload ข้าม buffer boundary โดยไม่มี memory reallocation",
+  "prompt_en": "Refactor zero-copy streaming parser to support chunked binary payloads across buffer boundaries without memory reallocation",
+  "test_command": "cargo test -p parser test_zero_copy_streaming_chunks",
+  "expected_files": [
+    "crates/parser/src/stream.rs",
+    "crates/parser/src/zero_copy.rs"
+  ]
+}

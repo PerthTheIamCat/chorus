@@ -22,10 +22,10 @@ BUNDLE_ID="dev.chorus.app"
 
 echo "── cargo build ($MODE) ──"
 if [ "$MODE" = "release" ]; then
-    (cd ../.. && cargo build --release -p chorus-ffi)
+    (cd ../.. && cargo build --release -p chorus-ffi -p chorus-acp --bin antigravity-acp -p chorus-daemon --bin chorusd)
     sed -i '' 's/let target = "debug"/let target = "release"/' Package.swift
 else
-    (cd ../.. && cargo build -p chorus-ffi)
+    (cd ../.. && cargo build -p chorus-ffi -p chorus-acp --bin antigravity-acp -p chorus-daemon --bin chorusd)
     sed -i '' 's/let target = "release"/let target = "debug"/' Package.swift
 fi
 
@@ -44,6 +44,13 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Chorus"
 cp -R "$(dirname "$BIN")/Chorus_Chorus.bundle" "$APP/Contents/Resources/"
+if [ "$MODE" = "release" ]; then
+    cp ../../target/release/antigravity-acp "$APP/Contents/MacOS/antigravity-acp"
+    cp ../../target/release/chorusd "$APP/Contents/MacOS/chorusd"
+else
+    cp ../../target/debug/antigravity-acp "$APP/Contents/MacOS/antigravity-acp"
+    cp ../../target/debug/chorusd "$APP/Contents/MacOS/chorusd"
+fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -70,10 +77,21 @@ PLIST
 # Ad-hoc signature: without it macOS kills the app on some machines with
 # "code has no resources but signature indicates they must be present", and
 # TCC prompts (Files & Folders) have no stable identity to attach to.
-codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 \
-    || echo "  (codesign ข้าม — ไม่มี codesign ในเครื่อง)"
+# Sign nested executables first and fail if signing or verification fails.
+for EXECUTABLE in "$APP/Contents/MacOS/antigravity-acp" "$APP/Contents/MacOS/chorusd"; do
+    codesign --force --sign - --timestamp=none "$EXECUTABLE"
+done
+codesign --force --sign - --timestamp=none "$APP"
+codesign --verify --deep --strict "$APP"
 
 echo "built: $APP"
+
+if [ -d "$HOME/Applications/Chorus.app" ] || [ -d "$HOME/Applications" ]; then
+    mkdir -p "$HOME/Applications"
+    rm -rf "$HOME/Applications/Chorus.app"
+    cp -R "$APP" "$HOME/Applications/Chorus.app"
+    echo "synced: $HOME/Applications/Chorus.app"
+fi
 
 if [ "$RUN" = "run" ]; then
     LOG="${TMPDIR:-/tmp}/chorus-app.log"

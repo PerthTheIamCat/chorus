@@ -1,0 +1,12 @@
+{
+  "task_id": "ts-03-th",
+  "language": "th",
+  "domain": "typescript",
+  "difficulty": "medium",
+  "prompt_th": "สร้าง rate limiter middleware แบบ sliding window log ด้วย Redis สำหรับ REST API endpoints",
+  "prompt_en": "Implement sliding window log rate limiting middleware using Redis for REST API endpoints",
+  "test_command": "pnpm test test/middleware/rate-limiter.test.ts",
+  "expected_files": [
+    "packages/api/src/middleware/rateLimiter.ts"
+  ]
+}

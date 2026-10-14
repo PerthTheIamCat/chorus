@@ -1,0 +1,12 @@
+{
+  "task_id": "py-04-th",
+  "language": "th",
+  "domain": "python",
+  "difficulty": "medium",
+  "prompt_th": "สร้าง pipeline ตรวจสอบ telemetry JSON stream ด้วย Pydantic v2 พร้อม z-score outlier detection สำหรับ metric ผิดปกติ",
+  "prompt_en": "Build incoming telemetry JSON streaming validation pipeline using Pydantic v2 with z-score outlier detection for anomalous metrics",
+  "test_command": "pytest tests/test_telemetry_validator.py",
+  "expected_files": [
+    "src/data/telemetry_validator.py"
+  ]
+}

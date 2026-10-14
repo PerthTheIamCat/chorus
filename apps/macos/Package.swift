@@ -26,6 +26,8 @@ let package = Package(
                     "-framework", "CoreFoundation",
                     "-framework", "Security",
                     "-framework", "SystemConfiguration",
+                    "-framework", "Vision",
+                    "-framework", "CoreSpotlight",
                 ])
             ]
         ),

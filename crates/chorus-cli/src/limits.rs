@@ -29,10 +29,23 @@ pub struct Window {
     pub resets_label: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModelQuotaGroup {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekly: Option<Window>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub five_hour: Option<Window>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct RateLimits {
     pub primary: Option<Window>,
     pub secondary: Option<Window>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<ModelQuotaGroup>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -201,6 +214,7 @@ pub fn codex_rate_limits(codex_home: &Path) -> Option<RateLimits> {
         let r = RateLimits {
             primary: win("primary"),
             secondary: win("secondary"),
+            groups: None,
         };
         if r.primary.is_some() || r.secondary.is_some() {
             return Some(r);
@@ -350,6 +364,7 @@ pub fn claude_rate_limits(dir: &Path, custom: bool) -> Option<RateLimits> {
             return Some(RateLimits {
                 primary: c.limits.primary,
                 secondary: c.limits.secondary,
+                groups: None,
             });
         }
     }
@@ -402,6 +417,300 @@ pub fn claude_rate_limits(dir: &Path, custom: bool) -> Option<RateLimits> {
     Some(r)
 }
 
+fn is_leap_year(y: i64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+}
+
+fn parse_iso_to_unix(s: &str) -> Option<i64> {
+    let parts: Vec<&str> = s.split(|c| c == 'T' || c == 'Z' || c == '-' || c == ':').filter(|x| !x.is_empty()).collect();
+    if parts.len() >= 6 {
+        let year: i64 = parts[0].parse().ok()?;
+        let month: i64 = parts[1].parse().ok()?;
+        let day: i64 = parts[2].parse().ok()?;
+        let hour: i64 = parts[3].parse().ok()?;
+        let min: i64 = parts[4].parse().ok()?;
+        let sec: i64 = parts[5].parse().ok()?;
+        let mut d = day - 1;
+        for y in 1970..year {
+            d += if is_leap_year(y) { 366 } else { 365 };
+        }
+        let days_in_months = [31, if is_leap_year(year) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        if (month as usize) >= 1 && (month as usize) <= 12 {
+            for m in 0..(month - 1) as usize {
+                d += days_in_months[m];
+            }
+            Some(d * 86400 + hour * 3600 + min * 60 + sec)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+/// Parse Antigravity quota snapshots from statusline bridges (AIUsageBar, Chorus cache, or raw status JSON).
+pub fn parse_antigravity_usage(text: &str) -> Option<RateLimits> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+
+    // 1. Antigravity RetrieveUserQuotaSummary groups (Gemini Models, Claude and GPT models)
+    let groups_val = v.get("response").and_then(|r| r.get("groups")).or_else(|| v.get("groups"));
+    if let Some(groups_arr) = groups_val.and_then(|g| g.as_array()) {
+        let mut model_groups = Vec::new();
+        let mut primary_win = None;
+        let mut secondary_win = None;
+
+        for g in groups_arr {
+            let name = g.get("displayName").and_then(|x| x.as_str()).unwrap_or("Model Group").to_string();
+            let desc = g.get("description").and_then(|x| x.as_str()).map(|x| x.to_string());
+            let mut weekly_win = None;
+            let mut five_hour_win = None;
+
+            if let Some(buckets) = g.get("buckets").and_then(|b| b.as_array()) {
+                for b in buckets {
+                    let window_kind = b.get("window").and_then(|w| w.as_str()).unwrap_or("");
+                    let rem_frac = b.get("remainingFraction").and_then(|x| x.as_f64()).unwrap_or(1.0);
+                    let used_pct = (1.0 - rem_frac).max(0.0).min(1.0) * 100.0;
+                    let desc_str = b.get("description").and_then(|x| x.as_str()).map(|x| x.to_string());
+                    let reset_iso = b.get("resetTime").and_then(|x| x.as_str());
+                    let resets_at = reset_iso.and_then(parse_iso_to_unix);
+
+                    let win = Window {
+                        used_percent: used_pct,
+                        window_minutes: if window_kind == "weekly" { Some(10080) } else { Some(300) },
+                        resets_at,
+                        resets_label: desc_str,
+                    };
+
+                    if window_kind == "weekly" {
+                        weekly_win = Some(win);
+                    } else if window_kind == "5h" || window_kind == "five_hour" {
+                        five_hour_win = Some(win);
+                    }
+                }
+            }
+
+            if name.contains("Gemini") {
+                if primary_win.is_none() { primary_win = five_hour_win.clone(); }
+                if secondary_win.is_none() { secondary_win = weekly_win.clone(); }
+            }
+
+            model_groups.push(ModelQuotaGroup {
+                name,
+                description: desc,
+                weekly: weekly_win,
+                five_hour: five_hour_win,
+            });
+        }
+
+        if !model_groups.is_empty() {
+            return Some(RateLimits {
+                primary: primary_win.or_else(|| model_groups.first().and_then(|g| g.five_hour.clone())),
+                secondary: secondary_win.or_else(|| model_groups.first().and_then(|g| g.weekly.clone())),
+                groups: Some(model_groups),
+            });
+        }
+    }
+
+    // 2. Legacy / StatusLine single-window format
+    let mut five_hour_used = v.get("five_hour_used").and_then(|x| x.as_f64());
+    let mut five_hour_reset = v.get("five_hour_reset").and_then(|x| x.as_i64().or_else(|| x.as_f64().map(|f| f as i64)));
+    let mut weekly_used = v.get("weekly_used").and_then(|x| x.as_f64());
+    let mut weekly_reset = v.get("weekly_reset").and_then(|x| x.as_i64().or_else(|| x.as_f64().map(|f| f as i64)));
+
+    if let Some(rl) = v.get("rate_limits").and_then(|x| x.as_object()) {
+        if let Some(fh) = rl.get("five_hour").and_then(|x| x.as_object()) {
+            if five_hour_used.is_none() {
+                five_hour_used = fh.get("used_percentage")
+                    .or_else(|| fh.get("used_percent"))
+                    .and_then(|x| x.as_f64())
+                    .or_else(|| fh.get("remaining_fraction").and_then(|x| x.as_f64()).map(|f| (1.0 - f) * 100.0));
+            }
+            if five_hour_reset.is_none() {
+                five_hour_reset = fh.get("resets_at").and_then(|x| x.as_i64().or_else(|| x.as_f64().map(|f| f as i64)));
+            }
+        }
+        if let Some(sd) = rl.get("seven_day").or_else(|| rl.get("weekly")).and_then(|x| x.as_object()) {
+            if weekly_used.is_none() {
+                weekly_used = sd.get("used_percentage")
+                    .or_else(|| sd.get("used_percent"))
+                    .and_then(|x| x.as_f64())
+                    .or_else(|| sd.get("remaining_fraction").and_then(|x| x.as_f64()).map(|f| (1.0 - f) * 100.0));
+            }
+            if weekly_reset.is_none() {
+                weekly_reset = sd.get("resets_at").and_then(|x| x.as_i64().or_else(|| x.as_f64().map(|f| f as i64)));
+            }
+        }
+        if let Some(p) = rl.get("primary").and_then(|x| x.as_object()) {
+            if five_hour_used.is_none() {
+                five_hour_used = p.get("used_percent").and_then(|x| x.as_f64());
+            }
+            if five_hour_reset.is_none() {
+                five_hour_reset = p.get("resets_at").and_then(|x| x.as_i64().or_else(|| x.as_f64().map(|f| f as i64)));
+            }
+        }
+        if let Some(s) = rl.get("secondary").and_then(|x| x.as_object()) {
+            if weekly_used.is_none() {
+                weekly_used = s.get("used_percent").and_then(|x| x.as_f64());
+            }
+            if weekly_reset.is_none() {
+                weekly_reset = s.get("resets_at").and_then(|x| x.as_i64().or_else(|| x.as_f64().map(|f| f as i64)));
+            }
+        }
+    }
+
+    if five_hour_used.is_none() {
+        if let Some(rf) = v.get("remaining_fraction").and_then(|x| x.as_f64()) {
+            five_hour_used = Some((1.0 - rf) * 100.0);
+            if five_hour_reset.is_none() {
+                if let Some(sec) = v.get("reset_in_seconds").and_then(|x| x.as_f64()) {
+                    let now_sec = (now_ms() / 1000) as i64;
+                    five_hour_reset = Some(now_sec + sec as i64);
+                }
+            }
+        }
+    }
+
+    let primary = five_hour_used.map(|used_percent| Window {
+        used_percent,
+        window_minutes: Some(300),
+        resets_at: five_hour_reset,
+        resets_label: None,
+    });
+    let secondary = weekly_used.map(|used_percent| Window {
+        used_percent,
+        window_minutes: Some(10080),
+        resets_at: weekly_reset,
+        resets_label: None,
+    });
+
+    if primary.is_some() || secondary.is_some() {
+        let groups = vec![
+            ModelQuotaGroup {
+                name: "Gemini Models".into(),
+                description: Some("Models within this group: Gemini Flash, Gemini Pro".into()),
+                weekly: secondary.clone(),
+                five_hour: primary.clone(),
+            }
+        ];
+        Some(RateLimits { primary, secondary, groups: Some(groups) })
+    } else {
+        None
+    }
+}
+
+fn fetch_live_antigravity_quota() -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid,command"])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut target_pid = None;
+    let mut token = None;
+
+    for line in stdout.lines() {
+        if line.contains("language_server") && line.contains("--csrf_token") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if let Some(pid_str) = parts.first() {
+                target_pid = Some(pid_str.to_string());
+            }
+            if let Some(pos) = line.find("--csrf_token") {
+                let rest = &line[pos + "--csrf_token".len()..];
+                let t = rest.trim_start().split_whitespace().next().unwrap_or("");
+                token = Some(t.to_string());
+            }
+            break;
+        }
+    }
+
+    let pid = target_pid?;
+    let csrf = token?;
+
+    let lsof = std::process::Command::new("lsof")
+        .args(["-nP", "-p", &pid])
+        .output()
+        .ok()?;
+    let lsof_out = String::from_utf8_lossy(&lsof.stdout);
+    let mut ports = Vec::new();
+    for line in lsof_out.lines() {
+        if line.contains("LISTEN") && line.contains("127.0.0.1:") {
+            if let Some(pos) = line.find("127.0.0.1:") {
+                let rem = &line[pos + "127.0.0.1:".len()..];
+                let port_str = rem.split_whitespace().next().unwrap_or("");
+                if let Ok(p) = port_str.parse::<u16>() {
+                    ports.push(p);
+                }
+            }
+        }
+    }
+
+    for port in ports {
+        if let Ok(res) = std::process::Command::new("curl")
+            .args([
+                "-k", "-s", "--max-time", "2",
+                "-X", "POST",
+                &format!("https://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"),
+                "-H", "Content-Type: application/json",
+                "-H", &format!("x-codeium-csrf-token: {csrf}"),
+                "-d", "{}",
+            ])
+            .output()
+        {
+            if res.status.success() {
+                let text = String::from_utf8_lossy(&res.stdout).to_string();
+                if text.contains("groups") && text.contains("buckets") {
+                    return Some(text);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Antigravity 5-hour and weekly usage snapshot. Reads from local statusline bridge cache
+/// (AIUsageBar or Chorus cache) or account directory.
+pub fn antigravity_rate_limits(dir: &Path) -> Option<RateLimits> {
+    let local_custom = dir.join("antigravity-statusline.json");
+    if local_custom.exists() {
+        if let Ok(text) = std::fs::read_to_string(&local_custom) {
+            if let Some(limits) = parse_antigravity_usage(&text) {
+                return Some(limits);
+            }
+        }
+    }
+
+    if let Some(live_json) = fetch_live_antigravity_quota() {
+        if let Some(limits) = parse_antigravity_usage(&live_json) {
+            if let Some(h) = std::env::var_os("HOME").map(PathBuf::from) {
+                let cache_dir = h.join(".chorus/cache");
+                let _ = std::fs::create_dir_all(&cache_dir);
+                let _ = std::fs::write(cache_dir.join("antigravity-quota-summary.json"), &live_json);
+            }
+            return Some(limits);
+        }
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(h) = std::env::var_os("HOME").map(PathBuf::from) {
+        candidates.push(h.join(".chorus/cache/antigravity-quota-summary.json"));
+        candidates.push(h.join("Library/Application Support/AIUsageBar/antigravity-statusline.json"));
+        candidates.push(h.join(".chorus/cache/antigravity-statusline.json"));
+        candidates.push(h.join(".chorus/cache/antigravity-usage.json"));
+        candidates.push(h.join(".chorus/cache/antigravity-statusline-raw.json"));
+    }
+    candidates.push(dir.join("antigravity-quota-summary.json"));
+    candidates.push(dir.join("antigravity-statusline.json"));
+    candidates.push(dir.join("cache/antigravity-statusline.json"));
+
+    for path in candidates {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Some(limits) = parse_antigravity_usage(&text) {
+                return Some(limits);
+            }
+        }
+    }
+    None
+}
+
 fn account_ready(agent: &str, account: Option<&str>, dir: &Path) -> bool {
     if account.is_none() {
         return matches!(
@@ -411,6 +720,8 @@ fn account_ready(agent: &str, account: Option<&str>, dir: &Path) -> bool {
     }
     if agent.contains("claude") {
         crate::agents::claude_auth_status(Some(dir)).unwrap_or_else(|| dir.join(".credentials.json").exists())
+    } else if agent.contains("antigravity") || agent.contains("agy") {
+        crate::agents::antigravity_logged_in()
     } else {
         dir.join("auth.json").exists()
     }
@@ -420,7 +731,7 @@ fn account_ready(agent: &str, account: Option<&str>, dir: &Path) -> bool {
 pub fn usage_report() -> Vec<AccountUsage> {
     let hits = hits();
     let mut out = Vec::new();
-    for agent in ["claude", "codex"] {
+    for agent in ["claude", "codex", "antigravity"] {
         let accounts: Vec<Option<String>> = std::iter::once(None)
             .chain(crate::accounts::list(agent).into_iter().map(Some))
             .collect();
@@ -439,8 +750,10 @@ pub fn usage_report() -> Vec<AccountUsage> {
                 login: crate::accounts::login_command(agent, a),
                 rate_limits: if agent == "codex" {
                     codex_rate_limits(&dir)
-                } else if ready {
+                } else if agent == "claude" && ready {
                     claude_rate_limits(&dir, a.is_some())
+                } else if agent.contains("antigravity") || agent.contains("agy") {
+                    antigravity_rate_limits(&dir)
                 } else {
                     None
                 },
@@ -493,6 +806,48 @@ mod tests {
         assert_eq!(r.secondary.unwrap().window_minutes, Some(10080));
         let _ = std::fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn parses_the_real_antigravity_statusline_output() {
+        let t = r#"{"five_hour_reset":1791564080,"five_hour_used":0,"observed_at":1791546086.3337841,"weekly_reset":1791949101,"weekly_used":46.693975000000002}"#;
+        let r = parse_antigravity_usage(t).unwrap();
+        let p = r.primary.unwrap();
+        assert_eq!(p.used_percent, 0.0);
+        assert_eq!(p.window_minutes, Some(300));
+        assert_eq!(p.resets_at, Some(1791564080));
+        let s = r.secondary.unwrap();
+        assert_eq!(s.used_percent, 46.693975000000002);
+        assert_eq!(s.window_minutes, Some(10080));
+        assert_eq!(s.resets_at, Some(1791949101));
+    }
+
+    #[test]
+    fn usage_report_includes_antigravity_rate_limits() {
+        let temp = std::env::temp_dir().join(format!("anti-test-{}", std::process::id()));
+        std::fs::create_dir_all(&temp).unwrap();
+        std::fs::write(
+            temp.join("antigravity-statusline.json"),
+            r#"{"five_hour_reset":1791564080,"five_hour_used":0,"weekly_reset":1791949101,"weekly_used":46.5}"#,
+        ).unwrap();
+        let rl = antigravity_rate_limits(&temp).unwrap();
+        assert!(rl.secondary.is_some());
+        assert_eq!(rl.secondary.unwrap().used_percent, 46.5);
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn parses_antigravity_quota_summary_groups() {
+        let t = r#"{"response":{"groups":[{"displayName":"Gemini Models","description":"Models within this group: Gemini Flash, Gemini Pro","buckets":[{"bucketId":"gemini-weekly","displayName":"Weekly Limit Remaining","description":"You have used some of your weekly limit, it will fully refresh in 4 days, 15 hours.","window":"weekly","remainingFraction":0.51,"resetTime":"2026-10-14T03:38:21Z"},{"bucketId":"gemini-5h","displayName":"Five Hour Limit Remaining","description":"You have used some of your 5-hour limit, it will fully refresh in 2 hours, 5 minutes.","window":"5h","remainingFraction":0.38,"resetTime":"2026-10-09T14:09:04Z"}]},{"displayName":"Claude and GPT models","description":"Models within this group: Claude Opus, Claude Sonnet, GPT-OSS","buckets":[{"bucketId":"3p-weekly","displayName":"Weekly Limit Remaining","description":"You have used some of your weekly limit, it will fully refresh in 4 days, 19 hours.","window":"weekly","remainingFraction":0.48,"resetTime":"2026-10-14T07:54:57Z"},{"bucketId":"3p-5h","displayName":"Five Hour Limit Remaining","window":"5h","remainingFraction":1.0,"resetTime":"2026-10-09T17:46:13Z"}]}]}}"#;
+        let rl = parse_antigravity_usage(t).unwrap();
+        let groups = rl.groups.unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].name, "Gemini Models");
+        assert_eq!((groups[0].weekly.as_ref().unwrap().used_percent * 10.0).round(), 490.0);
+        assert_eq!((groups[0].five_hour.as_ref().unwrap().used_percent * 10.0).round(), 620.0);
+        assert_eq!(groups[1].name, "Claude and GPT models");
+        assert_eq!((groups[1].weekly.as_ref().unwrap().used_percent * 10.0).round(), 520.0);
+        assert_eq!(groups[1].five_hour.as_ref().unwrap().used_percent, 0.0);
+    }
 }
 
 #[cfg(test)]
@@ -501,6 +856,7 @@ mod auth_tests {
 
     #[test]
     fn revoked_login_is_remembered_then_cleared_by_a_good_turn() {
+        let old_home = std::env::var_os("HOME");
         let home = std::env::temp_dir().join(format!("chorus-auth-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
         std::env::set_var("HOME", &home);
@@ -511,5 +867,8 @@ mod auth_tests {
         assert!(!auth_failed("codex"));
         clear("claude");
         assert!(!auth_failed("claude-opus"));
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        }
     }
 }

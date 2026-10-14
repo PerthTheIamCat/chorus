@@ -428,9 +428,13 @@ impl Router {
             ));
         }
 
-        let decision = match self.supports_decisions() {
-            Ok(decision) => decision,
-            Err(error) => return RouteResult::Unavailable(error.to_unavailable()),
+        let decision = if self.config.model == DEFAULT_DECISION_MODEL {
+            true
+        } else {
+            match self.supports_decisions() {
+                Ok(decision) => decision,
+                Err(error) => return RouteResult::Unavailable(error.to_unavailable()),
+            }
         };
         if decision {
             return self.route_decision(task, &compatible);
@@ -481,7 +485,10 @@ impl Router {
             "logprobs": true,
             "top_logprobs": 8,
             "keep_alive": "5m",
-            "options": { "temperature": 0 }
+            "options": {
+                "temperature": 0,
+                "num_predict": 128
+            }
         });
         let body = match serde_json::to_vec(&body) {
             Ok(body) if body.len() <= MAX_REQUEST_BYTES => body,
@@ -608,6 +615,108 @@ impl Router {
             router_model: self.config.model.clone(),
             router_version: self.config.model_version.clone(),
         })
+    }
+
+    /// Route with resilient fallback to fast in-process heuristics (`local_router::route_task_fast`)
+    /// when the neural model / Ollama endpoint is not installed, down, or unreachable.
+    pub fn route_with_fallback(
+        &self,
+        task: &TaskSummary,
+        candidates: &CandidateSet,
+    ) -> RouteResult {
+        if self.config.model == "in-process-heuristic" {
+            let ready: Vec<&Candidate> = candidates
+                .candidates
+                .iter()
+                .filter(|c| c.ready && candidate_supports_task(c, task))
+                .collect();
+
+            if ready.is_empty() {
+                return RouteResult::Unavailable(RouteUnavailable {
+                    reason: RouteUnavailableReason::NoReadyCandidates,
+                    message: "no ready candidates support this task".to_string(),
+                });
+            }
+
+            let candidate_pairs: Vec<(&str, &str)> = ready
+                .iter()
+                .map(|c| (c.agent.as_str(), c.model.as_str()))
+                .collect();
+
+            let fast_decision = crate::local_router::route_task_fast(&task.text, &candidate_pairs);
+
+            let picked = ready
+                .iter()
+                .find(|c| {
+                    c.model.to_lowercase().contains(&fast_decision.recommended_model.to_lowercase())
+                        || c.agent.to_lowercase() == fast_decision.recommended_agent.to_lowercase()
+                })
+                .or_else(|| ready.first())
+                .copied();
+
+            if let Some(picked) = picked {
+                return RouteResult::Proposal(RouteProposal {
+                    candidate_id: picked.id.clone(),
+                    reason: format!(
+                        "{} [In-Process Fast Router · ความยาก {:.2}]",
+                        fast_decision.reason, fast_decision.complexity_score
+                    ),
+                    confidence: Confidence::Medium,
+                    router_model: "in-process-heuristic".to_string(),
+                    router_version: Some("v1.0".to_string()),
+                });
+            }
+        }
+
+        let result = self.route(task, candidates);
+        match result {
+            RouteResult::Proposal(p) => RouteResult::Proposal(p),
+            RouteResult::Unavailable(unavailable_info) => {
+                // If there are ready candidates that support the task, fallback to instant fast heuristic
+                let ready: Vec<&Candidate> = candidates
+                    .candidates
+                    .iter()
+                    .filter(|c| c.ready && candidate_supports_task(c, task))
+                    .collect();
+
+                if ready.is_empty() {
+                    return RouteResult::Unavailable(unavailable_info);
+                }
+
+                // Fast in-process classification
+                let candidate_pairs: Vec<(&str, &str)> = ready
+                    .iter()
+                    .map(|c| (c.agent.as_str(), c.model.as_str()))
+                    .collect();
+
+                let fast_decision = crate::local_router::route_task_fast(&task.text, &candidate_pairs);
+
+                // Match recommended agent and model to candidate
+                let picked = ready
+                    .iter()
+                    .find(|c| {
+                        c.model.to_lowercase().contains(&fast_decision.recommended_model.to_lowercase())
+                            || c.agent.to_lowercase() == fast_decision.recommended_agent.to_lowercase()
+                    })
+                    .or_else(|| ready.first())
+                    .copied();
+
+                if let Some(picked) = picked {
+                    RouteResult::Proposal(RouteProposal {
+                        candidate_id: picked.id.clone(),
+                        reason: format!(
+                            "{} [In-Process Fast Router · ความยาก {:.2}]",
+                            fast_decision.reason, fast_decision.complexity_score
+                        ),
+                        confidence: Confidence::Medium,
+                        router_model: "in-process-heuristic".to_string(),
+                        router_version: Some("v1.0".to_string()),
+                    })
+                } else {
+                    RouteResult::Unavailable(unavailable_info)
+                }
+            }
+        }
     }
 
     fn supports_decisions(&self) -> Result<bool, TransportError> {
@@ -1290,6 +1399,47 @@ mod decision_tests {
                 ready: true,
             },
         ])
+    }
+
+    #[test]
+    fn in_process_fallback_when_ollama_is_offline() {
+        use std::net::{IpAddr, SocketAddr};
+        let config = RouterConfig::local_at(
+            "non-existent-model",
+            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 59999),
+        )
+        .unwrap();
+        let router = Router::new(config).unwrap();
+
+        // Direct route fails due to closed port
+        let direct_res = router.route(&task("refactor whole database"), &candidates());
+        assert!(matches!(direct_res, RouteResult::Unavailable(_)));
+
+        // route_with_fallback() seamlessly recovers via in-process fast router!
+        let fallback_res = router.route_with_fallback(&task("refactor whole database"), &candidates());
+        match fallback_res {
+            RouteResult::Proposal(proposal) => {
+                assert_eq!(proposal.router_model, "in-process-heuristic");
+                assert!(proposal.reason.contains("In-Process Fast Router"));
+                assert!(!proposal.candidate_id.is_empty());
+            }
+            RouteResult::Unavailable(_) => panic!("fallback must propose a candidate!"),
+        }
+    }
+
+    #[test]
+    fn in_process_heuristic_direct_routing() {
+        let config = RouterConfig::local("in-process-heuristic");
+        let router = Router::new(config).unwrap();
+        let res = router.route_with_fallback(&task("fix typo in readme"), &candidates());
+        match res {
+            RouteResult::Proposal(proposal) => {
+                assert_eq!(proposal.router_model, "in-process-heuristic");
+                assert!(proposal.reason.contains("In-Process Fast Router"));
+                assert!(!proposal.candidate_id.is_empty());
+            }
+            RouteResult::Unavailable(_) => panic!("direct in-process heuristic must propose a candidate!"),
+        }
     }
 
     fn serve(responses: Vec<(&'static str, String)>, run: impl FnOnce(Router)) {

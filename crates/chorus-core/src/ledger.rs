@@ -283,3 +283,32 @@ pub fn search(c: &Connection, q: &str, limit: usize) -> Result<Vec<Event>> {
         }
     }
 }
+
+/// The total monetary cost of a session in USD, calculating from stored cost_usd
+/// or falling back to token accounting for each event.
+pub fn session_cost_usd(c: &Connection, sess: i64) -> Result<f64> {
+    let mut stmt = c.prepare(
+        "SELECT tok_in, tok_out, cost_usd, model_id, actor FROM event WHERE sess = ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![sess], |r| {
+        let tok_in: Option<i64> = r.get(0)?;
+        let tok_out: Option<i64> = r.get(1)?;
+        let cost_usd: Option<f64> = r.get(2)?;
+        let model_id: Option<String> = r.get(3)?;
+        let actor: Option<String> = r.get(4)?;
+        Ok((tok_in, tok_out, cost_usd, model_id, actor))
+    })?;
+
+    let mut total = 0.0;
+    for row in rows {
+        let (tok_in, tok_out, cost_usd, model_id, actor) = row?;
+        if let Some(c) = cost_usd {
+            total += c;
+        } else if let (Some(tin), Some(tout)) = (tok_in, tok_out) {
+            let model = model_id.as_deref().or(actor.as_deref()).unwrap_or("default");
+            let acct = crate::local_router::calculate_cost(model, tin as usize, tout as usize);
+            total += acct.cost_usd;
+        }
+    }
+    Ok(total)
+}

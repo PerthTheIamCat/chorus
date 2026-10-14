@@ -1,0 +1,12 @@
+{
+  "task_id": "swift-02-en",
+  "language": "en",
+  "domain": "swift",
+  "difficulty": "trivial",
+  "prompt_th": "แก้สีพื้นหลังตอน hover ของรายการใน Sidebar ให้ตรงกับ token สี accentSecondary ในโหมดมืด",
+  "prompt_en": "Update sidebar item hover background color to match accentSecondary color token in dark mode",
+  "test_command": "swift test --filter SidebarThemeTests",
+  "expected_files": [
+    "ChorusApp/Theme/SidebarColors.swift"
+  ]
+}

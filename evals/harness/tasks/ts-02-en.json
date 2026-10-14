@@ -1,0 +1,12 @@
+{
+  "task_id": "ts-02-en",
+  "language": "en",
+  "domain": "typescript",
+  "difficulty": "trivial",
+  "prompt_th": "สร้างและ export Zod schema UserPreferencesSchema และ TypeScript type ในแพ็กเกจ @chorus/shared",
+  "prompt_en": "Create and export Zod schema UserPreferencesSchema and inferred TypeScript type in @chorus/shared package",
+  "test_command": "pnpm test test/types/preferences.test.ts",
+  "expected_files": [
+    "packages/shared/src/types/user.ts"
+  ]
+}

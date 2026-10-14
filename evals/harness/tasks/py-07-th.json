@@ -1,0 +1,14 @@
+{
+  "task_id": "py-07-th",
+  "language": "th",
+  "domain": "python",
+  "difficulty": "architectural",
+  "prompt_th": "ออกแบบ distributed DAG task execution engine พร้อม topological sorting, cycle detection, failure isolation และ partial state checkpointing",
+  "prompt_en": "Architect distributed DAG task execution engine with topological sorting, cycle detection, failure isolation, and partial checkpointing",
+  "test_command": "pytest tests/test_dag_scheduler.py",
+  "expected_files": [
+    "src/scheduler/dag.py",
+    "src/scheduler/executor.py",
+    "src/scheduler/recovery.py"
+  ]
+}

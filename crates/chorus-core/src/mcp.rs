@@ -20,7 +20,7 @@
 //! the queue. In `read-only` mode the call is still gated through our
 //! permission engine first (`--yes` to allow) — that's the design working.
 
-use crate::{attachments, memory, Result, Store};
+use crate::{agent_control, attachments, memory, notify, roles, Result, Store};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -276,6 +276,18 @@ fn dispatch(req: &Value, conn: &rusqlite::Connection, session_scope: Option<i64>
             if session_scope.is_some() {
                 tools.extend([attachment_list_schema(), attachment_read_schema()]);
             }
+            tools.extend([
+                spawn_agent_schema(),
+                send_message_schema(),
+                wait_agent_schema(),
+                collect_results_schema(),
+                cancel_agent_schema(),
+                update_checklist_schema(),
+                jump_to_file_schema(),
+                request_review_schema(),
+                synthesize_role_schema(),
+                notify_user_schema(),
+            ]);
             Ok(json!({ "tools": tools }))
         }
         "tools/call" => call_tool(
@@ -374,24 +386,281 @@ fn call_tool(
         };
         return Ok(json!({"content":[block]}));
     }
-    if name != "memory_propose" {
-        return Err(format!("no tool {name}"));
-    }
-    let text = args
-        .get("text")
-        .and_then(Value::as_str)
-        .ok_or("text is required")?;
-    let scope = args.get("scope").and_then(Value::as_i64).unwrap_or(1);
+    if name == "memory_propose" {
+        let text = args
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or("text is required")?;
+        let scope = args.get("scope").and_then(Value::as_i64).unwrap_or(1);
 
-    match memory::propose(conn, scope, text, None) {
-        Ok(id) => Ok(json!({
-            "content": [{
-                "type": "text",
-                "text": format!("Queued proposal #{id} for review: {text:?}")
-            }]
-        })),
-        Err(e) => Err(e.to_string()),
+        return match memory::propose(conn, scope, text, None) {
+            Ok(id) => Ok(json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!("Queued proposal #{id} for review: {text:?}")
+                }]
+            })),
+            Err(e) => Err(e.to_string()),
+        };
     }
+
+    if name == "chorus_spawn_agent" {
+        let role = args
+            .get("role")
+            .and_then(Value::as_str)
+            .ok_or("role is required")?;
+        let task = args
+            .get("task")
+            .and_then(Value::as_str)
+            .ok_or("task is required")?;
+        let worktree = args
+            .get("worktree")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let cwd = session_scope
+            .and_then(|sess| {
+                conn.query_row("SELECT cwd FROM session WHERE id = ?1", [sess], |r| {
+                    r.get::<_, String>(0)
+                })
+                .ok()
+            })
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .to_string_lossy()
+                    .to_string()
+            });
+
+        let agent = agent_control::spawn_agent(
+            conn,
+            session_scope,
+            role,
+            task,
+            worktree,
+            &cwd,
+        )
+        .map_err(|e| e.to_string())?;
+
+        if let Some(sess) = session_scope {
+            let payload = serde_json::json!({
+                "event": "subagent_spawned",
+                "sessionId": format!("subagent-{}", agent.id),
+                "parentSessionId": format!("{sess}"),
+                "name": format!("Role: {role}"),
+                "task": task,
+            }).to_string();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let actor_id: i64 = conn.query_row("SELECT id FROM actor LIMIT 1", [], |r| r.get(0)).unwrap_or(1);
+            let _ = conn.execute(
+                "INSERT INTO event (sess, t, kind, actor, body, tok_in, tok_out, model_id)
+                 VALUES (?1, ?2, 1, ?3, ?4, 0, 0, NULL)",
+                rusqlite::params![sess, now, actor_id, payload],
+            );
+        }
+
+        let text = format!(
+            "Spawned child agent #{} (role: '{}', status: '{}').\nTask: {}\nWorktree: {}\nJSON: {}",
+            agent.id,
+            agent.role,
+            agent.status.as_str(),
+            agent.task,
+            agent.worktree.as_deref().unwrap_or("none"),
+            json!({
+                "agent_id": agent.id,
+                "role": agent.role,
+                "status": agent.status.as_str(),
+                "worktree": agent.worktree,
+            })
+        );
+        return Ok(json!({ "content": [{ "type": "text", "text": text }] }));
+    }
+
+    if name == "chorus_send_message" {
+        let agent_id = args
+            .get("agent_id")
+            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .ok_or("agent_id is required")?;
+        let message = args
+            .get("message")
+            .and_then(Value::as_str)
+            .ok_or("message is required")?;
+
+        let msg = agent_control::send_message(conn, agent_id, message)
+            .map_err(|e| e.to_string())?;
+
+        let text = format!("Message delivered to child agent #{}: {:?}", msg.subagent_id, msg.content);
+        return Ok(json!({ "content": [{ "type": "text", "text": text }] }));
+    }
+
+    if name == "chorus_wait_agent" {
+        let agent_id = args
+            .get("agent_id")
+            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+        let timeout_secs = args
+            .get("timeout_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(30);
+
+        let rep = agent_control::wait_agent(conn, session_scope, agent_id, timeout_secs)
+            .map_err(|e| e.to_string())?;
+
+        let text = format!(
+            "Wait status:\nAll done: {}\nCompleted: {:?}\nRunning: {:?}\nCancelled: {:?}",
+            rep.all_done, rep.completed, rep.running, rep.cancelled
+        );
+        return Ok(json!({
+            "content": [{ "type": "text", "text": text }],
+            "all_done": rep.all_done,
+            "statuses": rep.statuses
+        }));
+    }
+
+    if name == "chorus_collect_results" {
+        let mut agent_ids = Vec::new();
+        if let Some(arr) = args.get("agent_ids").and_then(Value::as_array) {
+            for v in arr {
+                if let Some(id) = v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())) {
+                    agent_ids.push(id);
+                }
+            }
+        } else if let Some(id) = args.get("agent_id").and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))) {
+            agent_ids.push(id);
+        }
+        let ids_opt = if agent_ids.is_empty() { None } else { Some(agent_ids.as_slice()) };
+        let join_mode = args.get("join_mode").and_then(Value::as_str).unwrap_or("compact");
+
+        let res = agent_control::collect_results(conn, session_scope, ids_opt, join_mode)
+            .map_err(|e| e.to_string())?;
+
+        return Ok(json!({
+            "content": [{ "type": "text", "text": res.rendered_markdown }],
+            "briefs": res.briefs
+        }));
+    }
+
+    if name == "chorus_cancel_agent" {
+        let agent_id = args
+            .get("agent_id")
+            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .ok_or("agent_id is required")?;
+        let reason = args.get("reason").and_then(Value::as_str);
+
+        let agent = agent_control::cancel_agent(conn, agent_id, reason)
+            .map_err(|e| e.to_string())?;
+
+        let text = format!("Cancelled child agent #{} (role: '{}')", agent.id, agent.role);
+        return Ok(json!({ "content": [{ "type": "text", "text": text }] }));
+    }
+
+    if name == "chorus_update_checklist" {
+        let items_val = args
+            .get("items")
+            .and_then(Value::as_array)
+            .ok_or("items array is required")?;
+
+        let mut items = Vec::new();
+        for item in items_val {
+            let text = item
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or("item text is required")?;
+            let done = item
+                .get("done")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let in_progress = item
+                .get("in_progress")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            items.push(agent_control::ChecklistItem {
+                text: text.to_string(),
+                done,
+                in_progress,
+            });
+        }
+
+        let sess = session_scope.unwrap_or(1);
+        let updated = agent_control::update_checklist(conn, sess, &items)
+            .map_err(|e| e.to_string())?;
+
+        let done_count = updated.iter().filter(|i| i.done).count();
+        let text = format!("Updated live task checklist: {}/{} completed.", done_count, updated.len());
+        return Ok(json!({ "content": [{ "type": "text", "text": text }] }));
+    }
+
+    if name == "chorus_jump_to_file" {
+        let path = args
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or("path is required")?;
+        let line = args
+            .get("line")
+            .and_then(Value::as_u64)
+            .map(|v| v as u32);
+
+        let sess = session_scope.unwrap_or(1);
+        let jump = agent_control::jump_to_file(conn, sess, path, line)
+            .map_err(|e| e.to_string())?;
+
+        let line_str = jump.line.map(|l| format!(":{l}")).unwrap_or_default();
+        let text = format!("Navigated Workbench to {}{}", jump.path, line_str);
+        return Ok(json!({ "content": [{ "type": "text", "text": text }] }));
+    }
+
+    if name == "chorus_request_review" {
+        let summary = args
+            .get("summary")
+            .and_then(Value::as_str)
+            .ok_or("summary is required")?;
+        let hunks = args.get("hunks").cloned().unwrap_or(json!([]));
+
+        let sess = session_scope.unwrap_or(1);
+        let req = agent_control::request_review(conn, sess, summary, &hunks)
+            .map_err(|e| e.to_string())?;
+
+        let text = format!("Created interactive review request #{}: {:?}. Status: pending.", req.id, req.summary);
+        return Ok(json!({ "content": [{ "type": "text", "text": text }] }));
+    }
+
+    if name == "chorus_synthesize_role" {
+        let task = args
+            .get("task")
+            .and_then(Value::as_str)
+            .ok_or("task is required")?;
+        let name_arg = args.get("name").and_then(Value::as_str);
+        let write_mode = args.get("write_mode").and_then(Value::as_bool).unwrap_or(false);
+
+        let role = roles::synthesize_role(task, write_mode, name_arg);
+        let text = format!("Synthesized custom role '{}':\n\n{}", role.name, role.to_markdown());
+        return Ok(json!({
+            "content": [{ "type": "text", "text": text }],
+            "role": role
+        }));
+    }
+
+    if name == "chorus_notify_user" {
+        let title = args
+            .get("title")
+            .and_then(Value::as_str)
+            .ok_or("title is required")?;
+        let message = args
+            .get("message")
+            .and_then(Value::as_str)
+            .ok_or("message is required")?;
+        let _urgency = args.get("urgency").and_then(Value::as_str).unwrap_or("normal");
+
+        let opts = notify::NotificationOptions::new(title, message);
+        let _ = notify::send_notification(&opts);
+
+        let text = format!("User notification triggered: {title} - {message}");
+        return Ok(json!({ "content": [{ "type": "text", "text": text }] }));
+    }
+
+    Err(format!("no tool {name}"))
 }
 
 fn attachment_list_schema() -> Value {
@@ -400,6 +669,236 @@ fn attachment_list_schema() -> Value {
 
 fn attachment_read_schema() -> Value {
     json!({"name":"attachment_read","description":"Read prepared content or original content for one live attachment in this Chorus session. Text output is bounded to 12,000 characters per call; use offset_chars and next_offset_chars to continue. Images are returned as image content.","inputSchema":{"type":"object","properties":{"attachment_id":{"type":"integer"},"max_chars":{"type":"integer","minimum":1,"maximum":12000},"offset_chars":{"type":"integer","minimum":0}},"required":["attachment_id"],"additionalProperties":false}})
+}
+
+fn spawn_agent_schema() -> Value {
+    json!({
+        "name": "chorus_spawn_agent",
+        "description": "Spawn a child agent session with a specialized role, task prompt, and optional isolated git worktree.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "role": {
+                    "type": "string",
+                    "description": "The agent role to spawn (e.g. 'investigator', 'builder', 'reviewer', or custom role name)"
+                },
+                "task": {
+                    "type": "string",
+                    "description": "The specific task or instruction for the child agent"
+                },
+                "worktree": {
+                    "type": "boolean",
+                    "description": "If true, allocates an isolated git worktree for write operations to prevent file conflicts",
+                    "default": false
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model override preference for the child agent"
+                }
+            },
+            "required": ["role", "task"]
+        }
+    })
+}
+
+fn send_message_schema() -> Value {
+    json!({
+        "name": "chorus_send_message",
+        "description": "Send a steering message, feedback, or follow-up instruction to a child agent session.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "integer",
+                    "description": "The numeric ID of the child agent session"
+                },
+                "message": {
+                    "type": "string",
+                    "description": "The message or guidance to transmit to the child agent"
+                }
+            },
+            "required": ["agent_id", "message"]
+        }
+    })
+}
+
+fn wait_agent_schema() -> Value {
+    json!({
+        "name": "chorus_wait_agent",
+        "description": "Wait for a child agent or all child agents to complete execution.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "integer",
+                    "description": "Optional specific child agent ID to wait for. If omitted, waits for all active child agents."
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": "Optional timeout in seconds (default: 30)",
+                    "default": 30
+                }
+            }
+        }
+    })
+}
+
+fn collect_results_schema() -> Value {
+    json!({
+        "name": "chorus_collect_results",
+        "description": "Collect a compact structured brief (summary, diff stat, files touched) from completed child sessions, protecting parent context.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_ids": {
+                    "type": "array",
+                    "items": { "type": "integer" },
+                    "description": "Optional list of child agent IDs to collect. If omitted, collects from all completed child agents."
+                },
+                "join_mode": {
+                    "type": "string",
+                    "description": "Aggregation mode: 'compact' (default, brief summary + stats), 'full' (detailed logs), or 'diff_only'",
+                    "enum": ["compact", "full", "diff_only"],
+                    "default": "compact"
+                }
+            }
+        }
+    })
+}
+
+fn cancel_agent_schema() -> Value {
+    json!({
+        "name": "chorus_cancel_agent",
+        "description": "Cancel a running child agent session and clean up its allocated worktree.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "integer",
+                    "description": "The child agent ID to cancel"
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional cancellation reason"
+                }
+            },
+            "required": ["agent_id"]
+        }
+    })
+}
+
+fn update_checklist_schema() -> Value {
+    json!({
+        "name": "chorus_update_checklist",
+        "description": "Update the live task checklist displayed in the Task State pane.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": { "type": "string", "description": "Checklist item description" },
+                            "done": { "type": "boolean", "description": "Whether the item is completed" },
+                            "in_progress": { "type": "boolean", "description": "Whether the item is currently in progress", "default": false }
+                        },
+                        "required": ["text", "done"]
+                    },
+                    "description": "The complete list of current checklist items"
+                }
+            },
+            "required": ["items"]
+        }
+    })
+}
+
+fn jump_to_file_schema() -> Value {
+    json!({
+        "name": "chorus_jump_to_file",
+        "description": "Trigger the Workbench code viewer to navigate to and highlight a specific file and line for the human.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to open"
+                },
+                "line": {
+                    "type": "integer",
+                    "description": "Optional 1-indexed line number to highlight"
+                }
+            },
+            "required": ["path"]
+        }
+    })
+}
+
+fn request_review_schema() -> Value {
+    json!({
+        "name": "chorus_request_review",
+        "description": "Request an interactive human review on diff hunks before making changes or continuing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "Summary of the changes or proposal requiring approval"
+                },
+                "hunks": {
+                    "type": "array",
+                    "description": "List of diff hunks or code changes to review"
+                }
+            },
+            "required": ["summary"]
+        }
+    })
+}
+
+fn synthesize_role_schema() -> Value {
+    json!({
+        "name": "chorus_synthesize_role",
+        "description": "Synthesize an optimized custom subagent role definition with prompt, boundaries, and tools for a specialized task.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "The specific task or domain requirements for the synthesized role"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Optional suggested role name"
+                },
+                "write_mode": {
+                    "type": "boolean",
+                    "description": "Whether this role requires file writing and bash execution capabilities",
+                    "default": false
+                }
+            },
+            "required": ["task"]
+        }
+    })
+}
+
+fn notify_user_schema() -> Value {
+    json!({
+        "name": "chorus_notify_user",
+        "description": "Trigger a native macOS user notification with audio chime.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": { "type": "string", "description": "Notification title" },
+                "message": { "type": "string", "description": "Notification message body" },
+                "urgency": {
+                    "type": "string",
+                    "enum": ["low", "normal", "critical"],
+                    "default": "normal"
+                }
+            },
+            "required": ["title", "message"]
+        }
+    })
 }
 
 fn write_http(stream: &mut TcpStream, status: u16, body: &Value) -> std::io::Result<()> {

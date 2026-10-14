@@ -9,6 +9,10 @@ license.workspace = true
 name = "acp-probe"
 path = "src/bin/acp_probe.rs"
 
+[[bin]]
+name = "antigravity-acp"
+path = "src/bin/antigravity_bridge.rs"
+
 [dependencies]
 serde_json.workspace = true
 anyhow.workspace = true
