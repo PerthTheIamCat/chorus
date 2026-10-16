@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct ChorusApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var engine = Engine()
+    @StateObject private var updater = Updater()
 
     var body: some Scene {
         WindowGroup("Chorus") {
@@ -35,5 +36,6 @@ struct ChorusApp: App {
         // shifts hit-testing away from what is drawn, so sidebar clicks landed
         // on the row next to the one under the pointer.
         .windowToolbarStyle(.unified)
+        .commands { CheckForUpdatesCommand(updater: updater) }
     }
 }

@@ -17,8 +17,10 @@ set -euo pipefail
 cd "$(dirname "$0")"
 MODE="${1:-debug}"
 RUN="${2:-run}"
-VERSION="0.1.0"
+VERSION="${CHORUS_VERSION:-0.1.0}"
 BUNDLE_ID="dev.chorus.app"
+FEED_URL="https://github.com/PerthTheIamCat/chorus/releases/latest/download/appcast.xml"
+SPARKLE_PUBLIC_KEY="E5axgieMsKgEtIIFf18pp0kcfcR0U3MLahF4QqB0ejc="
 
 echo "── cargo build ($MODE) ──"
 if [ "$MODE" = "release" ]; then
@@ -52,6 +54,11 @@ else
     cp ../../target/debug/chorusd "$APP/Contents/MacOS/chorusd"
 fi
 
+# Sparkle must live in Contents/Frameworks (the rpath Package.swift sets).
+SPARKLE_FW="$(find .build/artifacts -path '*macos-arm64_x86_64/Sparkle.framework' -maxdepth 6 | head -1)"
+mkdir -p "$APP/Contents/Frameworks"
+cp -R "$SPARKLE_FW" "$APP/Contents/Frameworks/"
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -70,6 +77,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
          the user's repo. Both die under the App Sandbox, so it is off until
          the Seatbelt profile in the design doc is actually written. -->
     <key>LSApplicationCategoryType</key> <string>public.app-category.developer-tools</string>
+    <!-- Sparkle auto-update. The public key verifies every update; the private
+         half lives only in the maintainer's login Keychain (account "chorus"). -->
+    <key>SUFeedURL</key>                 <string>${FEED_URL}</string>
+    <key>SUPublicEDKey</key>             <string>${SPARKLE_PUBLIC_KEY}</string>
+    <key>SUEnableAutomaticChecks</key>   <true/>
 </dict>
 </plist>
 PLIST

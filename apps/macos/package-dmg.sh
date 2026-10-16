@@ -8,6 +8,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSION="${1:-0.1.0}"
+export CHORUS_VERSION="$VERSION"
 DMG_NAME="Chorus-${VERSION}.dmg"
 DIST_DIR="${SCRIPT_DIR}/dist"
 STAGE_DIR="${DIST_DIR}/stage"
