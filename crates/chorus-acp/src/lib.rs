@@ -13,6 +13,7 @@
 
 pub mod sandbox;
 pub mod codex;
+pub mod env;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
@@ -168,6 +169,13 @@ impl Agent {
         let (program, args) = cmd.split_first().ok_or_else(|| anyhow!("empty command"))?;
         let mut command = Command::new(program);
         command.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        // A Finder-launched app has launchd's bare PATH; without the user's
+        // real one the agent finds Apple's git but not gh, node or npx.
+        let explicit = env
+            .iter()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| std::ffi::OsString::from(v));
+        command.env("PATH", env::agent_path(explicit.as_ref()));
         command
             .args(args)
             .stdin(Stdio::piped())
