@@ -161,6 +161,25 @@ fn checked_policy(cwd: &Path, profile: Profile) -> Result<String, String> {
             ));
         }
     }
+    // `git push` over SSH has to record a new host key, and ssh multiplexing
+    // keeps its sockets beside it. Denied, `ssh` fails with "Failed to add the
+    // host to the list of known hosts" and the agent cannot use the user's Git
+    // account. Only those two — `config`, `authorized_keys` and the keys stay
+    // read-only, because `ProxyCommand`/`LocalCommand` in `config` runs later
+    // outside any sandbox.
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let ssh = canonical(&home).join(".ssh");
+        if let Some(kh) = ssh.join("known_hosts").to_str().filter(|b| !b.contains('"')) {
+            s.push_str(&format!("(allow file-write* (literal \"{kh}\"))\n"));
+            s.push_str(&format!(
+                "(allow file-write* (regex #\"^{}\\.[^/]*$\"))\n",
+                regex_escape(kh)
+            ));
+        }
+        if let Some(c) = ssh.join("control").to_str().filter(|b| !b.contains('"')) {
+            s.push_str(&format!("(allow file-write* (subpath \"{c}\"))\n"));
+        }
+    }
     // Carve-outs *inside* the workspace. Seatbelt picks the last matching
     // rule, so these must come after the allows above.
     //
@@ -324,6 +343,19 @@ fn canonical(p: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_allows_known_hosts_but_not_the_whole_dir() {
+        let ws = std::env::temp_dir();
+        let p = policy(&ws, Profile::Workspace);
+        let ssh = std::env::var_os("HOME")
+            .map(|h| canonical(&PathBuf::from(h)).join(".ssh"))
+            .unwrap();
+        let ssh = ssh.to_str().unwrap();
+        assert!(p.contains(&format!("(allow file-write* (literal \"{ssh}/known_hosts\"))")));
+        assert!(!p.contains(&format!("(allow file-write* (subpath \"{ssh}\"))")));
+        assert!(!p.contains("authorized_keys"));
+    }
 
     #[test]
     fn the_workspace_profile_allows_the_workspace_and_read_only_does_not() {

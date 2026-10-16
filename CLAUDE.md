@@ -426,6 +426,18 @@ sandbox ไม่ทำงาน ต้องใช้ `~/` ถึงจะว�
 ถ้าไม่มี `sandbox-exec` (ไม่ใช่ macOS) → `wrap` คืนคำสั่งเดิมพร้อมเหตุผล **และต้องพิมพ์บอก**
 sandbox ที่ทำให้คนทำงานไม่ได้คือ sandbox ที่โดนปิด — แต่ sandbox ที่ปิดอยู่เงียบ ๆ แย่กว่า
 
+### 7.21 agent ใช้ git/GitHub ของ user ไม่ได้ (วัดจริง 16 ต.ค. 2026)
+
+สองสาเหตุแยกกัน ทั้งคู่เงียบ:
+
+- **แอปเปิดจาก Finder/Dock → launchd ให้ `PATH=/usr/bin:/bin:/usr/sbin:/sbin`** agent หา `gh`/`node`/`npx`
+  ไม่เจอ (Apple git เจอ เลยดูเหมือน "git ใช้ได้แต่ account ไม่ขึ้น") แก้ที่ `chorus-acp/src/env.rs`:
+  ถาม login shell (`$SHELL -ilc`, cache, timeout 6 วิ) แล้ว **ต่อท้าย** PATH เดิม ไม่ import env อื่น (กัน token หลุด)
+- **Seatbelt ห้ามเขียน `~/.ssh`** → `ssh` จด known_hosts ไม่ได้ push ผ่าน SSH ล้ม
+  อนุญาตเฉพาะ `known_hosts*` กับ `control/` — `config` ต้องอ่านอย่างเดียว (`ProxyCommand` รันนอก sandbox ทีหลัง)
+
+ยังเป็นข้อจำกัดโดยตั้งใจ: `git push -u` / `git branch --set-upstream-to` เขียน `.git/config` ไม่ได้ (carve-out ใน 7.20)
+
 ### 7.3 repo เงาสำหรับ checkpoint
 ต้องยึด `.gitignore` ของผู้ใช้ ไม่งั้น `.chorus/` จะโตกว่าโปรเจกต์จริง
 
