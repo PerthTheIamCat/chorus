@@ -101,6 +101,21 @@ pub fn agent_path(explicit: Option<&OsString>) -> OsString {
     merge_paths(&base, &extra)
 }
 
+/// Make this process's own `PATH` the repaired one, once.
+///
+/// Spawned agents get it through [`agent_path`], but the app also shells out
+/// itself — `which claude` for detection, `claude -p /usage`, `cargo`, linters.
+/// From a Finder launch every one of those saw launchd's bare `PATH`, and the
+/// app reported "no agents found" on a machine full of them. Call before the
+/// first such lookup; later calls are free.
+pub fn repair_process_path() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let fixed = agent_path(None);
+        std::env::set_var("PATH", fixed);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

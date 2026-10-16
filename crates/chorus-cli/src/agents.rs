@@ -525,6 +525,8 @@ pub fn auth_status(agent_id: &str) -> AgentInfo {
 /// agent that can't run yet still needs to show up so the user knows what
 /// to fix.
 pub fn list_agents() -> Vec<AgentInfo> {
+    // Finder-launched app: `which` below would see launchd's bare PATH.
+    chorus_acp::env::repair_process_path();
     vec![
         auth_status("claude"),
         auth_status("codex"),

@@ -346,6 +346,7 @@ fn open_checkpoint(cwd: &Path) -> (Option<Checkpoint>, String) {
 impl Session {
     /// Open (or create) the store and start a new session in it.
     pub fn create(db: &Path, cwd: &Path, title: &str) -> Result<Self> {
+        chorus_acp::env::repair_process_path();
         let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
         let store = Store::open(db).context("open store")?;
         let user = actor::intern(store.conn(), "user", "human")?;
@@ -369,6 +370,7 @@ impl Session {
 
     /// Reattach to an existing session in an existing store.
     pub fn open(db: &Path, session_id: i64) -> Result<Self> {
+        chorus_acp::env::repair_process_path();
         let store = Store::open(db).context("open store")?;
         let (cwd, exists): (String, bool) = store
             .conn()
