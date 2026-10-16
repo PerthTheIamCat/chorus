@@ -1,0 +1,14 @@
+{
+  "task_id": "rust-07-th",
+  "language": "th",
+  "domain": "rust",
+  "difficulty": "architectural",
+  "prompt_th": "ออกแบบและสร้าง abstraction trait StorageEngine พร้อม implement สำหรับ backend RocksDB และ In-Memory พร้อม atomic batch update",
+  "prompt_en": "Design and implement pluggable StorageEngine trait abstraction with RocksDB and In-Memory backends supporting atomic batch updates",
+  "test_command": "cargo test -p storage_engine test_engine_trait_contract",
+  "expected_files": [
+    "crates/storage/src/engine.rs",
+    "crates/storage/src/rocksdb.rs",
+    "crates/storage/src/memory.rs"
+  ]
+}

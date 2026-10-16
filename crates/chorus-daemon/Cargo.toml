@@ -1,0 +1,29 @@
+[package]
+name = "chorus-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "chorus_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "chorusd"
+path = "src/main.rs"
+
+[dependencies]
+chorus-core = { path = "../chorus-core" }
+chorus-cli = { path = "../chorus-cli" }
+chorus-acp = { path = "../chorus-acp" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+libc = "0.2"
+fastrand = "2"
+
+[dev-dependencies]
+tempfile.workspace = true

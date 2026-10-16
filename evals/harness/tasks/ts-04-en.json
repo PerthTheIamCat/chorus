@@ -1,0 +1,12 @@
+{
+  "task_id": "ts-04-en",
+  "language": "en",
+  "domain": "typescript",
+  "difficulty": "medium",
+  "prompt_th": "เพิ่ม optimistic update และ auto-rollback เมื่อ GraphQL mutation เกิด error ใน React hook useOptimisticMutation",
+  "prompt_en": "Implement optimistic update and auto-rollback upon GraphQL mutation errors in React hook useOptimisticMutation",
+  "test_command": "pnpm test test/hooks/useOptimisticMutation.test.ts",
+  "expected_files": [
+    "packages/client/src/hooks/useOptimisticMutation.ts"
+  ]
+}

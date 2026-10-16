@@ -21,6 +21,28 @@ fn mock_bridge() -> Vec<String> {
     ]
 }
 
+#[test]
+fn restrictive_policies_fail_closed_when_sandbox_is_disabled() {
+    const CHILD: &str = "CHORUS_TEST_DISABLED_SANDBOX_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "restrictive_policies_fail_closed_when_sandbox_is_disabled", "--nocapture"])
+            .env(CHILD, "1").env("CHORUS_SANDBOX", "off").status().unwrap();
+        assert!(status.success());
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("chorus-sandbox-disabled-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = Session::create(&dir.join("ledger.db"), &dir, "sandbox regression").unwrap()
+        .with_bridge(rogue_bridge("must-not-be-written"));
+    for policy in [Policy::DenyAll, Policy::ReadOnly] {
+        let err = s.run_turn("codex", "openai", "fixture", policy).err().expect("restrictive turn must fail");
+        assert!(err.to_string().contains("Cannot enforce read-only sandbox"), "{err}");
+        assert!(!dir.join("must-not-be-written").exists());
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A mock that writes `name` into the workspace mid-turn without asking.
 fn rogue_bridge(name: &str) -> Vec<String> {
     vec![
@@ -718,19 +740,19 @@ fn handoff_auto_carries_the_session_goal_with_no_argument_passed_in() {
 
 #[test]
 fn list_agents_always_returns_both_known_agents_and_never_panics() {
-    // CI has neither `claude` nor `codex` on PATH — assert on shape, not on
-    // this machine's actual auth state.
+    // Assert on shape, not on this machine's actual auth state.
     let agents = chorus_cli::agents::list_agents();
     assert_eq!(
         agents.len(),
-        2,
-        "expected both known agents, got {}",
+        3,
+        "expected all 3 known agents, got {}",
         agents.len()
     );
 
     let ids: Vec<&str> = agents.iter().map(|a| a.id.as_str()).collect();
     assert!(ids.contains(&"claude"));
     assert!(ids.contains(&"codex"));
+    assert!(ids.contains(&"antigravity"));
 
     for a in &agents {
         assert!(!a.label.is_empty());
@@ -832,7 +854,7 @@ fn doctor_reports_every_agent_without_touching_credentials() {
     // can run, so they share `agents::list_agents`. This asserts the shape the
     // doctor output is built from, on a machine with neither CLI installed.
     let agents = chorus_cli::agents::list_agents();
-    assert_eq!(agents.len(), 2, "both known agents must always be listed");
+    assert_eq!(agents.len(), 3, "all 3 known agents must always be listed");
     for a in &agents {
         assert!(!a.label.is_empty());
         assert!(!a.hint.is_empty(), "{} has no way to fix it", a.id);
@@ -875,7 +897,7 @@ impl Drop for ShortDir {
 /// writes files without ever sending one, so the guard has to be a check on the
 /// workspace afterwards, not a policy the agent is trusted to consult.
 #[test]
-fn a_read_only_turn_that_writes_is_reverted_and_reported() {
+fn a_read_only_turn_cannot_change_workspace_files() {
     let dir = ShortDir::new("readonly");
     let db = dir.path().join("s.db");
     let cwd = dir.path().join("w");
@@ -885,11 +907,11 @@ fn a_read_only_turn_that_writes_is_reverted_and_reported() {
     let mut s = Session::create(&db, &cwd, "no writes please").unwrap();
     s = s.with_bridge(rogue_bridge("SNUCK_IN.txt"));
 
-    let msg = match s.run_turn("codex", "openai", "อ่านอย่างเดียวนะ", Policy::ReadOnly) {
-        Err(e) => format!("{e:#}"),
-        Ok(_) => panic!("a write under --read-only must not be reported as success"),
-    };
-    assert!(msg.contains("SNUCK_IN.txt"), "the error must name the file: {msg}");
+    // The OS may prevent the write before the revert guard observes any change.
+    if let Err(e) = s.run_turn("codex", "openai", "อ่านอย่างเดียวนะ", Policy::ReadOnly) {
+        let msg = format!("{e:#}");
+        assert!(msg.contains("SNUCK_IN.txt") || msg.contains("Cannot enforce read-only sandbox"), "{msg}");
+    }
 
     assert!(!cwd.join("SNUCK_IN.txt").exists(), "the write was not reverted");
     assert_eq!(
@@ -961,7 +983,7 @@ fn a_bare_tool_result_never_reaches_the_context_but_a_failure_does() {
 /// The app's permission dialog has to mean something even when the agent
 /// never asks. A deny plus a write is the case that makes the dialog a lie.
 #[test]
-fn denying_in_the_dialog_undoes_what_the_agent_wrote_anyway() {
+fn denying_in_the_dialog_leaves_no_unauthorized_workspace_write() {
     let dir = ShortDir::new("dialog");
     let db = dir.path().join("s.db");
     let cwd = dir.path().join("w");
@@ -971,11 +993,10 @@ fn denying_in_the_dialog_undoes_what_the_agent_wrote_anyway() {
     s = s.with_bridge(rogue_bridge("BEHIND_YOUR_BACK.txt"));
 
     let mut say_no = |_: &chorus_cli::session::PermissionAsk| Permission::Deny;
-    let msg = match s.run_turn_decide("codex", "openai", "ห้ามเขียนนะ", &mut say_no) {
-        Err(e) => format!("{e:#}"),
-        Ok(_) => panic!("a write after a deny must not be reported as success"),
-    };
-    assert!(msg.contains("BEHIND_YOUR_BACK.txt"), "the error must name the file: {msg}");
+    if let Err(e) = s.run_turn_decide("codex", "openai", "ห้ามเขียนนะ", &mut say_no) {
+        let msg = format!("{e:#}");
+        assert!(msg.contains("BEHIND_YOUR_BACK.txt") || msg.contains("Cannot enforce read-only sandbox"), "{msg}");
+    }
     assert!(
         !cwd.join("BEHIND_YOUR_BACK.txt").exists(),
         "a write the user denied survived the turn"

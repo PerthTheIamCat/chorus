@@ -1,0 +1,14 @@
+{
+  "task_id": "ts-07-en",
+  "language": "en",
+  "domain": "typescript",
+  "difficulty": "architectural",
+  "prompt_th": "ออกแบบ multi-tenant RBAC policy engine พร้อม hierarchical role inheritance, dynamic attribute evaluation และ L1/L2 memory caching",
+  "prompt_en": "Design multi-tenant RBAC policy engine with hierarchical role inheritance, dynamic attribute evaluation, and L1/L2 memory caching",
+  "test_command": "pnpm test test/auth/rbacEngine.test.ts",
+  "expected_files": [
+    "packages/auth/src/policyEngine.ts",
+    "packages/auth/src/roleHierarchy.ts",
+    "packages/auth/src/tenantCache.ts"
+  ]
+}

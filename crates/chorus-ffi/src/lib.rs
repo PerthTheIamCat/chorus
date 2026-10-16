@@ -212,7 +212,7 @@ pub unsafe extern "C" fn chorus_route_json(
             .map_err(|e| format!("invalid candidates_json: {e}"))?;
         let router = Router::new(RouterConfig::local(model))
             .map_err(|e| format!("invalid router configuration: {e}"))?;
-        Ok::<_, String>(router.route(&task, &candidates))
+        Ok::<_, String>(router.route_with_fallback(&task, &candidates))
     })) {
         Ok(Ok(route)) => out(serde_json::json!({"ok":true,"route":route}).to_string()),
         Ok(Err(e)) => err(e),
@@ -255,6 +255,84 @@ pub unsafe extern "C" fn chorus_router_pull_json(model: *const c_char) -> *mut c
         Ok(Ok(())) => out("{\"ok\":true}".to_owned()),
         Ok(Err(error)) => err(error),
         Err(_) => err("panic in router model pull"),
+    }
+}
+
+/// List curated local models and their installation/disk status.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_model_manager_list_json() -> *mut c_char {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let mgr = chorus_core::model_manager::ModelManager::new();
+        let models: Vec<_> = chorus_core::model_manager::ModelManager::curated_models()
+            .into_iter()
+            .map(|spec| mgr.status(&spec))
+            .collect();
+        serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "models": models
+        }))
+    })) {
+        Ok(Ok(json)) => out(json),
+        Ok(Err(e)) => err(e.to_string()),
+        Err(_) => err("panic in model_manager_list"),
+    }
+}
+
+/// Finalize a downloaded temp file into Chorus local models storage.
+///
+/// # Safety
+/// `temp_path` and `model_id` must point to valid UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_model_manager_finalize_json(
+    temp_path: *const c_char,
+    model_id: *const c_char,
+) -> *mut c_char {
+    let Some(temp_path) = borrow(temp_path) else {
+        return err("temp_path must be valid UTF-8");
+    };
+    let Some(model_id) = borrow(model_id) else {
+        return err("model_id must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        let mgr = chorus_core::model_manager::ModelManager::new();
+        let spec = chorus_core::model_manager::ModelManager::find_spec(model_id)
+            .ok_or_else(|| chorus_core::error::ChorusError::Invalid(format!("unknown model id: {model_id}")))?;
+        let path = mgr.finalize_download(std::path::Path::new(temp_path), &spec)?;
+        Ok::<_, chorus_core::error::ChorusError>(serde_json::json!({
+            "ok": true,
+            "path": path.to_string_lossy().to_string()
+        }).to_string())
+    })) {
+        Ok(Ok(json)) => out(json),
+        Ok(Err(e)) => err(e.to_string()),
+        Err(_) => err("panic in model_manager_finalize"),
+    }
+}
+
+/// Delete a model file from disk to reclaim storage.
+///
+/// # Safety
+/// `model_id` must point to a valid UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_model_manager_delete_json(
+    model_id: *const c_char,
+) -> *mut c_char {
+    let Some(model_id) = borrow(model_id) else {
+        return err("model_id must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        let mgr = chorus_core::model_manager::ModelManager::new();
+        let spec = chorus_core::model_manager::ModelManager::find_spec(model_id)
+            .ok_or_else(|| chorus_core::error::ChorusError::Invalid(format!("unknown model id: {model_id}")))?;
+        let deleted = mgr.delete_model(&spec)?;
+        Ok::<_, chorus_core::error::ChorusError>(serde_json::json!({
+            "ok": true,
+            "deleted": deleted
+        }).to_string())
+    })) {
+        Ok(Ok(json)) => out(json),
+        Ok(Err(e)) => err(e.to_string()),
+        Err(_) => err("panic in model_manager_delete"),
     }
 }
 
@@ -738,6 +816,7 @@ struct EventJson {
     kind: &'static str,
     actor: String,
     body: String,
+    model_id: Option<String>,
 }
 
 /// The whole session so far as a JSON array of events.
@@ -764,11 +843,12 @@ pub unsafe extern "C" fn chorus_events_since(e: *const ChorusEngine, after: i64)
         Ok(Ok(rows)) => {
             let events: Vec<EventJson> = rows
                 .into_iter()
-                .map(|(seq, kind, actor, body)| EventJson {
+                .map(|(seq, kind, actor, body, model_id)| EventJson {
                     seq,
                     kind,
                     actor,
                     body,
+                    model_id,
                 })
                 .collect();
             out(serde_json::to_string(&events).unwrap())
@@ -985,7 +1065,7 @@ fn specs_from_csv(csv: &str) -> Vec<chorus_cli::session::AgentSpec> {
         .map(|name| {
             let provider = if name.contains("claude") {
                 "anthropic"
-            } else if name.contains("gemini") {
+            } else if name.contains("gemini") || name.contains("antigravity") || name.contains("agy") {
                 "google"
             } else {
                 "openai"
@@ -1022,8 +1102,8 @@ pub unsafe extern "C" fn chorus_run_relay(
         return err("agents/prompt must be valid UTF-8");
     };
     let specs = specs_from_csv(agents);
-    if specs.len() < 2 {
-        return err("relay needs at least two agents");
+    if specs.is_empty() {
+        return err("relay needs at least one agent");
     }
     let policy = Policy::from_level(allow);
 
@@ -1072,8 +1152,8 @@ pub unsafe extern "C" fn chorus_run_relay_with_attachments(
         Err(e) => return err(e),
     };
     let specs = specs_from_csv(agents);
-    if specs.len() < 2 {
-        return err("relay needs at least two agents");
+    if specs.is_empty() {
+        return err("relay needs at least one agent");
     }
     let policy = Policy::from_level(allow);
     match catch_unwind(AssertUnwindSafe(|| {
@@ -1479,7 +1559,9 @@ pub unsafe extern "C" fn chorus_set_model(
 
 /// Every skill an agent in this workspace could see, grouped by where it lives:
 /// `chorus` (`.chorus/skills`, projected to every agent), `project`
-/// (`.claude/skills`) and `user` (`~/.claude/skills`). Read-only.
+/// (`.claude/skills`, `.agents/skills`), and the user-global roots — `agents`
+/// (`~/.agents/skills`), `user` (`~/.claude/skills`), `codex`, `gemini`.
+/// See [`chorus_core::skills::visible_roots`]. Read-only.
 /// JSON: {"ok":true,"skills":[{"name","description","path","source"}]}
 ///
 /// # Safety
@@ -1490,24 +1572,16 @@ pub unsafe extern "C" fn chorus_list_skills(cwd: *const c_char) -> *mut c_char {
         return err("cwd must be valid UTF-8");
     };
     let r = catch_unwind(AssertUnwindSafe(|| {
-        let cwd = std::path::Path::new(cwd);
-        let mut roots = vec![
-            ("chorus", cwd.join(chorus_core::skills::SKILLS_DIR)),
-            ("project", cwd.join(chorus_core::skills::CLAUDE_SKILLS_DIR)),
-        ];
-        if let Some(home) = std::env::var_os("HOME") {
-            roots.push(("user", std::path::Path::new(&home).join(".claude/skills")));
-        }
-        let mut skills = Vec::new();
-        for (source, root) in roots {
-            for (name, description, dir) in chorus_core::skills::list_dir(&root) {
-                skills.push(serde_json::json!({
-                    "name": name, "description": description,
-                    "path": dir.join("SKILL.md").to_string_lossy(), "source": source,
-                }));
-            }
-        }
-        skills
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        chorus_core::skills::list_visible(std::path::Path::new(cwd), home.as_deref())
+            .into_iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name, "description": s.description,
+                    "path": s.dir.join("SKILL.md").to_string_lossy(), "source": s.source,
+                })
+            })
+            .collect::<Vec<_>>()
     }));
     match r {
         Ok(skills) => out(serde_json::json!({ "ok": true, "skills": skills }).to_string()),
@@ -1720,3 +1794,789 @@ pub unsafe extern "C" fn chorus_handoff_auto(
         Err(_) => err("panic in handoff_auto"),
     }
 }
+
+/// Build file tree for workspace with git statuses and agent focus marker.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_file_tree_json(
+    cwd: *const c_char,
+    focus_file: *const c_char,
+    max_depth: c_int,
+) -> *mut c_char {
+    let Some(cwd) = borrow(cwd) else { return err("cwd must be valid UTF-8"); };
+    let focus = borrow(focus_file);
+    let depth = if max_depth <= 0 { 6 } else { max_depth as usize };
+
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let tree = chorus_core::file_tree::build_file_tree(Path::new(cwd), focus, depth);
+        serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "tree": tree
+        })).unwrap()
+    }));
+
+    match r {
+        Ok(s) => out(s),
+        Err(_) => err("panic in file_tree_json"),
+    }
+}
+
+/// Compute Myers aligned diff with spacer lines for side-by-side or unified view.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_aligned_diff_json(
+    old_text: *const c_char,
+    new_text: *const c_char,
+    path: *const c_char,
+) -> *mut c_char {
+    let old_str = borrow(old_text).unwrap_or("");
+    let new_str = borrow(new_text).unwrap_or("");
+    let p = borrow(path).unwrap_or("file");
+
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let diff = chorus_core::diff_align::align_file_diff(p, old_str, new_str);
+        serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "diff": diff
+        })).unwrap()
+    }));
+
+    match r {
+        Ok(s) => out(s),
+        Err(_) => err("panic in aligned_diff_json"),
+    }
+}
+
+/// Add an inline review comment.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_add_review_comment(
+    e: *mut ChorusEngine,
+    path: *const c_char,
+    line: c_int,
+    comment: *const c_char,
+    snippet: *const c_char,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else { return err("null engine"); };
+    let Some(path) = borrow(path) else { return err("path must be valid UTF-8"); };
+    let Some(comment) = borrow(comment) else { return err("comment must be valid UTF-8"); };
+    let snippet = borrow(snippet);
+
+    let session_id = engine.session.session_id();
+    let conn = engine.session.store().conn();
+
+    match chorus_core::review::add_review_comment(
+        conn,
+        session_id,
+        path,
+        line as usize,
+        comment,
+        snippet,
+    ) {
+        Ok(id) => out(serde_json::json!({"ok": true, "id": id}).to_string()),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// List pending inline review comments for the current session.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_pending_review_comments(e: *mut ChorusEngine) -> *mut c_char {
+    let Some(engine) = e.as_mut() else { return err("null engine"); };
+    let session_id = engine.session.session_id();
+    let conn = engine.session.store().conn();
+
+    match chorus_core::review::list_pending_comments(conn, session_id) {
+        Ok(comments) => out(serde_json::json!({"ok": true, "comments": comments}).to_string()),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// Clear pending review comments for the current session.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_clear_review_comments(e: *mut ChorusEngine) -> *mut c_char {
+    let Some(engine) = e.as_mut() else { return err("null engine"); };
+    let session_id = engine.session.session_id();
+    let conn = engine.session.store().conn();
+
+    match chorus_core::review::clear_pending_comments(conn, session_id) {
+        Ok(_) => out(serde_json::json!({"ok": true}).to_string()),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// Generate agent steering prompt from pending review comments.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_review_steering_prompt(e: *mut ChorusEngine) -> *mut c_char {
+    let Some(engine) = e.as_mut() else { return err("null engine"); };
+    let session_id = engine.session.session_id();
+    let conn = engine.session.store().conn();
+
+    match chorus_core::review::list_pending_comments(conn, session_id) {
+        Ok(comments) => {
+            let prompt = chorus_core::review::generate_steering_prompt(&comments);
+            out(serde_json::json!({"ok": true, "prompt": prompt}).to_string())
+        }
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// Provision an isolated git worktree for an agent.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_create_worktree(
+    cwd: *const c_char,
+    role: *const c_char,
+) -> *mut c_char {
+    let Some(cwd) = borrow(cwd) else { return err("cwd must be valid UTF-8"); };
+    let role = borrow(role).unwrap_or("agent");
+
+    match chorus_core::worktrees::create_worktree(Path::new(cwd), role) {
+        Ok(info) => out(serde_json::json!({"ok": true, "worktree": info}).to_string()),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// List active git worktrees.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_list_worktrees(cwd: *const c_char) -> *mut c_char {
+    let Some(cwd) = borrow(cwd) else { return err("cwd must be valid UTF-8"); };
+
+    match chorus_core::worktrees::list_active_worktrees(Path::new(cwd)) {
+        Ok(worktrees) => out(serde_json::json!({"ok": true, "worktrees": worktrees}).to_string()),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// Merge a worktree branch into current workspace.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_merge_worktree(
+    cwd: *const c_char,
+    branch: *const c_char,
+) -> *mut c_char {
+    let Some(cwd) = borrow(cwd) else { return err("cwd must be valid UTF-8"); };
+    let Some(branch) = borrow(branch) else { return err("branch must be valid UTF-8"); };
+
+    match chorus_core::worktrees::merge_worktree(Path::new(cwd), branch) {
+        Ok(outcome) => out(serde_json::json!({"ok": true, "outcome": outcome}).to_string()),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// Discard and delete an active worktree.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_remove_worktree(
+    cwd: *const c_char,
+    branch: *const c_char,
+) -> *mut c_char {
+    let Some(cwd) = borrow(cwd) else { return err("cwd must be valid UTF-8"); };
+    let Some(branch) = borrow(branch) else { return err("branch must be valid UTF-8"); };
+
+    match chorus_core::worktrees::discard_worktree_by_branch(Path::new(cwd), branch) {
+        Ok(()) => out(serde_json::json!({"ok": true}).to_string()),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// The total monetary cost of a session in USD.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_session_cost_usd(
+    db_path: *const c_char,
+    session_id: i64,
+) -> f64 {
+    let Some(db) = borrow(db_path) else { return 0.0; };
+    let Ok(store) = chorus_core::Store::open(Path::new(db)) else { return 0.0; };
+    chorus_core::ledger::session_cost_usd(store.conn(), session_id).unwrap_or(0.0)
+}
+
+fn open_router_store(db_path: Option<&str>) -> std::result::Result<chorus_core::Store, String> {
+    let resolved = if let Some(p) = db_path.filter(|p| !p.trim().is_empty()) {
+        let path = std::path::PathBuf::from(p);
+        if path.is_file() || path.extension().is_some_and(|ext| ext == "db") {
+            path
+        } else {
+            path.join(".chorus/store.db")
+        }
+    } else {
+        std::env::var_os("HOME")
+            .map(|h| std::path::PathBuf::from(h).join(".chorus/store.db"))
+            .ok_or_else(|| "HOME environment variable not set".to_string())?
+    };
+
+    if let Some(parent) = resolved.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    chorus_core::Store::open(&resolved).map_err(|e| format!("{e:#}"))
+}
+
+/// Instant in-process fast routing decision (<5ms) with learned memory lookup.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_route_fast_json(prompt: *const c_char) -> *mut c_char {
+    let p = borrow(prompt).unwrap_or("");
+    let store = open_router_store(None).ok();
+    let conn = store.as_ref().map(|s| s.conn());
+    let decision = chorus_core::local_router::route_task_fast_with_db(conn, p, &[]);
+    out(serde_json::json!({"ok": true, "decision": decision}).to_string())
+}
+
+/// List routes learned by the router flywheel.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_router_list_learned_json(db_path: *const c_char) -> *mut c_char {
+    let path = borrow(db_path);
+    let store = match open_router_store(path) {
+        Ok(s) => s,
+        Err(e) => return err(e),
+    };
+
+    match chorus_core::local_router::list_learned_routes(store.conn(), 50) {
+        Ok(routes) => out(serde_json::json!({ "ok": true, "routes": routes }).to_string()),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// Record a route decision / user choice into the learning flywheel.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_router_record_learned_json(
+    db_path: *const c_char,
+    prompt: *const c_char,
+    model: *const c_char,
+    agent: *const c_char,
+    reason: *const c_char,
+) -> *mut c_char {
+    let path = borrow(db_path);
+    let p = borrow(prompt).unwrap_or("");
+    let m = borrow(model).unwrap_or("");
+    let a = borrow(agent).unwrap_or("");
+    let r = borrow(reason).unwrap_or("");
+
+    let store = match open_router_store(path) {
+        Ok(s) => s,
+        Err(e) => return err(e),
+    };
+
+    match chorus_core::local_router::record_route_learning(store.conn(), p, m, a, r) {
+        Ok(item) => out(serde_json::json!({ "ok": true, "route": item }).to_string()),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// Clear all learned route history.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_router_clear_learned_json(db_path: *const c_char) -> *mut c_char {
+    let path = borrow(db_path);
+    let store = match open_router_store(path) {
+        Ok(s) => s,
+        Err(e) => return err(e),
+    };
+
+    match chorus_core::local_router::clear_learned_routes(store.conn()) {
+        Ok(()) => out(serde_json::json!({ "ok": true }).to_string()),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// Search sessions using SQLite FTS5 / LIKE search.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_search_sessions_json(
+    db_path: *const c_char,
+    query: *const c_char,
+) -> *mut c_char {
+    let Some(db_path) = borrow(db_path) else { return err("db_path must be valid UTF-8"); };
+    let q = borrow(query).unwrap_or("");
+
+    let store = match chorus_core::Store::open(Path::new(db_path)) {
+        Ok(s) => s,
+        Err(e) => return err(format!("{e:#}")),
+    };
+
+    match chorus_core::search::search_sessions(store.conn(), q, 30) {
+        Ok(hits) => out(serde_json::json!({"ok": true, "hits": hits}).to_string()),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// Export session to Markdown.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_export_session_md(
+    db_path: *const c_char,
+    session_id: i64,
+) -> *mut c_char {
+    let Some(db_path) = borrow(db_path) else { return err("db_path must be valid UTF-8"); };
+
+    let store = match chorus_core::Store::open(Path::new(db_path)) {
+        Ok(s) => s,
+        Err(e) => return err(format!("{e:#}")),
+    };
+
+    match chorus_core::search::export_session_markdown(store.conn(), session_id) {
+        Ok(md) => out(serde_json::json!({"ok": true, "markdown": md}).to_string()),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// List available agent roles (built-in + .chorus/agents/*.md).
+#[no_mangle]
+pub unsafe extern "C" fn chorus_list_roles(cwd: *const c_char) -> *mut c_char {
+    let Some(cwd) = borrow(cwd) else { return err("cwd must be valid UTF-8"); };
+    let roles = chorus_core::roles::load_roles(Path::new(cwd));
+    out(serde_json::json!({"ok": true, "roles": roles}).to_string())
+}
+
+/// Save an agent role definition to .chorus/agents/<name>.md.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_save_role(
+    cwd: *const c_char,
+    role_json: *const c_char,
+) -> *mut c_char {
+    let Some(cwd) = borrow(cwd) else { return err("cwd must be valid UTF-8"); };
+    let Some(rj) = borrow(role_json) else { return err("role_json must be valid UTF-8"); };
+
+    let role: chorus_core::roles::AgentRole = match serde_json::from_str(rj) {
+        Ok(r) => r,
+        Err(e) => return err(format!("invalid role JSON: {e}")),
+    };
+
+    match role.save_to_dir(Path::new(cwd)) {
+        Ok(path) => out(serde_json::json!({
+            "ok": true,
+            "path": path.to_string_lossy(),
+            "name": role.name
+        }).to_string()),
+        Err(e) => err(format!("failed to save role: {e}")),
+    }
+}
+
+/// Delete a custom agent role from .chorus/agents/<name>.md.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_delete_role(
+    cwd: *const c_char,
+    name: *const c_char,
+) -> *mut c_char {
+    let Some(cwd) = borrow(cwd) else { return err("cwd must be valid UTF-8"); };
+    let Some(name) = borrow(name) else { return err("name must be valid UTF-8"); };
+
+    let file_path = Path::new(cwd)
+        .join(chorus_core::roles::AGENTS_DIR)
+        .join(format!("{name}.md"));
+
+    if file_path.exists() {
+        if let Err(e) = std::fs::remove_file(&file_path) {
+            return err(format!("failed to delete role file: {e}"));
+        }
+    }
+    out(serde_json::json!({"ok": true}).to_string())
+}
+
+/// Synthesize an agent role via AI heuristic / generator.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_synthesize_role(
+    task: *const c_char,
+    write_mode: bool,
+    name_hint: *const c_char,
+) -> *mut c_char {
+    let Some(task) = borrow(task) else { return err("task must be valid UTF-8"); };
+    let hint = borrow(name_hint).filter(|s| !s.is_empty());
+
+    let role = chorus_core::roles::synthesize_role(task, write_mode, hint);
+    out(serde_json::json!({"ok": true, "role": role}).to_string())
+}
+
+/// List all turn checkpoints for a session.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_checkpoint_list_json(
+    db: *const c_char,
+    session_id: i64,
+) -> *mut c_char {
+    let Some(db_path) = borrow(db) else { return err("db must be valid UTF-8"); };
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
+        let store = chorus_core::Store::open(Path::new(db_path)).map_err(|e| e.to_string())?;
+        let records = chorus_core::checkpoint_dag::CheckpointDag::list_turn_checkpoints(&store, session_id)
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::to_value(records).map_err(|e| e.to_string())?)
+    }));
+
+    match result {
+        Ok(Ok(val)) => out(serde_json::json!({"ok": true, "checkpoints": val}).to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in checkpoint list"),
+    }
+}
+
+/// Time-travel rewind across code and/or ledger history.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_checkpoint_rewind_json(
+    db: *const c_char,
+    ws: *const c_char,
+    session_id: i64,
+    target_seq: i64,
+    mode: *const c_char,
+) -> *mut c_char {
+    let Some(db_path) = borrow(db) else { return err("db must be valid UTF-8"); };
+    let Some(ws_path) = borrow(ws) else { return err("ws must be valid UTF-8"); };
+    let mode_str = borrow(mode).unwrap_or("code_and_ledger");
+
+    let rewind_mode = match mode_str {
+        "code_only" => chorus_core::checkpoint_dag::RewindMode::CodeOnly,
+        "ledger_only" => chorus_core::checkpoint_dag::RewindMode::LedgerOnly,
+        _ => chorus_core::checkpoint_dag::RewindMode::CodeAndLedger,
+    };
+
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
+        let store = chorus_core::Store::open(Path::new(db_path)).map_err(|e| e.to_string())?;
+        let ckpt = chorus_core::checkpoint::Checkpoint::open(Path::new(ws_path)).map_err(|e| e.to_string())?;
+        let summary = chorus_core::checkpoint_dag::CheckpointDag::rewind_to_seq(
+            &store,
+            &ckpt,
+            session_id,
+            target_seq,
+            rewind_mode,
+        ).map_err(|e| e.to_string())?;
+        Ok(serde_json::to_value(summary).map_err(|e| e.to_string())?)
+    }));
+
+    match result {
+        Ok(Ok(val)) => out(serde_json::json!({"ok": true, "summary": val}).to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in checkpoint rewind"),
+    }
+}
+
+/// Generate a high-density Repo Map using Personalized PageRank in Rust.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_repo_map_generate_json(
+    ws: *const c_char,
+    max_tokens: u32,
+) -> *mut c_char {
+    let Some(ws_path) = borrow(ws) else { return err("ws must be valid UTF-8"); };
+    let path = Path::new(ws_path);
+
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
+        // Collect candidate source files
+        let mut files = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+                    if matches!(ext, "rs" | "swift" | "ts" | "tsx" | "js" | "py" | "go") {
+                        files.push(p);
+                    }
+                }
+            }
+        }
+
+        let graph = chorus_core::repo_map::RepoMapEngine::build_graph(path, &files).map_err(|e| e.to_string())?;
+        let ranks = chorus_core::repo_map::RepoMapEngine::compute_ppr(&graph, &[], 0.85, 25);
+        let map_str = chorus_core::repo_map::RepoMapEngine::render_repo_map(&graph, &ranks, path, max_tokens as usize);
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "symbols_count": graph.definitions.len(),
+            "repo_map": map_str
+        }))
+    }));
+
+    match result {
+        Ok(Ok(val)) => out(val.to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in repo map generation"),
+    }
+}
+
+/// Verify workspace via fast linter/compiler checks.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_verify_workspace_json(ws: *const c_char) -> *mut c_char {
+    let Some(ws_path) = borrow(ws) else { return err("ws must be valid UTF-8"); };
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
+        let res = chorus_core::verify_loop::VerifyLoop::verify_workspace(Path::new(ws_path)).map_err(|e| e.to_string())?;
+        Ok(serde_json::to_value(res).map_err(|e| e.to_string())?)
+    }));
+
+    match result {
+        Ok(Ok(val)) => out(serde_json::json!({"ok": true, "verification": val}).to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in verify workspace"),
+    }
+}
+
+/// Structural AST diff analysis to evaluate semantic vs cosmetic line changes.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_structural_diff_json(
+    old_code: *const c_char,
+    new_code: *const c_char,
+) -> *mut c_char {
+    let old_s = borrow(old_code).unwrap_or("");
+    let new_s = borrow(new_code).unwrap_or("");
+
+    let analysis = chorus_core::structural_diff::StructuralDiff::analyze(old_s, new_s);
+    out(serde_json::json!({"ok": true, "analysis": analysis}).to_string())
+}
+
+static LOCAL_PAIRING: std::sync::OnceLock<chorus_daemon::pairing::PairingManager> = std::sync::OnceLock::new();
+
+fn get_local_pairing() -> &'static chorus_daemon::pairing::PairingManager {
+    LOCAL_PAIRING.get_or_init(|| {
+        let endpoint = format!("http://{}", chorus_daemon::config::DEFAULT_HTTP_ADDR);
+        chorus_daemon::pairing::PairingManager::new().with_endpoint(Some(endpoint))
+    })
+}
+
+/// Initiate a pairing session. First queries the running daemon over the Unix domain socket;
+/// falls back to local in-process pairing manager if daemon is offline.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_pairing_initiate_json() -> *mut c_char {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
+        let sock_path = chorus_daemon::config::default_chorus_dir()
+            .join(chorus_daemon::config::DEFAULT_SOCKET_NAME);
+        if sock_path.exists() {
+            let client = chorus_daemon::client::DaemonClient::from_uds(&sock_path);
+            if let Ok(session) = client.initiate_pairing() {
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "session": session,
+                }));
+            }
+        }
+        let mgr = get_local_pairing();
+        let session = mgr.initiate_host_session().map_err(|e: chorus_daemon::DaemonError| e.to_string())?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "session": session,
+        }))
+    }));
+    match result {
+        Ok(Ok(val)) => out(val.to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in pairing initiate"),
+    }
+}
+
+/// List paired devices. First queries daemon over UDS, falls back to local in-process pairing manager.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_pairing_devices_json() -> *mut c_char {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
+        let sock_path = chorus_daemon::config::default_chorus_dir()
+            .join(chorus_daemon::config::DEFAULT_SOCKET_NAME);
+        if sock_path.exists() {
+            let client = chorus_daemon::client::DaemonClient::from_uds(&sock_path);
+            if let Ok(devices) = client.list_paired_devices() {
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "devices": devices,
+                }));
+            }
+        }
+        let mgr = get_local_pairing();
+        let devs: Vec<_> = mgr
+            .list_devices()
+            .iter()
+            .map(|dev| {
+                serde_json::json!({
+                    "device_id": dev.device_id,
+                    "device_name": dev.device_name,
+                    "paired_at": dev.paired_at,
+                    "last_seen_at": dev.last_seen_at,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "ok": true,
+            "devices": devs,
+        }))
+    }));
+    match result {
+        Ok(Ok(val)) => out(val.to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in pairing devices"),
+    }
+}
+
+/// Revoke a paired device by ID.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_pairing_revoke_json(device_id: *const c_char) -> *mut c_char {
+    let Some(id) = borrow(device_id) else {
+        return err("device_id must be valid UTF-8");
+    };
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
+        let sock_path = chorus_daemon::config::default_chorus_dir()
+            .join(chorus_daemon::config::DEFAULT_SOCKET_NAME);
+        if sock_path.exists() {
+            let client = chorus_daemon::client::DaemonClient::from_uds(&sock_path);
+            if let Ok(ok) = client.revoke_paired_device(id) {
+                return Ok(serde_json::json!({
+                    "ok": ok,
+                }));
+            }
+        }
+        let mgr = get_local_pairing();
+        let ok = mgr.revoke_device(id);
+        Ok(serde_json::json!({
+            "ok": ok,
+        }))
+    }));
+    match result {
+        Ok(Ok(val)) => out(val.to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in pairing revoke"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::{CStr, CString};
+
+    #[test]
+    fn ffi_roles_lifecycle() {
+        let temp_dir = std::env::temp_dir().join(format!("chorus-ffi-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let cwd = CString::new(temp_dir.to_str().unwrap()).unwrap();
+
+        // 1. Synthesize role
+        let task = CString::new("Audit PostgreSQL migrations and index efficiency").unwrap();
+        let hint = CString::new("db-optimizer").unwrap();
+        let synth_ptr = unsafe { chorus_synthesize_role(task.as_ptr(), true, hint.as_ptr()) };
+        let synth_str = unsafe { CStr::from_ptr(synth_ptr).to_str().unwrap() };
+        let synth_json: serde_json::Value = serde_json::from_str(synth_str).unwrap();
+        assert!(synth_json["ok"].as_bool().unwrap());
+        let role = synth_json["role"].clone();
+        assert_eq!(role["name"].as_str().unwrap(), "db-optimizer");
+        unsafe { chorus_string_free(synth_ptr) };
+
+        // 2. Save role
+        let role_json = CString::new(role.to_string()).unwrap();
+        let save_ptr = unsafe { chorus_save_role(cwd.as_ptr(), role_json.as_ptr()) };
+        let save_str = unsafe { CStr::from_ptr(save_ptr).to_str().unwrap() };
+        let save_json: serde_json::Value = serde_json::from_str(save_str).unwrap();
+        assert!(save_json["ok"].as_bool().unwrap());
+        unsafe { chorus_string_free(save_ptr) };
+
+        // 3. List roles
+        let list_ptr = unsafe { chorus_list_roles(cwd.as_ptr()) };
+        let list_str = unsafe { CStr::from_ptr(list_ptr).to_str().unwrap() };
+        let list_json: serde_json::Value = serde_json::from_str(list_str).unwrap();
+        assert!(list_json["ok"].as_bool().unwrap());
+        let roles = list_json["roles"].as_array().unwrap();
+        assert!(roles.iter().any(|r| r["name"].as_str() == Some("db-optimizer")));
+        unsafe { chorus_string_free(list_ptr) };
+
+        // 4. Delete role
+        let del_ptr = unsafe { chorus_delete_role(cwd.as_ptr(), hint.as_ptr()) };
+        let del_str = unsafe { CStr::from_ptr(del_ptr).to_str().unwrap() };
+        let del_json: serde_json::Value = serde_json::from_str(del_str).unwrap();
+        assert!(del_json["ok"].as_bool().unwrap());
+        unsafe { chorus_string_free(del_ptr) };
+
+        // 5. Verify deleted from list
+        let list_ptr2 = unsafe { chorus_list_roles(cwd.as_ptr()) };
+        let list_str2 = unsafe { CStr::from_ptr(list_ptr2).to_str().unwrap() };
+        let list_json2: serde_json::Value = serde_json::from_str(list_str2).unwrap();
+        let roles2 = list_json2["roles"].as_array().unwrap();
+        assert!(!roles2.iter().any(|r| r["name"].as_str() == Some("db-optimizer")));
+        unsafe { chorus_string_free(list_ptr2) };
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn ffi_usage_report_antigravity() {
+        let ptr = chorus_usage_report();
+        assert!(!ptr.is_null());
+        let s = unsafe { CStr::from_ptr(ptr).to_str().unwrap() };
+        let json: serde_json::Value = serde_json::from_str(s).unwrap();
+        assert!(json["ok"].as_bool().unwrap());
+        let accounts = json["accounts"].as_array().unwrap();
+        let anti = accounts.iter().find(|a| a["agent"] == "antigravity");
+        assert!(anti.is_some());
+        let anti_obj = anti.unwrap();
+        println!("FFI Antigravity account JSON: {}", anti_obj);
+        assert!(anti_obj["rate_limits"].is_object());
+        assert!(anti_obj["rate_limits"]["secondary"].is_object());
+        assert!(anti_obj["rate_limits"]["groups"].is_array());
+        unsafe { chorus_string_free(ptr) };
+    }
+
+    #[test]
+    fn ffi_router_learning_lifecycle() {
+        let temp_dir = std::env::temp_dir().join(format!("chorus-router-test-{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir.join("store.db");
+        let db_c = CString::new(db_path.to_str().unwrap()).unwrap();
+        let prompt_c = CString::new("เขียน SwiftUI Animated Transition").unwrap();
+        let model_c = CString::new("claude-sonnet-4-6").unwrap();
+        let agent_c = CString::new("claude").unwrap();
+        let reason_c = CString::new("งานเกี่ยวกับ UI แนะนำ Sonnet").unwrap();
+
+        // 1. Record
+        let rec_ptr = unsafe {
+            chorus_router_record_learned_json(
+                db_c.as_ptr(),
+                prompt_c.as_ptr(),
+                model_c.as_ptr(),
+                agent_c.as_ptr(),
+                reason_c.as_ptr(),
+            )
+        };
+        assert!(!rec_ptr.is_null());
+        let rec_str = unsafe { CStr::from_ptr(rec_ptr).to_str().unwrap() };
+        let rec_json: serde_json::Value = serde_json::from_str(rec_str).unwrap();
+        assert!(rec_json["ok"].as_bool().unwrap());
+        unsafe { chorus_string_free(rec_ptr) };
+
+        // 2. List
+        let list_ptr = unsafe { chorus_router_list_learned_json(db_c.as_ptr()) };
+        assert!(!list_ptr.is_null());
+        let list_str = unsafe { CStr::from_ptr(list_ptr).to_str().unwrap() };
+        let list_json: serde_json::Value = serde_json::from_str(list_str).unwrap();
+        assert!(list_json["ok"].as_bool().unwrap());
+        let routes = list_json["routes"].as_array().unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0]["chosen_model"].as_str().unwrap(), "claude-sonnet-4-6");
+        unsafe { chorus_string_free(list_ptr) };
+
+        // 3. Clear
+        let clear_ptr = unsafe { chorus_router_clear_learned_json(db_c.as_ptr()) };
+        assert!(!clear_ptr.is_null());
+        let clear_str = unsafe { CStr::from_ptr(clear_ptr).to_str().unwrap() };
+        let clear_json: serde_json::Value = serde_json::from_str(clear_str).unwrap();
+        assert!(clear_json["ok"].as_bool().unwrap());
+        unsafe { chorus_string_free(clear_ptr) };
+
+        // 4. Verify list is empty
+        let list_ptr2 = unsafe { chorus_router_list_learned_json(db_c.as_ptr()) };
+        let list_str2 = unsafe { CStr::from_ptr(list_ptr2).to_str().unwrap() };
+        let list_json2: serde_json::Value = serde_json::from_str(list_str2).unwrap();
+        assert_eq!(list_json2["routes"].as_array().unwrap().len(), 0);
+        unsafe { chorus_string_free(list_ptr2) };
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn ffi_pairing_lifecycle() {
+        // 1. Initiate pairing
+        let init_ptr = unsafe { chorus_pairing_initiate_json() };
+        assert!(!init_ptr.is_null());
+        let init_str = unsafe { CStr::from_ptr(init_ptr).to_str().unwrap() };
+        let init_json: serde_json::Value = serde_json::from_str(init_str).unwrap();
+        assert!(init_json["ok"].as_bool().unwrap(), "pairing initiate failed: {init_str}");
+        let session = &init_json["session"];
+        assert!(!session["pairing_token"].as_str().unwrap().is_empty());
+        assert!(!session["endpoint_url"].as_str().unwrap().is_empty());
+        unsafe { chorus_string_free(init_ptr) };
+
+        // 2. List devices
+        let dev_ptr = unsafe { chorus_pairing_devices_json() };
+        assert!(!dev_ptr.is_null());
+        let dev_str = unsafe { CStr::from_ptr(dev_ptr).to_str().unwrap() };
+        let dev_json: serde_json::Value = serde_json::from_str(dev_str).unwrap();
+        assert!(dev_json["ok"].as_bool().unwrap());
+        unsafe { chorus_string_free(dev_ptr) };
+
+        // 3. Revoke nonexistent device returns false
+        let fake_id = CString::new("fake-device-123").unwrap();
+        let rev_ptr = unsafe { chorus_pairing_revoke_json(fake_id.as_ptr()) };
+        assert!(!rev_ptr.is_null());
+        let rev_str = unsafe { CStr::from_ptr(rev_ptr).to_str().unwrap() };
+        let rev_json: serde_json::Value = serde_json::from_str(rev_str).unwrap();
+        assert!(!rev_json["ok"].as_bool().unwrap());
+        unsafe { chorus_string_free(rev_ptr) };
+    }
+}
+
+

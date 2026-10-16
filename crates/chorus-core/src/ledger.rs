@@ -35,6 +35,7 @@ fn row_to_event(row: &Row) -> rusqlite::Result<Event> {
         tok_in: row.get("tok_in")?,
         tok_out: row.get("tok_out")?,
         cost_usd: row.get("cost_usd")?,
+        model_id: row.get("model_id")?,
     })
 }
 
@@ -70,8 +71,8 @@ pub fn append(c: &Connection, e: &NewEvent) -> Result<i64> {
     };
 
     c.execute(
-        "INSERT INTO event(t, sess, parent, kind, actor, body, blob, tok_in, tok_out, cost_usd)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO event(t, sess, parent, kind, actor, body, blob, tok_in, tok_out, cost_usd, model_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         rusqlite::params![
             t,
             e.sess,
@@ -83,6 +84,7 @@ pub fn append(c: &Connection, e: &NewEvent) -> Result<i64> {
             e.tok_in,
             e.tok_out,
             e.cost_usd,
+            e.model_id,
         ],
     )?;
 
@@ -92,7 +94,7 @@ pub fn append(c: &Connection, e: &NewEvent) -> Result<i64> {
 /// Fetch a single event by its `seq`.
 pub fn get(c: &Connection, seq: i64) -> Result<Event> {
     c.query_row(
-        "SELECT seq, t, sess, parent, kind, actor, body, blob, tok_in, tok_out, cost_usd
+        "SELECT seq, t, sess, parent, kind, actor, body, blob, tok_in, tok_out, cost_usd, model_id
          FROM event WHERE seq = ?1",
         [seq],
         row_to_event,
@@ -115,7 +117,7 @@ pub fn body(c: &Connection, e: &Event) -> Result<String> {
 /// The last `n` events of a session, in chronological (ascending `seq`) order.
 pub fn tail(c: &Connection, sess: i64, n: usize) -> Result<Vec<Event>> {
     let mut stmt = c.prepare(
-        "SELECT seq, t, sess, parent, kind, actor, body, blob, tok_in, tok_out, cost_usd
+        "SELECT seq, t, sess, parent, kind, actor, body, blob, tok_in, tok_out, cost_usd, model_id
          FROM event WHERE sess = ?1 ORDER BY seq DESC LIMIT ?2",
     )?;
     let mut rows: Vec<Event> = stmt
@@ -162,12 +164,12 @@ fn collect_history(
 
     let (sql, cap) = match up_to_seq {
         Some(seq) => (
-            "SELECT seq, t, sess, parent, kind, actor, body, blob, tok_in, tok_out, cost_usd
+            "SELECT seq, t, sess, parent, kind, actor, body, blob, tok_in, tok_out, cost_usd, model_id
              FROM event WHERE sess = ?1 AND seq <= ?2 ORDER BY seq",
             seq,
         ),
         None => (
-            "SELECT seq, t, sess, parent, kind, actor, body, blob, tok_in, tok_out, cost_usd
+            "SELECT seq, t, sess, parent, kind, actor, body, blob, tok_in, tok_out, cost_usd, model_id
              FROM event WHERE sess = ?1 AND ?2 >= 0 ORDER BY seq",
             i64::MAX,
         ),
@@ -255,7 +257,7 @@ pub fn delete_session(c: &Connection, sess: i64) -> Result<()> {
 /// available, and falls back to a `LIKE` scan otherwise (e.g. this sqlite
 /// build lacks FTS5).
 pub fn search(c: &Connection, q: &str, limit: usize) -> Result<Vec<Event>> {
-    let fts_sql = "SELECT e.seq, e.t, e.sess, e.parent, e.kind, e.actor, e.body, e.blob, e.tok_in, e.tok_out, e.cost_usd
+    let fts_sql = "SELECT e.seq, e.t, e.sess, e.parent, e.kind, e.actor, e.body, e.blob, e.tok_in, e.tok_out, e.cost_usd, e.model_id
          FROM ev_fts JOIN event e ON e.seq = ev_fts.rowid
          WHERE ev_fts MATCH ?1 ORDER BY e.seq DESC LIMIT ?2";
 
@@ -271,7 +273,7 @@ pub fn search(c: &Connection, q: &str, limit: usize) -> Result<Vec<Event>> {
             // fall back to a plain substring scan.
             let like = format!("%{q}%");
             let mut stmt = c.prepare(
-                "SELECT seq, t, sess, parent, kind, actor, body, blob, tok_in, tok_out, cost_usd
+                "SELECT seq, t, sess, parent, kind, actor, body, blob, tok_in, tok_out, cost_usd, model_id
                  FROM event WHERE body LIKE ?1 ORDER BY seq DESC LIMIT ?2",
             )?;
             let rows = stmt
@@ -280,4 +282,33 @@ pub fn search(c: &Connection, q: &str, limit: usize) -> Result<Vec<Event>> {
             Ok(rows)
         }
     }
+}
+
+/// The total monetary cost of a session in USD, calculating from stored cost_usd
+/// or falling back to token accounting for each event.
+pub fn session_cost_usd(c: &Connection, sess: i64) -> Result<f64> {
+    let mut stmt = c.prepare(
+        "SELECT tok_in, tok_out, cost_usd, model_id, actor FROM event WHERE sess = ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![sess], |r| {
+        let tok_in: Option<i64> = r.get(0)?;
+        let tok_out: Option<i64> = r.get(1)?;
+        let cost_usd: Option<f64> = r.get(2)?;
+        let model_id: Option<String> = r.get(3)?;
+        let actor: Option<String> = r.get(4)?;
+        Ok((tok_in, tok_out, cost_usd, model_id, actor))
+    })?;
+
+    let mut total = 0.0;
+    for row in rows {
+        let (tok_in, tok_out, cost_usd, model_id, actor) = row?;
+        if let Some(c) = cost_usd {
+            total += c;
+        } else if let (Some(tin), Some(tout)) = (tok_in, tok_out) {
+            let model = model_id.as_deref().or(actor.as_deref()).unwrap_or("default");
+            let acct = crate::local_router::calculate_cost(model, tin as usize, tout as usize);
+            total += acct.cost_usd;
+        }
+    }
+    Ok(total)
 }

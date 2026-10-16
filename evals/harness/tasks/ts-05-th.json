@@ -1,0 +1,13 @@
+{
+  "task_id": "ts-05-th",
+  "language": "th",
+  "domain": "typescript",
+  "difficulty": "hard",
+  "prompt_th": "แก้ปัญหา WebSocket reconnect race condition ที่ทำให้เกิด duplicate event processing ด้วย idempotency sequence tracking",
+  "prompt_en": "Fix WebSocket reconnect race condition causing duplicate event processing using idempotency sequence tracking",
+  "test_command": "pnpm test test/realtime/reconnect.test.ts",
+  "expected_files": [
+    "packages/realtime/src/connection.ts",
+    "packages/realtime/src/replayBuffer.ts"
+  ]
+}

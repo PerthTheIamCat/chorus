@@ -1,0 +1,12 @@
+{
+  "task_id": "rust-02-en",
+  "language": "en",
+  "domain": "rust",
+  "difficulty": "trivial",
+  "prompt_th": "เพิ่ม derive Clone, Eq, PartialEq ให้กับ struct SessionToken ในโมดูล token",
+  "prompt_en": "Add derive Clone, Eq, PartialEq to struct SessionToken in the token module",
+  "test_command": "cargo test -p auth_service test_session_token_traits",
+  "expected_files": [
+    "crates/auth/src/token.rs"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "task_id": "ts-06-en",
+  "language": "en",
+  "domain": "typescript",
+  "difficulty": "hard",
+  "prompt_th": "แก้ปัญหา N+1 queries ใน order item repository โดยแปลงเป็น DataLoader batch query พร้อม cache key normalization",
+  "prompt_en": "Eliminate N+1 database queries in order item repository by converting to DataLoader batch queries with normalized cache keys",
+  "test_command": "pnpm test test/repos/orderRepository.test.ts",
+  "expected_files": [
+    "packages/api/src/repositories/orderRepo.ts",
+    "packages/api/src/loaders/orderLoader.ts"
+  ]
+}

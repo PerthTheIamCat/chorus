@@ -1,0 +1,27 @@
+[package]
+name = "chorus-eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "chorus_eval"
+path = "src/lib.rs"
+
+[[bin]]
+name = "chorus-eval"
+path = "src/main.rs"
+
+[dependencies]
+chorus-core = { path = "../chorus-core" }
+chorus-cli = { path = "../chorus-cli" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+

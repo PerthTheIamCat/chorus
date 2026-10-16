@@ -202,18 +202,25 @@ struct CatalogView: View {
         .onChange(of: requestedInstall) { _, _ in openRequestedInstall() }
         .sheet(item: $requestedAction) { request in
             if let entry = entries.first(where: { $0.id == request.entryID }) {
-                InstallSheet(entry: entry, projectName: projectName, kind: request.kind,
-                             result: actionResult, progress: progress,
-                             loadPlan: onLoadPlan,
-                             onDismiss: { requestedAction = nil },
-                             onConfirm: {
-                                 dismissedResultID = nil
-                                 switch request.kind {
-                                 case .install: onInstall(entry.id)
-                                 case .update: onUpdate(entry.id)
-                                 case .remove: onRemove(entry.id)
-                                 }
-                             })
+                InstallSheet(
+                    entry: entry,
+                    projectName: projectName,
+                    kind: request.kind,
+                    result: actionResult,
+                    progress: progress,
+                    loadPlan: onLoadPlan,
+                    onDismiss: { requestedAction = nil },
+                    onConfirm: {
+                        dismissedResultID = nil
+                        switch request.kind {
+                        case .install: onInstall(entry.id)
+                        case .update: onUpdate(entry.id)
+                        case .remove: onRemove(entry.id)
+                        }
+                    }
+                )
+                .padding(20)
+                .frame(minWidth: 420, maxWidth: 500)
             }
         }
     }
@@ -283,6 +290,7 @@ private struct IntegrationCard: View {
             actionButton
         }
         .padding(12)
+        .frame(minHeight: 56)
         .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)

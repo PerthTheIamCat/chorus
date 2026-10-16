@@ -1,0 +1,12 @@
+{
+  "task_id": "swift-03-en",
+  "language": "en",
+  "domain": "swift",
+  "difficulty": "medium",
+  "prompt_th": "ทำ animation พับเก็บและคลี่แถว diff chunk ใน DiffChunkView ด้วย SwiftUI withAnimation(.spring())",
+  "prompt_en": "Implement collapsible diff chunk row toggle animation in DiffChunkView using SwiftUI withAnimation(.spring())",
+  "test_command": "swift test --filter DiffChunkRowTests",
+  "expected_files": [
+    "ChorusApp/Views/Diff/DiffChunkView.swift"
+  ]
+}

@@ -95,6 +95,7 @@ struct ComposerField: View {
     @State private var showingImporter = false
     @State private var dropTargeted = false
     @FocusState private var focused: Bool
+    @ObservedObject private var voiceDictation = VoiceDictationManager.shared
 
     /// The token under completion: `/xyz` at the very start, or the last
     /// whitespace-separated word if it starts with `@`.
@@ -116,6 +117,17 @@ struct ComposerField: View {
         return suggestions(tok.trigger, tok.query)
     }
 
+    private var dynamicHeight: CGFloat {
+        let lines = box.text.components(separatedBy: "\n").count
+        let chars = box.text.count
+        let estimatedWrapping = max(lines, Int(ceil(Double(chars) / 55.0)))
+        if box.text.isEmpty || estimatedWrapping <= 1 {
+            return 32
+        }
+        let h = 32 + CGFloat(estimatedWrapping - 1) * 19
+        return min(max(h, 32), 140)
+    }
+
     var body: some View {
         let list = items
         VStack(alignment: .leading, spacing: 4) {
@@ -124,18 +136,36 @@ struct ComposerField: View {
             ZStack(alignment: .topLeading) {
                 if box.text.isEmpty {
                     Text(placeholder).foregroundStyle(.tertiary)
-                        .padding(.leading, 5).padding(.top, 1)
+                        .font(.system(size: 13))
+                        .padding(.leading, 5).padding(.top, 5)
                         .allowsHitTesting(false)
                 }
-                TextEditor(text: $box.text)
-                    .font(.body)
-                    .scrollContentBackground(.hidden)
-                    .frame(minHeight: 40, maxHeight: 160)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .focused($focused)
-                    .onKeyPress(keys: [.upArrow, .downArrow, .return, .tab, .escape], phases: .down) { press in
-                        handle(press, list)
+                NativeComposerTextView(
+                    text: $box.text,
+                    enterSends: enterSends,
+                    onPasteImage: onPasteImage,
+                    onImportURLs: onImportURLs,
+                    onSubmit: onSubmit,
+                    onKeyNav: { nav in
+                        guard !list.isEmpty else { return false }
+                        switch nav {
+                        case .up:
+                            selected = (selected - 1 + list.count) % list.count
+                            return true
+                        case .down:
+                            selected = (selected + 1) % list.count
+                            return true
+                        case .escape:
+                            dismissed = true
+                            return true
+                        case .tab, .enter:
+                            apply(list[min(selected, list.count - 1)])
+                            return true
+                        }
                     }
+                )
+                .frame(height: dynamicHeight)
+                .animation(.easeInOut(duration: 0.12), value: dynamicHeight)
             }
             .overlay {
                 if dropTargeted {
@@ -149,18 +179,52 @@ struct ComposerField: View {
             .onPasteCommand(of: [.image, .fileURL, .url], perform: receivePaste)
             HStack(spacing: 8) {
                 Button { showingImporter = true } label: {
-                    Label("Add attachment", systemImage: "paperclip")
+                    Label("แนบไฟล์", systemImage: "paperclip")
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .help("Attach files or images")
-                .accessibilityHint("Choose files to attach to this message")
+                .help("แนบไฟล์หรือรูปภาพ")
+                .accessibilityHint("เลือกไฟล์หรือรูปภาพเพื่อแนบในข้อความนี้")
+
+                // Voice Dictation Button (Native Apple Speech Recognition)
+                Button {
+                    voiceDictation.toggleRecording { transcribed in
+                        if !transcribed.isEmpty {
+                            box.text = transcribed
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: voiceDictation.isRecording ? "waveform.circle.fill" : "mic")
+                            .font(.system(size: 12))
+                            .foregroundStyle(voiceDictation.isRecording ? Color.red : .secondary)
+                        if voiceDictation.isRecording {
+                            Text("กำลังฟัง…")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(.red)
+                        } else {
+                            Text("สั่งด้วยเสียง")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .help("สั่งการด้วยเสียงพูด (ไทย/อังกฤษ) ด้วย Apple Speech.framework")
+
                 Spacer(minLength: 0)
                 if box.attachments.isEmpty {
-                    Text("Drop files or paste an image")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .accessibilityHidden(true)
+                    if voiceDictation.isRecording {
+                        Text("กำลังบันทึกเสียงพูด...")
+                            .font(.caption)
+                            .foregroundStyle(Color.red.opacity(0.8))
+                            .accessibilityHidden(true)
+                    } else {
+                        Text("ลากไฟล์มาวาง หรือกดวางรูปภาพได้ทันที")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .accessibilityHidden(true)
+                    }
                 }
             }
         }
@@ -255,6 +319,43 @@ struct ComposerField: View {
         }
     }
 
+    private func pasteFromClipboard() -> Bool {
+        let pb = NSPasteboard.general
+        // 1. Direct image data in pasteboard (PNG, TIFF)
+        if let pngData = pb.data(forType: .png) {
+            onPasteImage(pngData, "image/png")
+            return true
+        }
+        if let tiffData = pb.data(forType: .tiff) {
+            if let rep = NSBitmapImageRep(data: tiffData),
+               let pngData = rep.representation(using: .png, properties: [:]) {
+                onPasteImage(pngData, "image/png")
+                return true
+            }
+        }
+        // 2. NSImage fallback (covers screenshots from shortcuts)
+        let imageTypes = [NSPasteboard.PasteboardType.png.rawValue,
+                          NSPasteboard.PasteboardType.tiff.rawValue,
+                          "public.image"]
+        if pb.canReadItem(withDataConformingToTypes: imageTypes),
+           let image = NSImage(pasteboard: pb),
+           let tiffData = image.tiffRepresentation,
+           let rep = NSBitmapImageRep(data: tiffData),
+           let pngData = rep.representation(using: .png, properties: [:]) {
+            onPasteImage(pngData, "image/png")
+            return true
+        }
+        // 3. Copied file URLs from Finder
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
+            let fileUrls = urls.filter(\.isFileURL)
+            if !fileUrls.isEmpty {
+                onImportURLs(fileUrls)
+                return true
+            }
+        }
+        return false
+    }
+
     private func handle(_ press: KeyPress, _ list: [Suggestion]) -> KeyPress.Result {
         if !list.isEmpty {
             switch press.key {
@@ -307,5 +408,200 @@ struct ComposerField: View {
         .padding(4)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
+    }
+}
+
+// MARK: - Native AppKit-backed Composer TextView for Reliable Image/File Pasting & Drop
+
+enum KeyPressNav {
+    case up, down, escape, tab, enter
+}
+
+struct NativeComposerTextView: NSViewRepresentable {
+    @Binding var text: String
+    var enterSends: Bool
+    var onPasteImage: (Data, String) -> Void
+    var onImportURLs: ([URL]) -> Void
+    var onSubmit: () -> Void
+    var onKeyNav: (KeyPressNav) -> Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = false
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+
+        let tv = ChatNSTextView()
+        tv.delegate = context.coordinator
+        tv.isRichText = false
+        tv.importsGraphics = false
+        tv.allowsUndo = true
+        tv.drawsBackground = false
+        tv.font = NSFont.systemFont(ofSize: 13)
+        tv.textColor = NSColor.labelColor
+        tv.textContainerInset = NSSize(width: 2, height: 4)
+        tv.isHorizontallyResizable = false
+        tv.isVerticallyResizable = true
+        tv.autoresizingMask = [.width]
+        tv.textContainer?.widthTracksTextView = true
+        tv.parentView = self
+
+        // Register for Drag & Drop
+        tv.registerForDraggedTypes([
+            .fileURL,
+            .png,
+            .tiff
+        ])
+
+        scroll.documentView = tv
+        context.coordinator.textView = tv
+        return scroll
+    }
+
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        guard let tv = nsView.documentView as? ChatNSTextView else { return }
+        tv.parentView = self
+        if tv.string != text {
+            tv.string = text
+        }
+    }
+
+    class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: NativeComposerTextView
+        weak var textView: ChatNSTextView?
+
+        init(_ parent: NativeComposerTextView) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let tv = notification.object as? NSTextView else { return }
+            parent.text = tv.string
+        }
+    }
+}
+
+final class ChatNSTextView: NSTextView {
+    var parentView: NativeComposerTextView?
+
+    override func paste(_ sender: Any?) {
+        if checkPasteboardForMedia() { return }
+        super.paste(sender)
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "v" {
+            if checkPasteboardForMedia() { return true }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    private func checkPasteboardForMedia() -> Bool {
+        let pb = NSPasteboard.general
+        // 1. Direct PNG
+        if let png = pb.data(forType: .png) {
+            parentView?.onPasteImage(png, "image/png")
+            return true
+        }
+        // 2. TIFF to PNG
+        if let tiff = pb.data(forType: .tiff),
+           let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) {
+            parentView?.onPasteImage(png, "image/png")
+            return true
+        }
+        // 3. NSImage fallback (screenshot shortcut Cmd+Ctrl+Shift+4)
+        let imageTypes = [NSPasteboard.PasteboardType.png.rawValue,
+                          NSPasteboard.PasteboardType.tiff.rawValue,
+                          "public.image"]
+        if pb.canReadItem(withDataConformingToTypes: imageTypes),
+           let image = NSImage(pasteboard: pb),
+           let tiffData = image.tiffRepresentation,
+           let rep = NSBitmapImageRep(data: tiffData),
+           let png = rep.representation(using: .png, properties: [:]) {
+            parentView?.onPasteImage(png, "image/png")
+            return true
+        }
+        // 4. Copied file URLs from Finder
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
+            let files = urls.filter(\.isFileURL)
+            if !files.isEmpty {
+                parentView?.onImportURLs(files)
+                return true
+            }
+        }
+        return false
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let key = event.keyCode
+        // Up Arrow: 126, Down Arrow: 125, Esc: 53, Tab: 48, Return: 36
+        if key == 126 {
+            if parentView?.onKeyNav(.up) == true { return }
+        } else if key == 125 {
+            if parentView?.onKeyNav(.down) == true { return }
+        } else if key == 53 {
+            if parentView?.onKeyNav(.escape) == true { return }
+        } else if key == 48 {
+            if parentView?.onKeyNav(.tab) == true { return }
+        } else if key == 36 {
+            if parentView?.onKeyNav(.enter) == true { return }
+            let enterSends = parentView?.enterSends ?? true
+            if enterSends {
+                if event.modifierFlags.contains(.shift) {
+                    insertNewlineIgnoringFieldEditor(nil)
+                    return
+                } else {
+                    parentView?.onSubmit()
+                    return
+                }
+            } else {
+                if event.modifierFlags.contains(.command) {
+                    parentView?.onSubmit()
+                    return
+                } else {
+                    insertNewlineIgnoringFieldEditor(nil)
+                    return
+                }
+            }
+        }
+        super.keyDown(with: event)
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let pb = sender.draggingPasteboard
+        if pb.canReadItem(withDataConformingToTypes: [NSPasteboard.PasteboardType.fileURL.rawValue,
+                                                     NSPasteboard.PasteboardType.png.rawValue,
+                                                     NSPasteboard.PasteboardType.tiff.rawValue]) {
+            return .copy
+        }
+        return super.draggingEntered(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let pb = sender.draggingPasteboard
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
+            let files = urls.filter(\.isFileURL)
+            if !files.isEmpty {
+                parentView?.onImportURLs(files)
+                return true
+            }
+        }
+        if let png = pb.data(forType: .png) {
+            parentView?.onPasteImage(png, "image/png")
+            return true
+        }
+        if let tiff = pb.data(forType: .tiff),
+           let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) {
+            parentView?.onPasteImage(png, "image/png")
+            return true
+        }
+        return super.performDragOperation(sender)
     }
 }

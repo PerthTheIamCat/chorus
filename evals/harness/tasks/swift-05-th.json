@@ -1,0 +1,13 @@
+{
+  "task_id": "swift-05-th",
+  "language": "th",
+  "domain": "swift",
+  "difficulty": "hard",
+  "prompt_th": "แก้ปัญหา AppKit window focus loss และ first responder หลุดเมื่อคลิกสลับระหว่าง split pane terminal กับ code viewer",
+  "prompt_en": "Resolve AppKit window focus loss and first responder drop when switching between split pane terminals and code viewer",
+  "test_command": "swift test --filter WindowFocusCoordinatorTests",
+  "expected_files": [
+    "ChorusApp/AppKit/SplitPaneController.swift",
+    "ChorusApp/AppKit/FocusCoordinator.swift"
+  ]
+}

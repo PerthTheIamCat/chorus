@@ -1,0 +1,13 @@
+{
+  "task_id": "py-05-en",
+  "language": "en",
+  "domain": "python",
+  "difficulty": "hard",
+  "prompt_th": "ปรับแต่ง memory footprint ของ Polars/Pandas aggregation pipeline บน log ขนาด 50GB ด้วย streaming scan และ memory-mapped arrow table",
+  "prompt_en": "Optimize memory footprint of Polars/Pandas aggregation pipeline on 50GB logs using streaming scans and memory-mapped Arrow tables",
+  "test_command": "pytest tests/test_log_aggregator.py",
+  "expected_files": [
+    "src/data/log_aggregator.py",
+    "src/data/vector_ops.py"
+  ]
+}

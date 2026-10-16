@@ -1,0 +1,27 @@
+name: release
+
+# Push a tag like v0.1.2 -> build the dmg, sign the Sparkle appcast, publish the
+# GitHub Release. Needs the repo secret SPARKLE_ED_KEY (see apps/macos/release.sh).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build, sign and publish
+        env:
+          SPARKLE_ED_KEY: ${{ secrets.SPARKLE_ED_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          test -n "$SPARKLE_ED_KEY" || { echo "SPARKLE_ED_KEY secret is missing"; exit 1; }
+          cd apps/macos
+          ./release.sh "${TAG#v}" publish

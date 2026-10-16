@@ -17,15 +17,17 @@ set -euo pipefail
 cd "$(dirname "$0")"
 MODE="${1:-debug}"
 RUN="${2:-run}"
-VERSION="0.1.0"
+VERSION="${CHORUS_VERSION:-0.1.0}"
 BUNDLE_ID="dev.chorus.app"
+FEED_URL="https://github.com/PerthTheIamCat/chorus/releases/latest/download/appcast.xml"
+SPARKLE_PUBLIC_KEY="E5axgieMsKgEtIIFf18pp0kcfcR0U3MLahF4QqB0ejc="
 
 echo "── cargo build ($MODE) ──"
 if [ "$MODE" = "release" ]; then
-    (cd ../.. && cargo build --release -p chorus-ffi)
+    (cd ../.. && cargo build --release -p chorus-ffi --lib && cargo build --release -p chorus-acp --bin antigravity-acp -p chorus-daemon --bin chorusd)
     sed -i '' 's/let target = "debug"/let target = "release"/' Package.swift
 else
-    (cd ../.. && cargo build -p chorus-ffi)
+    (cd ../.. && cargo build -p chorus-ffi --lib && cargo build -p chorus-acp --bin antigravity-acp -p chorus-daemon --bin chorusd)
     sed -i '' 's/let target = "release"/let target = "debug"/' Package.swift
 fi
 
@@ -43,6 +45,29 @@ APP="$(dirname "$BIN")/Chorus.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Chorus"
+cp -R "$(dirname "$BIN")/Chorus_Chorus.bundle" "$APP/Contents/Resources/"
+if [ "$MODE" = "release" ]; then
+    cp ../../target/release/antigravity-acp "$APP/Contents/MacOS/antigravity-acp"
+    cp ../../target/release/chorusd "$APP/Contents/MacOS/chorusd"
+else
+    cp ../../target/debug/antigravity-acp "$APP/Contents/MacOS/antigravity-acp"
+    cp ../../target/debug/chorusd "$APP/Contents/MacOS/chorusd"
+fi
+
+# App icon: build Chorus.icns from the 1024px master. Without CFBundleIconFile
+# + this file the Dock and Finder show the generic app icon.
+ICONSET="$(mktemp -d)/Chorus.iconset"
+mkdir -p "$ICONSET"
+for sz in 16 32 128 256 512; do
+    sips -z $sz $sz Resources/ChorusIcon-1024.png --out "$ICONSET/icon_${sz}x${sz}.png" >/dev/null
+    sips -z $((sz*2)) $((sz*2)) Resources/ChorusIcon-1024.png --out "$ICONSET/icon_${sz}x${sz}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/Chorus.icns"
+
+# Sparkle must live in Contents/Frameworks (the rpath Package.swift sets).
+SPARKLE_FW="$(find .build/artifacts -path '*macos-arm64_x86_64/Sparkle.framework' -maxdepth 6 | head -1)"
+mkdir -p "$APP/Contents/Frameworks"
+cp -R "$SPARKLE_FW" "$APP/Contents/Frameworks/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -52,6 +77,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key>              <string>Chorus</string>
     <key>CFBundleDisplayName</key>       <string>Chorus</string>
     <key>CFBundleExecutable</key>        <string>Chorus</string>
+    <key>CFBundleIconFile</key>          <string>Chorus</string>
     <key>CFBundleIdentifier</key>        <string>${BUNDLE_ID}</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>
@@ -62,6 +88,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
          the user's repo. Both die under the App Sandbox, so it is off until
          the Seatbelt profile in the design doc is actually written. -->
     <key>LSApplicationCategoryType</key> <string>public.app-category.developer-tools</string>
+    <!-- Sparkle auto-update. The public key verifies every update; the private
+         half lives only in the maintainer's login Keychain (account "chorus"). -->
+    <key>SUFeedURL</key>                 <string>${FEED_URL}</string>
+    <key>SUPublicEDKey</key>             <string>${SPARKLE_PUBLIC_KEY}</string>
+    <key>SUEnableAutomaticChecks</key>   <true/>
 </dict>
 </plist>
 PLIST
@@ -69,10 +100,21 @@ PLIST
 # Ad-hoc signature: without it macOS kills the app on some machines with
 # "code has no resources but signature indicates they must be present", and
 # TCC prompts (Files & Folders) have no stable identity to attach to.
-codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 \
-    || echo "  (codesign ข้าม — ไม่มี codesign ในเครื่อง)"
+# Sign nested executables first and fail if signing or verification fails.
+for EXECUTABLE in "$APP/Contents/MacOS/antigravity-acp" "$APP/Contents/MacOS/chorusd"; do
+    codesign --force --sign - --timestamp=none "$EXECUTABLE"
+done
+codesign --force --sign - --timestamp=none "$APP"
+codesign --verify --deep --strict "$APP"
 
 echo "built: $APP"
+
+if [ -d "$HOME/Applications/Chorus.app" ] || [ -d "$HOME/Applications" ]; then
+    mkdir -p "$HOME/Applications"
+    rm -rf "$HOME/Applications/Chorus.app"
+    cp -R "$APP" "$HOME/Applications/Chorus.app"
+    echo "synced: $HOME/Applications/Chorus.app"
+fi
 
 if [ "$RUN" = "run" ]; then
     LOG="${TMPDIR:-/tmp}/chorus-app.log"

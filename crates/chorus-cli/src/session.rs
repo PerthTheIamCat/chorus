@@ -77,7 +77,7 @@ impl Policy {
             Policy::AllowAll => true,
             Policy::ReadOnly => {
                 let k = ask.kind.to_lowercase();
-                k == "read" || k.contains("read") || k == "fetch" || k == "search"
+                matches!(k.as_str(), "read" | "fetch" | "search")
             }
         };
         if allow {
@@ -346,6 +346,7 @@ fn open_checkpoint(cwd: &Path) -> (Option<Checkpoint>, String) {
 impl Session {
     /// Open (or create) the store and start a new session in it.
     pub fn create(db: &Path, cwd: &Path, title: &str) -> Result<Self> {
+        chorus_acp::env::repair_process_path();
         let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
         let store = Store::open(db).context("open store")?;
         let user = actor::intern(store.conn(), "user", "human")?;
@@ -369,6 +370,7 @@ impl Session {
 
     /// Reattach to an existing session in an existing store.
     pub fn open(db: &Path, session_id: i64) -> Result<Self> {
+        chorus_acp::env::repair_process_path();
         let store = Store::open(db).context("open store")?;
         let (cwd, exists): (String, bool) = store
             .conn()
@@ -423,6 +425,10 @@ impl Session {
 
     pub fn delete_attachment(&self, id: i64) -> Result<()> {
         Ok(attachments::delete(self.store.conn(), self.sess, id)?)
+    }
+
+    pub fn store(&self) -> &Store {
+        &self.store
     }
 
     /// Force one ACP command for every agent (tests, or a pinned install).
@@ -1309,6 +1315,7 @@ impl Session {
         let command = match sandbox::wrap(bridge, &self.cwd, profile) {
             Ok(c) => c,
             Err(why) => {
+                anyhow::ensure!(mode != "read-only", "Cannot enforce read-only sandbox: {why}");
                 if self.log_permissions {
                     eprintln!("  ⚠  ไม่ได้เปิด sandbox ({why}) — เหลือแค่ย้อนไฟล์หลังเทิร์น");
                 }
@@ -1386,7 +1393,12 @@ impl Session {
             prompt_text.push_str(
                 "\n\n(Chorus: if the user asks you to remember something, or states a durable \
                  project fact, call the `memory_propose` tool with it. Do not just say you \
-                 remembered it.)\n",
+                 remembered it.)\n\
+                 (Chorus: Multi-agent orchestration is enabled. For complex, multi-step, or exploratory \
+                 tasks, you can act as Lead Orchestrator: decompose objectives, spawn subagents via \
+                 `chorus_spawn_agent` (roles: investigator, builder, reviewer, or custom roles in \
+                 isolated git worktrees), coordinate them with `chorus_wait_agent` and \
+                 `chorus_collect_results`, and track your progress with `chorus_update_checklist`.)\n",
             );
         }
         let available: Vec<_> = attachments::list(self.store.conn(), self.sess)?
@@ -1643,6 +1655,25 @@ impl Session {
                 AgentEvent::ToolResult { title, status } => {
                     (EventKind::ToolResult, format!("{title} → {status}"))
                 }
+                AgentEvent::SubagentSpawned { session_id, parent_session_id, name, task } => (
+                    EventKind::ToolCall,
+                    serde_json::json!({
+                        "event": "subagent_spawned",
+                        "sessionId": session_id,
+                        "parentSessionId": parent_session_id,
+                        "name": name,
+                        "task": task,
+                    }).to_string(),
+                ),
+                AgentEvent::SubagentState { session_id, state, message } => (
+                    EventKind::ToolResult,
+                    serde_json::json!({
+                        "event": "subagent_state_update",
+                        "sessionId": session_id,
+                        "state": state,
+                        "message": message,
+                    }).to_string(),
+                ),
                 AgentEvent::Diff { path, old, new } => {
                     (EventKind::Diff, render_diff(path, old, new))
                 }
@@ -1650,6 +1681,7 @@ impl Session {
             let mut ne = NewEvent::new(self.sess, kind, agent_actor, body).parent(parent);
             if matches!(ev, AgentEvent::Message(_)) {
                 ne.tok_out = outcome.context_used;
+                ne.model_id = outcome.model.clone();
             }
             seqs.push(ledger::append(c, &ne)?);
         }
@@ -1669,13 +1701,13 @@ impl Session {
 
     /// The whole session, oldest first, as `(seq, kind name, actor name,
     /// body)` — the shape the FFI/UI wants without exposing core types.
-    pub fn transcript_labeled(&self) -> Result<Vec<(i64, &'static str, String, String)>> {
+    pub fn transcript_labeled(&self) -> Result<Vec<(i64, &'static str, String, String, Option<String>)>> {
         self.events_since(0)
     }
 
     /// Labeled events with `seq > after` — the delta a UI polls for so it
     /// only ever pulls what it hasn't seen.
-    pub fn events_since(&self, after: i64) -> Result<Vec<(i64, &'static str, String, String)>> {
+    pub fn events_since(&self, after: i64) -> Result<Vec<(i64, &'static str, String, String, Option<String>)>> {
         let c = self.store.conn();
         let mut out = Vec::new();
         for (e, body) in self.transcript()? {
@@ -1683,7 +1715,7 @@ impl Session {
                 continue;
             }
             let actor = actor::name(c, e.actor).unwrap_or_else(|_| "?".into());
-            out.push((e.seq, kind_name(e.kind), actor, body));
+            out.push((e.seq, kind_name(e.kind), actor, body, e.model_id));
         }
         Ok(out)
     }
@@ -1903,4 +1935,22 @@ pub fn list_sessions(db: &Path) -> Result<Vec<SessionSummary>> {
             }
         })
         .collect())
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    #[test]
+    fn read_only_never_grants_unknown_or_mixed_permission_kinds() {
+        for kind in ["read/write", "read-write", "read_and_delete", "thread", "execute", "", "other"] {
+            let ask = PermissionAsk { tool: "fixture".into(), kind: kind.into(), detail: "synthetic request".into() };
+            assert_eq!(Policy::ReadOnly.decide(&ask), Permission::Deny, "kind: {kind}");
+        }
+        for kind in ["read", "READ", "fetch", "search"] {
+            let ask = PermissionAsk { tool: "fixture".into(), kind: kind.into(), detail: "synthetic request".into() };
+            assert_eq!(Policy::ReadOnly.decide(&ask), Permission::Allow, "kind: {kind}");
+            assert_eq!(Policy::DenyAll.decide(&ask), Permission::Deny);
+        }
+    }
 }

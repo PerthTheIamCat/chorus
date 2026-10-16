@@ -1,0 +1,12 @@
+{
+  "task_id": "swift-01-en",
+  "language": "en",
+  "domain": "swift",
+  "difficulty": "trivial",
+  "prompt_th": "เปลี่ยนไอคอนปุ่ม toolbar ใน InspectorView จาก gear เป็น slider.horizontal.3 และใส่ accessibility label ภาษาไทย",
+  "prompt_en": "Change toolbar button icon in InspectorView from gear to slider.horizontal.3 and update accessibility label",
+  "test_command": "swift test --filter InspectorViewTests",
+  "expected_files": [
+    "ChorusApp/Views/InspectorView.swift"
+  ]
+}

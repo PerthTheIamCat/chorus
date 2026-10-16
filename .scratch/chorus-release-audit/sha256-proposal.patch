@@ -1,0 +1,108 @@
+--- a/crates/chorus-core/src/model_manager.rs
++++ b/crates/chorus-core/src/model_manager.rs
+@@ -6,6 +6,7 @@
+ 
+ use crate::{ChorusError, Result};
+ use serde::{Deserialize, Serialize};
++use sha2::{Digest, Sha256};
+ use std::fs;
+ use std::io::Read;
+ use std::path::{Component, Path, PathBuf};
+@@ -19,6 +20,8 @@
+     pub download_url: String,
+     pub expected_size_bytes: u64,
+     pub blake3_hash: Option<String>,
++    #[serde(default)]
++    pub sha256_hash: Option<String>,
+     pub min_disk_free_bytes: u64,
+     pub purpose: ModelPurpose,
+ }
+@@ -111,6 +114,7 @@
+                 download_url: "https://huggingface.co/iapp/OpenThai-SystemOne-GGUF/resolve/020b22d01232e29783da229dbd75ee1f9fe8dba8/OpenThai-SystemOne-v0.3-Q4_K_M.gguf".to_string(),
+                 expected_size_bytes: 529_313_920, // ~529 MB
+                 blake3_hash: None,
++                sha256_hash: Some("9be793559b815eb73cd2478bff9944b11e9e855e9ac9ff04efbdf6a344512da2".into()),
+                 min_disk_free_bytes: 1_500_000_000, // 1.5 GB free required
+                 purpose: ModelPurpose::Router,
+             },
+@@ -121,6 +125,7 @@
+                 download_url: "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/f86cb2c1fa58255f8052cc32aeede1b7482d4361/qwen2.5-coder-1.5b-instruct-q3_k_m.gguf".to_string(),
+                 expected_size_bytes: 924_456_000,
+                 blake3_hash: None,
++                sha256_hash: Some("d281a3a0010df03c8a0e3ffebd7f9444a95244fb518f132c5475e4b48d9adb5e".into()),
+                 min_disk_free_bytes: 2_500_000_000, // 2.5 GB free required
+                 purpose: ModelPurpose::Compaction,
+             },
+@@ -264,21 +269,31 @@
+     if &magic != b"GGUF" {
+         return Err(invalid("invalid GGUF header".into()));
+     }
+-    if verify_hash {
+-        if let Some(expected) = &spec.blake3_hash {
+-            let expected = blake3::Hash::from_hex(expected).map_err(|e| invalid(e.to_string()))?;
+-            let mut hasher = blake3::Hasher::new();
+-            hasher.update(&magic);
+-            let mut buffer = [0u8; 64 * 1024];
+-            loop {
+-                let n = file.read(&mut buffer).map_err(|e| invalid(e.to_string()))?;
+-                if n == 0 {
+-                    break;
+-                }
+-                hasher.update(&buffer[..n]);
+-            }
+-            if hasher.finalize() != expected {
+-                return Err(invalid("BLAKE3 checksum mismatch".into()));
++    if verify_hash && (spec.blake3_hash.is_some() || spec.sha256_hash.is_some()) {
++        let expected_blake3 = spec.blake3_hash.as_ref().map(|h|
++            blake3::Hash::from_hex(h).map_err(|e| invalid(e.to_string()))).transpose()?;
++        if let Some(expected) = &spec.sha256_hash {
++            if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
++                return Err(invalid("invalid SHA-256 digest".into()));
++            }
++        }
++        let mut blake3 = expected_blake3.map(|_| blake3::Hasher::new());
++        let mut sha256 = spec.sha256_hash.as_ref().map(|_| Sha256::new());
++        if let Some(h) = &mut blake3 { h.update(&magic); }
++        if let Some(h) = &mut sha256 { h.update(magic); }
++        let mut buffer = [0u8; 64 * 1024];
++        loop {
++            let n = file.read(&mut buffer).map_err(|e| invalid(e.to_string()))?;
++            if n == 0 { break; }
++            if let Some(h) = &mut blake3 { h.update(&buffer[..n]); }
++            if let Some(h) = &mut sha256 { h.update(&buffer[..n]); }
++        }
++        if let (Some(h), Some(expected)) = (blake3, expected_blake3) {
++            if h.finalize() != expected { return Err(invalid("BLAKE3 checksum mismatch".into())); }
++        }
++        if let (Some(h), Some(expected)) = (sha256, &spec.sha256_hash) {
++            if !format!("{:x}", h.finalize()).eq_ignore_ascii_case(expected) {
++                return Err(invalid("SHA-256 checksum mismatch".into()));
+             }
+         }
+     }
+@@ -354,6 +369,7 @@
+         let mgr = ModelManager::with_directory(dir.path());
+         let mut spec = ModelManager::find_spec("openthai-systemone:0.8b-q4_k_m").unwrap();
+         let data = b"GGUFfixture model";
++        spec.sha256_hash = Some(format!("{:x}", Sha256::digest(data)));
+         spec.expected_size_bytes = data.len() as u64;
+         spec.blake3_hash = Some(blake3::hash(data).to_hex().to_string());
+ 
+@@ -405,6 +421,7 @@
+         let mut spec = ModelManager::curated_models().remove(0);
+         spec.expected_size_bytes = 16;
+         spec.blake3_hash = None;
++        spec.sha256_hash = None;
+         spec
+     }
+ 
+--- a/crates/chorus-core/Cargo.toml
++++ b/crates/chorus-core/Cargo.toml
+@@ -8,6 +8,7 @@
+ [dependencies]
+ rusqlite.workspace = true
+ blake3.workspace = true
++sha2 = "=0.10.9"
+ zstd.workspace = true
+ serde.workspace = true
+ serde_json.workspace = true

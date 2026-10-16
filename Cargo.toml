@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["crates/chorus-core", "crates/chorus-cli", "crates/chorus-acp", "crates/chorus-ffi"]
+members = [
+    "crates/chorus-core",
+    "crates/chorus-cli",
+    "crates/chorus-acp",
+    "crates/chorus-ffi",
+    "crates/chorus-daemon",
+    "crates/chorus-eval",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,3 +24,4 @@ serde_json = "1"
 thiserror = "1"
 anyhow = "1"
 tempfile = "3"
+similar = "2.6"

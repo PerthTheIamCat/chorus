@@ -42,6 +42,8 @@ fn start_then_prompt_folds_the_update_stream_into_an_outcome() {
             AgentEvent::Message(_) => "msg",
             AgentEvent::ToolCall { .. } => "call",
             AgentEvent::ToolResult { .. } => "result",
+            AgentEvent::SubagentSpawned { .. } => "subagent_spawned",
+            AgentEvent::SubagentState { .. } => "subagent_state",
             AgentEvent::Diff { .. } => "diff",
         })
         .collect();
@@ -104,6 +106,8 @@ fn bridge_names_map_to_the_current_packages() {
     // Claude's bridge was renamed upstream; the old name is deprecated.
     assert!(bridge_for("claude-opus").join(" ").contains("claude-agent-acp"));
     assert!(bridge_for("codex").join(" ").contains("codex-acp"));
+    assert!(bridge_for("antigravity").join(" ").contains("antigravity-acp"));
+    assert!(bridge_for("agy").join(" ").contains("antigravity-acp"));
     // Anything unknown falls back to Codex rather than failing to spawn.
     assert!(bridge_for("something-else").join(" ").contains("codex-acp"));
 }

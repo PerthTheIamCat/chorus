@@ -10,6 +10,7 @@ struct LedgerEvent: Codable, Identifiable, Hashable {
     let kind: String
     let actor: String
     let body: String
+    let model_id: String?
     var id: Int64 { seq }
 }
 
@@ -111,7 +112,10 @@ private struct CatalogListResult: Decodable {
 }
 
 private struct RouterModelsResult: Decodable {
-    struct Item: Decodable { let name: String }
+    struct Item: Decodable {
+        let name: String
+        let size_bytes: UInt64?
+    }
     let ok: Bool
     let models: [Item]?
     let error: String?
@@ -139,12 +143,15 @@ final class Engine: ObservableObject {
     @Published var sessionID: Int64 = -1
     @Published var contextUsed: Int64?
     @Published var contextWindow: Int64?
+    @Published var sessionCostUSD: Double = 0.0
     /// goal / done / pending for this session — the context tier the design
     /// never trims. Empty only before the first turn.
     @Published var taskState = ""
     /// Events with no stored summary rungs yet. Non-zero just means the next
     /// compaction pass has work, not that anything is wrong.
     @Published var uncompacted: Int64 = 0
+    /// Active sessions currently being renamed by AI (for loading indicator feedback).
+    @Published var renamingSessionIDs: Set<Int64> = []
 
     /// The Rust engine handle, carried onto `queue` and back.
     ///
@@ -234,6 +241,8 @@ final class Engine: ObservableObject {
                 self.memoryScope = nil
                 self.live = LiveTurn()
                 self.lastThoughts = ""
+                self.contextUsed = nil
+                self.contextWindow = nil
                 guard let h else {
                     self.sessionID = -1
                     self.events = []
@@ -271,8 +280,88 @@ final class Engine: ObservableObject {
         }
     }
 
+    /// Automatically generate a concise title for a session using AI (local Ollama fast model or intelligent fallback).
+    func renameSessionWithAI(db: String, id: Int64, sampleText: String? = nil, completion: ((String?) -> Void)? = nil) {
+        renamingSessionIDs.insert(id)
+        let installedModels = self.routerModels ?? []
+
+        let currentPrompt = (sampleText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            ? sampleText
+            : self.events.first(where: { $0.actor == "user" || $0.kind == "msg" })?.body
+
+        ioQueue.async { [weak self] in
+            let textToSummarize = (currentPrompt ?? "New Session")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\n", with: " ")
+
+            let cleanPrompt = String(textToSummarize.prefix(80))
+
+            // Candidate models for local title summarization in order of quality/speed
+            // (Exclude router policies like chorus-openthai-systemone / tev1 which only output route JSON)
+            let candidateModels = ["qwen2.5:3b", "qwen3:1.7b", "llama3.2:1b", "iapp/openthai-systemone:0.8b"]
+            let chosenModel = candidateModels.first(where: { installedModels.contains($0) }) ?? "qwen2.5:3b"
+
+            guard let url = URL(string: "http://127.0.0.1:11434/api/generate") else {
+                let fallback = Self.fallbackTitle(from: cleanPrompt)
+                DispatchQueue.main.async {
+                    self?.renamingSessionIDs.remove(id)
+                    self?.renameSession(db: db, id: id, title: fallback)
+                    completion?(fallback)
+                }
+                return
+            }
+
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.timeoutInterval = 8.0
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            let payload: [String: Any] = [
+                "model": chosenModel,
+                "prompt": "ข้อความ: \"\(cleanPrompt)\"\nสรุปเป็นชื่อหัวข้อสั้นๆ ภาษาไทย 3-4 คำเท่านั้น ตอบเฉพาะชื่อ (ห้ามใส่เครื่องหมายคำพูดหรือวงเล็บ):",
+                "stream": false,
+                "options": [
+                    "num_predict": 18,
+                    "temperature": 0.2
+                ]
+            ]
+            req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+            let task = URLSession.shared.dataTask(with: req) { data, _, _ in
+                var generatedTitle: String? = nil
+                if let data = data,
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    var raw = json["response"] as? String ?? ""
+                    if let thinkEnd = raw.range(of: "</think>") {
+                        raw = String(raw[thinkEnd.upperBound...])
+                    }
+                    let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "\"'`“”。.:：-—"))
+                    if !cleaned.isEmpty && cleaned.count <= 40 && !cleaned.contains("\n") {
+                        generatedTitle = cleaned
+                    }
+                }
+
+                let finalTitle = generatedTitle ?? Self.fallbackTitle(from: cleanPrompt)
+                DispatchQueue.main.async {
+                    self?.renamingSessionIDs.remove(id)
+                    self?.renameSession(db: db, id: id, title: finalTitle)
+                    completion?(finalTitle)
+                }
+            }
+            task.resume()
+        }
+    }
+
+    nonisolated private static func fallbackTitle(from prompt: String) -> String {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return "เซสชันใหม่" }
+        let words = trimmed.split(separator: " ").prefix(4).joined(separator: " ")
+        return String(words.prefix(30))
+    }
+
     func deleteSession(db: String, id: Int64, isOpen: Bool) {
         if isOpen { close() }
+        SpotlightIndexer.shared.deleteSession(id: id)
         // After `close()`'s free on `queue`, so the open handle is gone first.
         queue.async { [weak self] in
             let json = db.withCString { Self.string(from: chorus_delete_session($0, id)) }
@@ -325,7 +414,7 @@ final class Engine: ObservableObject {
         echoCounter += 1
         live = LiveTurn()
         lastThoughts = ""
-        events.append(LedgerEvent(seq: Int64.min + echoCounter, kind: "msg", actor: "user", body: text))
+        events.append(LedgerEvent(seq: Int64.min + echoCounter, kind: "msg", actor: "user", body: text, model_id: nil))
         turnStartedAt = Date()
     }
 
@@ -341,6 +430,7 @@ final class Engine: ObservableObject {
         var isEmpty: Bool { thoughts.isEmpty && message.isEmpty && tools.isEmpty }
     }
     @Published var live = LiveTurn()
+    @Published var liveAgent: String? = nil
     /// The finished turn's reasoning. Agents send it but it is not stored in
     /// the ledger, so it lives here until the next turn starts.
     @Published var lastThoughts = ""
@@ -381,6 +471,7 @@ final class Engine: ObservableObject {
         loadAgents()
         if !live.thoughts.isEmpty { lastThoughts = live.thoughts }
         live = LiveTurn()
+        liveAgent = nil
     }
 
     /// Stop button. Kills the agent process; the turn thread then returns an
@@ -687,10 +778,16 @@ final class Engine: ObservableObject {
     func loadRouterModels() {
         routerChecking = true
         routerSetupQueue.async { [weak self] in
-            let json = "qwen2.5:3b".withCString { Self.string(from: chorus_router_models_json($0)) }
+            let json = "chorus-openthai-systemone:0.8b".withCString { Self.string(from: chorus_router_models_json($0)) }
             let result = Self.decode(RouterModelsResult.self, json)
             DispatchQueue.main.async {
-                self?.routerModels = result?.ok == true ? result?.models?.map(\.name) : nil
+                // A router must be a local model within the agreed 2 GB cap.
+                self?.routerModels = result?.ok == true
+                    ? result?.models?.filter {
+                        guard let size = $0.size_bytes else { return false }
+                        return size > 0 && size <= 2_000_000_000
+                    }.map(\.name)
+                    : nil
                 self?.routerChecking = false
             }
         }
@@ -734,10 +831,249 @@ final class Engine: ObservableObject {
         }
     }
 
+    // MARK: - 1-Click In-Process Local Models Manager
+
+    struct LocalModelStatus: Identifiable, Decodable {
+        var id: String { spec.id }
+        struct Spec: Decodable {
+            let id: String
+            let display_name: String
+            let filename: String
+            let download_url: String
+            let expected_size_bytes: Int64
+            let min_disk_free_bytes: Int64
+            let purpose: String
+        }
+        let status: String
+        let spec: Spec
+        let path: String?
+        let size_bytes: Int64?
+        let free_disk_bytes: Int64?
+        let can_download: Bool?
+        let reason: String?
+        
+        var isInstalled: Bool {
+            status == "ready"
+        }
+    }
+
+    private struct ModelManagerListResponse: Decodable {
+        let ok: Bool
+        let models: [LocalModelStatus]?
+        let error: String?
+    }
+
+    @Published var localModels: [LocalModelStatus] = []
+    @Published var isDownloadingLocalModel: Bool = false
+    @Published var localModelDownloadProgress: Double = 0.0
+    @Published var localModelDownloadStatusText: String = ""
+    @Published var localModelError: String? = nil
+    private var modelDownloadTask: URLSessionDownloadTask?
+    private var modelDownloadID: UUID?
+    var canCancelLocalModelDownload: Bool { modelDownloadTask != nil }
+
+    func loadLocalModels() {
+        routerSetupQueue.async { [weak self] in
+            let json = Self.string(from: chorus_model_manager_list_json())
+            let res = Self.decode(ModelManagerListResponse.self, json)
+            DispatchQueue.main.async {
+                if let models = res?.models {
+                    self?.localModels = models
+                }
+            }
+        }
+    }
+
+    func downloadLocalModel(_ spec: LocalModelStatus.Spec) {
+        guard !isDownloadingLocalModel else { return }
+        guard let url = URL(string: spec.download_url), url.scheme?.lowercased() == "https" else {
+            localModelError = "URL สำหรับดาวน์โหลดโมเดลไม่ถูกต้อง"
+            return
+        }
+
+        isDownloadingLocalModel = true
+        localModelDownloadProgress = 0.0
+        localModelDownloadStatusText = "กำลังเริ่มดาวน์โหลด..."
+        localModelError = nil
+        let downloadID = UUID()
+        modelDownloadID = downloadID
+
+        let sessionConfig = URLSessionConfiguration.default
+        let session = URLSession(configuration: sessionConfig)
+
+        let task = session.downloadTask(with: url) { [weak self] tempURL, response, error in
+            // URLSession owns tempURL only until this callback returns.
+            // Move it synchronously before dispatching installation to another queue.
+            let ownedFile: Result<URL, Error> = Result {
+                if let error { throw error }
+                guard let response = response as? HTTPURLResponse,
+                      response.statusCode == 200,
+                      response.url?.scheme?.lowercased() == "https" else {
+                    throw URLError(.badServerResponse)
+                }
+                guard let tempURL else { throw URLError(.fileDoesNotExist) }
+                let destination = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("chorus-model-\(downloadID.uuidString).gguf")
+                try FileManager.default.moveItem(at: tempURL, to: destination)
+                return destination
+            }
+            session.finishTasksAndInvalidate()
+            DispatchQueue.main.async {
+                guard let self, self.modelDownloadID == downloadID else {
+                    if case .success(let url) = ownedFile { Self.removeStagedModelDownload(at: url) }
+                    return
+                }
+                self.modelDownloadTask = nil
+                switch ownedFile {
+                case .failure(let error):
+                    self.isDownloadingLocalModel = false
+                    self.modelDownloadID = nil
+                    self.localModelError = "ดาวน์โหลดไม่สำเร็จ: \(error.localizedDescription)"
+                case .success(let url):
+                    self.localModelDownloadStatusText = "กำลังตรวจสอบและติดตั้งโมเดล..."
+                    self.finalizeLocalModel(tempPath: url.path, modelId: spec.id, downloadID: downloadID)
+                }
+            }
+        }
+
+        self.modelDownloadTask = task
+        task.resume()
+    }
+
+    func cancelLocalModelDownload() {
+        // Once the transfer has completed, installation is already committed to its queue.
+        guard modelDownloadTask != nil else { return }
+        modelDownloadTask?.cancel()
+        modelDownloadTask = nil
+        modelDownloadID = nil
+        isDownloadingLocalModel = false
+        localModelDownloadStatusText = "ยกเลิกการดาวน์โหลดแล้ว"
+    }
+
+    private func finalizeLocalModel(tempPath: String, modelId: String, downloadID: UUID) {
+        routerSetupQueue.async { [weak self] in
+            defer { Self.removeStagedModelDownload(at: URL(fileURLWithPath: tempPath)) }
+            let json = tempPath.withCString { cTemp in
+                modelId.withCString { cId in
+                    Self.string(from: chorus_model_manager_finalize_json(cTemp, cId))
+                }
+            }
+            struct FinRes: Decodable { let ok: Bool; let error: String? }
+            let res = Self.decode(FinRes.self, json)
+            DispatchQueue.main.async {
+                guard let self, self.modelDownloadID == downloadID else { return }
+                self.isDownloadingLocalModel = false
+                self.modelDownloadID = nil
+                if res?.ok == true {
+                    self.localModelDownloadStatusText = "ติดตั้งสำเร็จเรียบร้อย"
+                    self.localModelError = nil
+                    self.loadLocalModels()
+                } else {
+                    self.localModelError = res?.error ?? "การตรวจสอบและติดตั้งโมเดลล้มเหลว"
+                }
+            }
+        }
+    }
+
+    private nonisolated static func removeStagedModelDownload(at url: URL) {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            NSLog("Local model staging cleanup failed (error %ld)", (error as NSError).code)
+        }
+    }
+
+    func deleteLocalModel(modelId: String) {
+        routerSetupQueue.async { [weak self] in
+            let json = modelId.withCString { cId in
+                Self.string(from: chorus_model_manager_delete_json(cId))
+            }
+            struct DelRes: Decodable { let ok: Bool; let error: String? }
+            let res = Self.decode(DelRes.self, json)
+            DispatchQueue.main.async {
+                if res?.ok == true {
+                    self?.loadLocalModels()
+                } else {
+                    self?.localModelError = res?.error ?? "ไม่สามารถลบโมเดลได้"
+                }
+            }
+        }
+    }
+
+    // MARK: - Auto Router Learning Memory Flywheel
+
+    struct LearnedRoute: Identifiable, Codable, Hashable {
+        let id: Int64
+        let prompt: String
+        let chosen_model: String
+        let chosen_agent: String
+        let reason: String
+        let created_ms: Int64
+    }
+
+    @Published var learnedRoutes: [LearnedRoute] = []
+    @Published var isLoadingLearnedRoutes = false
+
+    func loadLearnedRoutes(workspace: String? = nil) {
+        isLoadingLearnedRoutes = true
+        let ws = workspace ?? ""
+        routerSetupQueue.async { [weak self] in
+            let json = ws.withCString { cWs in
+                Self.string(from: chorus_router_list_learned_json(cWs))
+            }
+            struct R: Codable { let ok: Bool; let routes: [LearnedRoute]? }
+            let res = Self.decode(R.self, json)
+            DispatchQueue.main.async {
+                self?.isLoadingLearnedRoutes = false
+                if let routes = res?.routes {
+                    self?.learnedRoutes = routes
+                }
+            }
+        }
+    }
+
+    func recordLearnedRoute(workspace: String? = nil, prompt: String, model: String, agent: String, reason: String) {
+        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let ws = workspace ?? ""
+        routerSetupQueue.async { [weak self] in
+            let _ = ws.withCString { cWs in
+                prompt.withCString { cP in
+                    model.withCString { cM in
+                        agent.withCString { cA in
+                            reason.withCString { cR in
+                                Self.string(from: chorus_router_record_learned_json(cWs, cP, cM, cA, cR))
+                            }
+                        }
+                    }
+                }
+            }
+            DispatchQueue.main.async {
+                self?.loadLearnedRoutes(workspace: workspace)
+            }
+        }
+    }
+
+    func clearLearnedRoutes(workspace: String? = nil, completion: (() -> Void)? = nil) {
+        let ws = workspace ?? ""
+        routerSetupQueue.async { [weak self] in
+            let _ = ws.withCString { cWs in
+                Self.string(from: chorus_router_clear_learned_json(cWs))
+            }
+            DispatchQueue.main.async {
+                self?.learnedRoutes = []
+                completion?()
+            }
+        }
+    }
+
     /// Run a turn where every permission request pops a dialog.
     func sendInteractive(_ prompt: String, agent: String, attachments: [Int64] = []) {
         guard let h = handle, !busy else { return }
         busy = true; lastError = nil
+        let clean = agent.split(separator: "@", maxSplits: 1).first.map(String.init) ?? agent
+        liveAgent = clean
+        PowerManager.shared.beginActivity(reason: "Chorus Interactive Turn (\(clean))")
         echoUser(prompt)
         let ctx = CallbackContext(raw: Unmanaged.passUnretained(self).toOpaque())
         let idsJSON = Self.jsonIDs(attachments)
@@ -756,9 +1092,15 @@ final class Engine: ObservableObject {
             }
             let r = Self.decode(TurnResult.self, json)
             DispatchQueue.main.async {
+                PowerManager.shared.endActivity()
                 self?.busy = false
                 self?.endLive()
-                if r?.ok != true, !Self.isStop(r?.error) { self?.lastError = r?.error ?? "turn failed" }
+                if let r, r.ok {
+                    self?.contextUsed = r.context_used
+                    self?.contextWindow = r.context_window
+                } else if !Self.isStop(r?.error) {
+                    self?.lastError = r?.error ?? "turn failed"
+                }
                 self?.refresh()
                 self?.compactIfIdle()
             }
@@ -771,6 +1113,9 @@ final class Engine: ObservableObject {
     func send(_ prompt: String, agent: String, level: Int32, attachments: [Int64] = []) {
         guard let h = handle, !busy else { return }
         busy = true
+        let clean = agent.split(separator: "@", maxSplits: 1).first.map(String.init) ?? agent
+        liveAgent = clean
+        PowerManager.shared.beginActivity(reason: "Chorus Turn (\(clean))")
         echoUser(prompt)
         lastError = nil
         let idsJSON = Self.jsonIDs(attachments)
@@ -784,6 +1129,7 @@ final class Engine: ObservableObject {
             }
             let result = Self.decode(TurnResult.self, json)
             DispatchQueue.main.async {
+                PowerManager.shared.endActivity()
                 self?.busy = false
                 self?.endLive()
                 if let r = result, r.ok {
@@ -802,6 +1148,10 @@ final class Engine: ObservableObject {
     func sendRelay(_ prompt: String, agents: String, level: Int32, attachments: [Int64] = []) {
         guard let h = handle, !busy else { return }
         busy = true; lastError = nil
+        let first = agents.split(separator: ",").first.map(String.init) ?? agents
+        let clean = first.split(separator: "@", maxSplits: 1).first.map(String.init) ?? first
+        liveAgent = clean
+        PowerManager.shared.beginActivity(reason: "Chorus Relay (\(clean))")
         echoUser(prompt)
         let idsJSON = Self.jsonIDs(attachments)
         queue.async { [weak self] in
@@ -814,6 +1164,7 @@ final class Engine: ObservableObject {
             }
             let obj = Self.decode(SimpleResult.self, json)
             DispatchQueue.main.async {
+                PowerManager.shared.endActivity()
                 self?.busy = false
                 self?.endLive()
                 if obj?.ok != true, !Self.isStop(obj?.error) { self?.lastError = obj?.error ?? "relay failed" }
@@ -828,6 +1179,7 @@ final class Engine: ObservableObject {
                  completion: @escaping (String) -> Void) {
         guard let h = handle, !busy else { return }
         busy = true; lastError = nil
+        PowerManager.shared.beginActivity(reason: "Chorus Compare")
         queue.async { [weak self] in
             let json = prompt.withCString { p in
                 agents.withCString { a in
@@ -835,6 +1187,7 @@ final class Engine: ObservableObject {
                 }
             }
             DispatchQueue.main.async {
+                PowerManager.shared.endActivity()
                 self?.busy = false
                 self?.endLive()
                 self?.refresh()
@@ -997,7 +1350,7 @@ final class Engine: ObservableObject {
         let name: String
         let description: String
         let path: String
-        let source: String      // "chorus" | "project" | "user"
+        let source: String      // "chorus" | "project" | "agents" | "user" (Claude) | "codex" | "gemini"
         var id: String { source + path }
     }
     @Published var skills: [SkillInfo] = []
@@ -1045,7 +1398,18 @@ final class Engine: ObservableObject {
         let resets_at: Int64?
         let resets_label: String?
     }
-    struct RateLimits: Codable, Hashable { let primary: UsageWindow?; let secondary: UsageWindow? }
+    struct ModelQuotaGroup: Codable, Hashable, Identifiable {
+        var id: String { name }
+        let name: String
+        let description: String?
+        let weekly: UsageWindow?
+        let five_hour: UsageWindow?
+    }
+    struct RateLimits: Codable, Hashable {
+        let primary: UsageWindow?
+        let secondary: UsageWindow?
+        let groups: [ModelQuotaGroup]?
+    }
     struct LimitHit: Codable, Hashable { let at_ms: Int64; let resets: String? }
     struct Account: Codable, Identifiable, Hashable {
         let name: String        // what goes in a relay chain: codex, claude@work
@@ -1116,8 +1480,12 @@ final class Engine: ObservableObject {
             let json = db.withCString { Self.string(from: chorus_list_sessions($0)) }
             let r = Self.decode(SessionsResult.self, json)
             DispatchQueue.main.async {
-                self?.sessions = r?.sessions ?? []
-                self?.sessionsByDB[db] = r?.sessions ?? []
+                let list = r?.sessions ?? []
+                self?.sessions = list
+                self?.sessionsByDB[db] = list
+                for s in list {
+                    SpotlightIndexer.shared.indexSession(id: s.id, title: s.title, goal: s.goal, cwd: s.cwd)
+                }
             }
         }
     }
@@ -1305,6 +1673,603 @@ final class Engine: ObservableObject {
                 if obj?.ok != true { self?.lastError = obj?.error ?? "restore failed" }
                 self?.refresh()
             }
+        }
+    }
+
+    // ---- Phase 2-5: Workbench File Tree, Diff, Review, Worktrees, Search ----
+
+    struct FileNode: Codable, Identifiable, Hashable {
+        let name: String
+        let rel_path: String
+        let is_dir: Bool
+        let size: Int64
+        let git_status: String?
+        let is_focus: Bool
+        let children: [FileNode]
+        var id: String { rel_path }
+    }
+
+    struct FileTreeResult: Codable {
+        let root_path: String
+        let total_files: Int
+        let nodes: [FileNode]
+    }
+
+    private struct FileTreeResponse: Codable {
+        let ok: Bool
+        let tree: FileTreeResult?
+        let error: String?
+    }
+
+    func fetchFileTree(cwd: String, focusFile: String? = nil, maxDepth: Int = 6, completion: @escaping (FileTreeResult?) -> Void) {
+        guard !cwd.isEmpty else { completion(nil); return }
+        DispatchQueue.global(qos: .utility).async {
+            let json = cwd.withCString { cPath in
+                if let focus = focusFile {
+                    return focus.withCString { cFocus in
+                        Self.string(from: chorus_file_tree_json(cPath, cFocus, Int32(maxDepth)))
+                    }
+                } else {
+                    return Self.string(from: chorus_file_tree_json(cPath, nil, Int32(maxDepth)))
+                }
+            }
+            let res = Self.decode(FileTreeResponse.self, json)
+            DispatchQueue.main.async {
+                completion(res?.tree)
+            }
+        }
+    }
+
+    struct DiffLine: Codable, Hashable {
+        let line_num: Int
+        let text: String
+        let kind: String
+    }
+
+    struct AlignedLinePair: Codable, Identifiable, Hashable {
+        let left: DiffLine?
+        let right: DiffLine?
+        var id: String { "\(left?.line_num ?? 0)_\(right?.line_num ?? 0)_\(left?.kind ?? "")_\(right?.kind ?? "")" }
+    }
+
+    struct AlignedHunk: Codable, Identifiable, Hashable {
+        let header: String
+        let old_start: Int
+        let new_start: Int
+        let pairs: [AlignedLinePair]
+        var id: String { header }
+    }
+
+    struct AlignedFileDiff: Codable, Identifiable, Hashable {
+        let path: String
+        let status: String
+        let additions: Int
+        let deletions: Int
+        let hunks: [AlignedHunk]
+        var id: String { path }
+    }
+
+    private struct AlignedDiffResponse: Codable {
+        let ok: Bool
+        let diff: AlignedFileDiff?
+        let error: String?
+    }
+
+    func fetchAlignedDiff(oldText: String, newText: String, path: String, completion: @escaping (AlignedFileDiff?) -> Void) {
+        queue.async {
+            let json = oldText.withCString { cOld in
+                newText.withCString { cNew in
+                    path.withCString { cPath in
+                        Self.string(from: chorus_aligned_diff_json(cOld, cNew, cPath))
+                    }
+                }
+            }
+            let res = Self.decode(AlignedDiffResponse.self, json)
+            DispatchQueue.main.async {
+                completion(res?.diff)
+            }
+        }
+    }
+
+    struct ReviewComment: Codable, Identifiable, Hashable {
+        let id: Int64
+        let session_id: Int64
+        let file_path: String
+        let line_number: Int
+        let comment_text: String
+        let code_snippet: String?
+        let created_ms: Int64
+        let status: String
+    }
+
+    private struct PendingCommentsResponse: Codable {
+        let ok: Bool
+        let comments: [ReviewComment]?
+    }
+
+    private struct SteeringPromptResponse: Codable {
+        let ok: Bool
+        let prompt: String?
+    }
+
+    func addReviewComment(path: String, line: Int, comment: String, snippet: String?) {
+        guard let h = handle else { return }
+        queue.async {
+            _ = path.withCString { cPath in
+                comment.withCString { cComment in
+                    if let s = snippet {
+                        s.withCString { cSnip in
+                            Self.string(from: chorus_add_review_comment(h.raw, cPath, Int32(line), cComment, cSnip))
+                        }
+                    } else {
+                        Self.string(from: chorus_add_review_comment(h.raw, cPath, Int32(line), cComment, nil))
+                    }
+                }
+            }
+        }
+    }
+
+    func fetchPendingReviewComments(completion: @escaping ([ReviewComment]) -> Void) {
+        guard let h = handle else { completion([]); return }
+        queue.async {
+            let json = Self.string(from: chorus_pending_review_comments(h.raw))
+            let res = Self.decode(PendingCommentsResponse.self, json)
+            DispatchQueue.main.async {
+                completion(res?.comments ?? [])
+            }
+        }
+    }
+
+    func clearReviewComments() {
+        guard let h = handle else { return }
+        queue.async {
+            _ = Self.string(from: chorus_clear_review_comments(h.raw))
+        }
+    }
+
+    func fetchReviewSteeringPrompt(completion: @escaping (String) -> Void) {
+        guard let h = handle else { completion(""); return }
+        queue.async {
+            let json = Self.string(from: chorus_review_steering_prompt(h.raw))
+            let res = Self.decode(SteeringPromptResponse.self, json)
+            DispatchQueue.main.async {
+                completion(res?.prompt ?? "")
+            }
+        }
+    }
+
+    struct WorktreeInfo: Codable, Identifiable, Hashable {
+        let id: String
+        let branch: String
+        let path: String
+        let role: String
+        let allocated_port: Int
+        let status: String
+    }
+
+    private struct WorktreesResponse: Codable {
+        let ok: Bool
+        let worktrees: [WorktreeInfo]?
+    }
+
+    func fetchWorktrees(cwd: String, completion: @escaping ([WorktreeInfo]) -> Void) {
+        guard !cwd.isEmpty else { completion([]); return }
+        queue.async {
+            let json = cwd.withCString { cPath in
+                Self.string(from: chorus_list_worktrees(cPath))
+            }
+            let res = Self.decode(WorktreesResponse.self, json)
+            DispatchQueue.main.async {
+                completion(res?.worktrees ?? [])
+            }
+        }
+    }
+
+    func createWorktree(cwd: String, role: String, completion: @escaping (WorktreeInfo?) -> Void) {
+        guard !cwd.isEmpty else { completion(nil); return }
+        queue.async {
+            let json = cwd.withCString { cCwd in
+                role.withCString { cRole in
+                    Self.string(from: chorus_create_worktree(cCwd, cRole))
+                }
+            }
+            struct CreateRes: Codable { let ok: Bool; let worktree: WorktreeInfo? }
+            let res = Self.decode(CreateRes.self, json)
+            DispatchQueue.main.async {
+                completion(res?.worktree)
+            }
+        }
+    }
+
+    func mergeWorktree(cwd: String, branch: String, completion: @escaping (Bool, String) -> Void) {
+        guard !cwd.isEmpty, !branch.isEmpty else { completion(false, "Invalid args"); return }
+        queue.async {
+            let json = cwd.withCString { cCwd in
+                branch.withCString { cBranch in
+                    Self.string(from: chorus_merge_worktree(cCwd, cBranch))
+                }
+            }
+            struct MergeOutcome: Codable {
+                let success: Bool
+                let fast_forward: Bool
+                let has_conflicts: Bool
+                let message: String
+            }
+            struct MergeRes: Codable {
+                let ok: Bool
+                let outcome: MergeOutcome?
+            }
+            let res = Self.decode(MergeRes.self, json)
+            DispatchQueue.main.async {
+                completion(res?.outcome?.success ?? false, res?.outcome?.message ?? "Error")
+            }
+        }
+    }
+
+    func discardWorktree(cwd: String, branch: String, completion: @escaping (Bool) -> Void) {
+        guard !cwd.isEmpty, !branch.isEmpty else { completion(false); return }
+        queue.async {
+            let json = cwd.withCString { cCwd in
+                branch.withCString { cBranch in
+                    Self.string(from: chorus_remove_worktree(cCwd, cBranch))
+                }
+            }
+            struct DiscardRes: Codable { let ok: Bool }
+            let res = Self.decode(DiscardRes.self, json)
+            DispatchQueue.main.async {
+                completion(res?.ok ?? false)
+            }
+        }
+    }
+
+    func updateSessionCost(db: String, id: Int64) {
+        guard id >= 0, !db.isEmpty else {
+            self.sessionCostUSD = 0.0
+            return
+        }
+        ioQueue.async {
+            let cost = db.withCString { cDb in
+                chorus_session_cost_usd(cDb, id)
+            }
+            DispatchQueue.main.async {
+                self.sessionCostUSD = cost
+            }
+        }
+    }
+
+    // MARK: - Agent Roles & AI Role Synthesis
+
+    struct AgentRole: Identifiable, Codable, Equatable {
+        var id: String { name }
+        var name: String
+        var description: String
+        var system_prompt: String
+        var tools: [String]
+        var model: String?
+
+        var isBuiltin: Bool {
+            let n = name.lowercased()
+            return n == "orchestrator" || n == "investigator" || n == "builder" || n == "reviewer"
+        }
+
+        var iconName: String {
+            switch name.lowercased() {
+            case "orchestrator": return "brain.head.profile"
+            case "investigator": return "magnifyingglass"
+            case "builder": return "hammer.fill"
+            case "reviewer": return "checklist.checked"
+            case let n where n.contains("database") || n.contains("sql"): return "cylinder.split.1x2"
+            case let n where n.contains("security") || n.contains("audit"): return "lock.shield.fill"
+            case let n where n.contains("test") || n.contains("spec"): return "testtube.2"
+            case let n where n.contains("ui") || n.contains("frontend"): return "paintpalette"
+            case let n where n.contains("doc"): return "doc.text"
+            case let n where n.contains("bug") || n.contains("fix"): return "ladybug.fill"
+            default: return "person.badge.shield.checkmark"
+            }
+        }
+    }
+
+    private struct RolesResponse: Codable {
+        let ok: Bool
+        let roles: [AgentRole]?
+    }
+
+    func fetchRoles(cwd: String, completion: @escaping ([AgentRole]) -> Void) {
+        queue.async {
+            let json = cwd.withCString { cPath in
+                Self.string(from: chorus_list_roles(cPath))
+            }
+            let res = Self.decode(RolesResponse.self, json)
+            DispatchQueue.main.async {
+                completion(res?.roles ?? [])
+            }
+        }
+    }
+
+    func saveRole(cwd: String, role: AgentRole, completion: @escaping (Bool, String?) -> Void) {
+        guard !cwd.isEmpty else { completion(false, "ต้องเลือกโฟลเดอร์โปรเจกต์ก่อน"); return }
+        guard let data = try? JSONEncoder().encode(role),
+              let jsonStr = String(data: data, encoding: .utf8) else {
+            completion(false, "แปลงข้อมูล Role ไม่สำเร็จ")
+            return
+        }
+        queue.async {
+            let json = cwd.withCString { cPath in
+                jsonStr.withCString { cJson in
+                    Self.string(from: chorus_save_role(cPath, cJson))
+                }
+            }
+            struct Res: Codable { let ok: Bool; let error: String? }
+            let res = Self.decode(Res.self, json)
+            DispatchQueue.main.async {
+                completion(res?.ok == true, res?.error)
+            }
+        }
+    }
+
+    func deleteRole(cwd: String, name: String, completion: @escaping (Bool, String?) -> Void) {
+        guard !cwd.isEmpty else { completion(false, "ต้องเลือกโฟลเดอร์โปรเจกต์ก่อน"); return }
+        queue.async {
+            let json = cwd.withCString { cPath in
+                name.withCString { cName in
+                    Self.string(from: chorus_delete_role(cPath, cName))
+                }
+            }
+            struct Res: Codable { let ok: Bool; let error: String? }
+            let res = Self.decode(Res.self, json)
+            DispatchQueue.main.async {
+                completion(res?.ok == true, res?.error)
+            }
+        }
+    }
+
+    func synthesizeRole(task: String, writeMode: Bool, nameHint: String?, completion: @escaping (AgentRole?) -> Void) {
+        queue.async {
+            let json = task.withCString { cTask in
+                (nameHint ?? "").withCString { cHint in
+                    Self.string(from: chorus_synthesize_role(cTask, writeMode, cHint))
+                }
+            }
+            struct Res: Codable { let ok: Bool; let role: AgentRole? }
+            let res = Self.decode(Res.self, json)
+            DispatchQueue.main.async {
+                completion(res?.role)
+            }
+        }
+    }
+
+    struct SearchHit: Codable, Identifiable, Hashable {
+        let session_id: Int64
+        let session_title: String
+        let seq: Int64
+        let actor: String
+        let snippet: String
+        var id: String { "\(session_id)_\(seq)" }
+    }
+
+    private struct SearchResponse: Codable {
+        let ok: Bool
+        let hits: [SearchHit]?
+    }
+
+    func searchSessions(dbPath: String, query: String, completion: @escaping ([SearchHit]) -> Void) {
+        guard !dbPath.isEmpty else { completion([]); return }
+        queue.async {
+            let json = dbPath.withCString { cDb in
+                query.withCString { cQ in
+                    Self.string(from: chorus_search_sessions_json(cDb, cQ))
+                }
+            }
+            let res = Self.decode(SearchResponse.self, json)
+            DispatchQueue.main.async {
+                completion(res?.hits ?? [])
+            }
+        }
+    }
+
+    // MARK: - Super App & Autonomous Harness Engine Extensions
+
+    struct RepoMapResponse: Codable {
+        let ok: Bool
+        let symbols_count: Int?
+        let repo_map: String?
+        let error: String?
+    }
+
+    /// Generate a high-density Repo Map using Personalized PageRank in Rust.
+    func generateRepoMap(workspace: String, maxTokens: UInt32 = 1024, completion: @escaping (String?, Int?, String?) -> Void) {
+        ioQueue.async {
+            let json = workspace.withCString { cWs in
+                Self.string(from: chorus_repo_map_generate_json(cWs, maxTokens))
+            }
+            let res = Self.decode(RepoMapResponse.self, json)
+            DispatchQueue.main.async {
+                if res?.ok == true {
+                    completion(res?.repo_map, res?.symbols_count, nil)
+                } else {
+                    completion(nil, nil, res?.error ?? "สร้าง Repo Map ไม่สำเร็จ")
+                }
+            }
+        }
+    }
+
+    struct StructuralDiffAnalysis: Codable {
+        let total_lines_changed: Int
+        let cosmetic_lines: Int
+        let semantic_lines: Int
+        let is_purely_cosmetic: Bool
+    }
+
+    private struct StructuralDiffResponse: Codable {
+        let ok: Bool
+        let analysis: StructuralDiffAnalysis?
+        let error: String?
+    }
+
+    /// Analyze structural diff between old and new code to differentiate cosmetic vs semantic edits.
+    func analyzeStructuralDiff(oldCode: String, newCode: String, completion: @escaping (StructuralDiffAnalysis?, String?) -> Void) {
+        ioQueue.async {
+            let json = oldCode.withCString { cOld in
+                newCode.withCString { cNew in
+                    Self.string(from: chorus_structural_diff_json(cOld, cNew))
+                }
+            }
+            let res = Self.decode(StructuralDiffResponse.self, json)
+            DispatchQueue.main.async {
+                if res?.ok == true {
+                    completion(res?.analysis, nil)
+                } else {
+                    completion(nil, res?.error ?? "วิเคราะห์ structural diff ไม่สำเร็จ")
+                }
+            }
+        }
+    }
+
+    // MARK: - Time-Travel Checkpoint & Selective Rewind (Ticket 10 & 21)
+
+    public struct CheckpointRecord: Identifiable, Codable {
+        public let seq: Int64
+        public let session_id: Int64
+        public let commit_sha: String
+        public let message: String
+        public let created_ms: Int64
+
+        public var id: Int64 { seq }
+
+        public var shortSha: String {
+            String(commit_sha.prefix(7))
+        }
+
+        public var formattedDate: String {
+            let date = Date(timeIntervalSince1970: Double(created_ms) / 1000.0)
+            let formatter = RelativeDateTimeFormatter()
+            formatter.unitsStyle = .short
+            return formatter.localizedString(for: date, relativeTo: Date())
+        }
+    }
+
+    private struct CheckpointListResponse: Codable {
+        let ok: Bool
+        let checkpoints: [CheckpointRecord]?
+        let error: String?
+    }
+
+    private struct CheckpointRewindResponse: Codable {
+        let ok: Bool
+        let summary: CheckpointRewindSummary?
+        let error: String?
+    }
+
+    public struct CheckpointRewindSummary: Codable {
+        public let session_id: Int64
+        public let target_seq: Int64
+        public let mode: String
+        public let restored_commit: String?
+        public let events_rolled_back: Int
+    }
+
+    func listCheckpoints(db: String, sessionID: Int64, completion: @escaping ([CheckpointRecord]) -> Void) {
+        guard sessionID >= 0, !db.isEmpty else { return completion([]) }
+        ioQueue.async {
+            let json = db.withCString { cDb in
+                Self.string(from: chorus_checkpoint_list_json(cDb, sessionID))
+            }
+            let res = Self.decode(CheckpointListResponse.self, json)
+            DispatchQueue.main.async {
+                completion(res?.checkpoints ?? [])
+            }
+        }
+    }
+
+    func rewindCheckpoint(db: String, ws: String, sessionID: Int64, targetSeq: Int64, mode: String, completion: @escaping (Bool, String?) -> Void) {
+        guard sessionID >= 0, !db.isEmpty, !ws.isEmpty else {
+            completion(false, "เซสชันหรือโฟลเดอร์ไม่ถูกต้อง")
+            return
+        }
+        ioQueue.async {
+            let json = db.withCString { cDb in
+                ws.withCString { cWs in
+                    mode.withCString { cMode in
+                        Self.string(from: chorus_checkpoint_rewind_json(cDb, cWs, sessionID, targetSeq, cMode))
+                    }
+                }
+            }
+            let res = Self.decode(CheckpointRewindResponse.self, json)
+            DispatchQueue.main.async { [weak self] in
+                if res?.ok == true {
+                    self?.reopen(db: db, sessionID: sessionID)
+                    self?.workingDiff = ""
+                    completion(true, nil)
+                } else {
+                    completion(false, res?.error ?? "ย้อนเวลาไม่สำเร็จ")
+                }
+            }
+        }
+    }
+
+    // MARK: - Autonomous Verification & Self-Healing Engine (Ticket 03 & 21)
+
+    public struct DiagnosticItem: Codable, Identifiable {
+        public let file: String
+        public let line: Int
+        public let col: Int
+        public let severity: String
+        public let message: String
+
+        public var id: String { "\(file):\(line):\(col):\(message)" }
+        public var tool: String { severity }
+        public var column: Int? { col }
+        public var rule: String? { nil }
+    }
+
+    public typealias VerifyFinding = DiagnosticItem
+
+    public struct VerificationData: Codable {
+        public let passed: Bool
+        public let checker_used: String
+        public let duration_ms: UInt64
+        public let diagnostics: [DiagnosticItem]
+        public let raw_output: String
+
+        public var tool_used: String { checker_used }
+        public var findings: [DiagnosticItem] { diagnostics }
+    }
+
+    public typealias VerificationResult = VerificationData
+
+    private struct VerifyWorkspaceResponse: Codable {
+        let ok: Bool
+        let verification: VerificationData?
+        let error: String?
+    }
+
+    @Published public var lastVerification: VerificationData? = nil
+    @Published public var isVerifyingWorkspace: Bool = false
+    public var isVerifying: Bool { isVerifyingWorkspace }
+
+    func verifyWorkspace(ws: String, completion: ((VerificationData?, String?) -> Void)? = nil) {
+        guard !ws.isEmpty else { return }
+        isVerifyingWorkspace = true
+        ioQueue.async {
+            let json = ws.withCString { cWs in
+                Self.string(from: chorus_verify_workspace_json(cWs))
+            }
+            let res = Self.decode(VerifyWorkspaceResponse.self, json)
+            DispatchQueue.main.async { [weak self] in
+                self?.isVerifyingWorkspace = false
+                if res?.ok == true {
+                    self?.lastVerification = res?.verification
+                    completion?(res?.verification, nil)
+                } else {
+                    completion?(nil, res?.error ?? "ตรวจสอบโค้ดไม่สำเร็จ")
+                }
+            }
+        }
+    }
+
+    func verifyWorkspace(workspace: String, completion: @escaping (VerificationResult?, String?) -> Void) {
+        verifyWorkspace(ws: workspace) { data, err in
+            completion(data, err)
         }
     }
 

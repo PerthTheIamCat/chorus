@@ -32,6 +32,32 @@ pub const DEFAULT_BRIDGE: &[&str] = &["npx", "-y", "@agentclientprotocol/codex-a
 pub const CLAUDE_BRIDGE: &[&str] = &["npx", "-y", "@zed-industries/claude-agent-acp"];
 pub const CLAUDE_BRIDGE_LEGACY: &[&str] = &["npx", "-y", "@zed-industries/claude-code-acp"];
 
+fn find_binary(name: &str) -> Option<PathBuf> {
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let candidates = [
+            home.join(".local/bin").join(name),
+            home.join(".cargo/bin").join(name),
+            home.join(".npm-global/bin").join(name),
+            PathBuf::from("/opt/homebrew/bin").join(name),
+            PathBuf::from("/usr/local/bin").join(name),
+        ];
+        for c in candidates {
+            if c.is_file() {
+                return Some(c);
+            }
+        }
+    }
+    None
+}
+
 /// The ACP command for a given agent name. Every one of these speaks the
 /// same protocol (`Agent` + this module handle it); they differ only in
 /// which process to spawn. An unknown name falls back to the Codex bridge.
@@ -45,6 +71,8 @@ pub fn bridge_for(agent_name: &str) -> Vec<String> {
     let n = agent_name.to_lowercase();
     let (env_key, cmd): (&str, &[&str]) = if n.contains("claude") {
         ("CHORUS_CLAUDE_BRIDGE", CLAUDE_BRIDGE)
+    } else if n.contains("antigravity") || n.contains("agy") {
+        ("CHORUS_ANTIGRAVITY_BRIDGE", &["antigravity-acp"])
     } else if n.contains("gemini") {
         ("CHORUS_GEMINI_BRIDGE", &["gemini", "--experimental-acp"])
     } else {
@@ -54,6 +82,42 @@ pub fn bridge_for(agent_name: &str) -> Vec<String> {
         let parts: Vec<String> = v.split_whitespace().map(|s| s.to_string()).collect();
         if !parts.is_empty() {
             return parts;
+        }
+    }
+    if n.contains("claude") {
+        for candidate in ["claude-agent-acp", "claude-code-acp"] {
+            if let Some(p) = find_binary(candidate) {
+                return vec![p.to_string_lossy().to_string()];
+            }
+        }
+    } else if n.contains("antigravity") || n.contains("agy") {
+        if let Some(p) = find_binary("antigravity-acp") {
+            return vec![p.to_string_lossy().to_string()];
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let candidate = dir.join("antigravity-acp");
+                if candidate.exists() {
+                    return vec![candidate.to_string_lossy().to_string()];
+                }
+            }
+        }
+        for rel in [
+            "target/debug/antigravity-acp",
+            "target/release/antigravity-acp",
+            "../../target/debug/antigravity-acp",
+            "../../target/release/antigravity-acp",
+        ] {
+            let target_candidate = std::path::Path::new(rel);
+            if target_candidate.is_file() {
+                if let Ok(p) = target_candidate.canonicalize() {
+                    return vec![p.to_string_lossy().to_string()];
+                }
+            }
+        }
+    } else if n.contains("codex") {
+        if let Some(p) = find_binary("codex-acp") {
+            return vec![p.to_string_lossy().to_string()];
         }
     }
     cmd.iter().map(|s| s.to_string()).collect()
@@ -86,6 +150,19 @@ pub enum AgentEvent {
     ToolCall { title: String, kind: String },
     /// The resolution of a tool call.
     ToolResult { title: String, status: String },
+    /// A child session announced by the bridge, including nested children.
+    SubagentSpawned {
+        session_id: String,
+        parent_session_id: String,
+        name: String,
+        task: String,
+    },
+    /// The child session's final state and any message it sent while running.
+    SubagentState {
+        session_id: String,
+        state: String,
+        message: String,
+    },
     /// A file edit the agent proposed, as a unified-diff-ready triple.
     Diff {
         path: String,
@@ -105,6 +182,8 @@ pub struct TurnOutcome {
     pub message: String,
     pub thoughts: String,
     pub events: Vec<AgentEvent>,
+    /// The model selected and reported for this ACP session, when available.
+    pub model: Option<String>,
     pub context_used: Option<i64>,
     pub context_window: Option<i64>,
     pub stop_reason: String,
@@ -353,7 +432,10 @@ impl CodexAgent {
                 None => return Err(anyhow!("prompt content is missing its type")),
             }
         }
-        let mut acc = Accumulator::default();
+        let mut acc = Accumulator {
+            root_session_id: self.session_id.clone(),
+            ..Default::default()
+        };
         let cwd = self.cwd.clone();
 
         let id = self.agent.request(
@@ -391,7 +473,9 @@ impl CodexAgent {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        Ok(acc.finish())
+        let mut outcome = acc.finish();
+        outcome.model = self.model.clone();
+        Ok(outcome)
     }
 
     // ---- internals ----------------------------------------------------
@@ -421,7 +505,8 @@ impl CodexAgent {
                 "protocolVersion": 1,
                 "clientCapabilities": {
                     "fs": { "readTextFile": true, "writeTextFile": true },
-                    "terminal": false
+                    "terminal": false,
+                    "subagents": {}
                 },
                 "clientInfo": { "name": "chorus", "version": env!("CARGO_PKG_VERSION") }
             }),
@@ -681,9 +766,11 @@ fn report_progress(params: &Value) {
 /// Folds a turn's `session/update` stream into a [`TurnOutcome`].
 #[derive(Default)]
 struct Accumulator {
+    root_session_id: String,
     message: String,
     thoughts: String,
     events: Vec<AgentEvent>,
+    child_messages: std::collections::HashMap<String, String>,
     /// `toolCallId` → title, so a `tool_call_update` (which carries only the
     /// id) can name the call it resolves.
     titles: std::collections::HashMap<String, String>,
@@ -703,6 +790,44 @@ impl Accumulator {
             .get("sessionUpdate")
             .and_then(Value::as_str)
             .unwrap_or("");
+        let session_id = params.get("sessionId").and_then(Value::as_str).unwrap_or("");
+        match kind {
+            "subagent_spawned" => {
+                if let Some(child) = update.get("subagentSessionId").and_then(Value::as_str) {
+                    self.events.push(AgentEvent::SubagentSpawned {
+                        session_id: child.to_string(),
+                        parent_session_id: session_id.to_string(),
+                        name: update.get("name").and_then(Value::as_str).unwrap_or("Agent").to_string(),
+                        task: update.get("task").and_then(Value::as_str).unwrap_or("").to_string(),
+                    });
+                }
+                return;
+            }
+            "subagent_state_update" => {
+                if let (Some(child), Some(state)) = (
+                    update.get("subagentSessionId").and_then(Value::as_str),
+                    update.get("state").and_then(Value::as_str),
+                ) {
+                    self.events.push(AgentEvent::SubagentState {
+                        session_id: child.to_string(),
+                        state: state.to_string(),
+                        message: self.child_messages.remove(child).unwrap_or_default(),
+                    });
+                }
+                return;
+            }
+            _ => {}
+        }
+        // Child updates share the transport with the parent. Their prose and
+        // tools must not become the parent's answer or tool history.
+        if !session_id.is_empty() && session_id != self.root_session_id {
+            if kind == "agent_message_chunk" {
+                if let Some(text) = chunk_text(update) {
+                    self.child_messages.entry(session_id.to_string()).or_default().push_str(&text);
+                }
+            }
+            return;
+        }
         match kind {
             "agent_message_chunk" => {
                 if let Some(t) = chunk_text(update) {
@@ -727,8 +852,23 @@ impl Accumulator {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                if let Some(id) = update.get("toolCallId").and_then(Value::as_str) {
+                let id = update.get("toolCallId").and_then(Value::as_str).unwrap_or("");
+                if !id.is_empty() {
                     self.titles.insert(id.to_string(), title.clone());
+                }
+                // Subagent Normalizer: Normalize Claude Task tool call into SubagentSpawned
+                if title == "Task" || kind == "task" {
+                    let task_desc = update.get("rawInput")
+                        .and_then(|v| v.get("description").or_else(|| v.get("prompt")))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let child_id = format!("task-{}", if id.is_empty() { "subagent" } else { id });
+                    self.events.push(AgentEvent::SubagentSpawned {
+                        session_id: child_id,
+                        parent_session_id: self.root_session_id.clone(),
+                        name: "Claude Task Subagent".to_string(),
+                        task: task_desc.to_string(),
+                    });
                 }
                 self.events.push(AgentEvent::ToolCall { title, kind });
             }
@@ -819,6 +959,7 @@ impl Accumulator {
             message,
             thoughts: self.thoughts.trim().to_string(),
             events: self.events,
+            model: None,
             context_used: self.context_used,
             context_window: self.context_window,
             stop_reason: self.stop_reason,
@@ -828,14 +969,23 @@ impl Accumulator {
 
 fn chunk_text(update: &Value) -> Option<String> {
     let content = update.get("content")?;
+    if let Some(s) = content.as_str() {
+        return Some(s.to_string());
+    }
     if let Some(t) = content.get("text").and_then(Value::as_str) {
         return Some(t.to_string());
     }
-    // Some builds send content as an array of typed parts.
+    // Some builds send content as an array of typed parts or strings.
     if let Some(arr) = content.as_array() {
         let joined: String = arr
             .iter()
-            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .filter_map(|p| {
+                if let Some(s) = p.as_str() {
+                    Some(s)
+                } else {
+                    p.get("text").and_then(Value::as_str)
+                }
+            })
             .collect();
         if !joined.is_empty() {
             return Some(joined);

@@ -10,21 +10,33 @@ let target = "debug"
 let package = Package(
     name: "Chorus",
     platforms: [.macOS(.v14)],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.4"),
+    ],
     targets: [
         .systemLibrary(name: "CChorus", path: "Sources/CChorus"),
         .executableTarget(
             name: "Chorus",
-            dependencies: ["CChorus"],
+            dependencies: [
+                "CChorus",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
+            resources: [.process("Resources")],
             linkerSettings: [
                 .unsafeFlags([
                     "-L../../target/\(target)",
                     "-lchorus_ffi",
                     // Rust staticlib transitive needs:
                     "-lc++",
+                    // Sparkle.framework is embedded by build.sh into
+                    // Contents/Frameworks of the .app bundle.
+                    "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
                     "-lresolv",
                     "-framework", "CoreFoundation",
                     "-framework", "Security",
                     "-framework", "SystemConfiguration",
+                    "-framework", "Vision",
+                    "-framework", "CoreSpotlight",
                 ])
             ]
         ),

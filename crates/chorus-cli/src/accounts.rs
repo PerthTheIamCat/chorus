@@ -36,6 +36,12 @@ pub fn dir(agent: &str, account: Option<&str>) -> Option<PathBuf> {
         None if agent.contains("claude") => std::env::var_os("CLAUDE_CONFIG_DIR")
             .map(PathBuf::from)
             .or_else(|| home().map(|h| h.join(".claude"))),
+        None if agent.contains("antigravity") || agent.contains("agy") => {
+            std::env::var_os("ANTIGRAVITY_CONFIG_DIR")
+                .or_else(|| std::env::var_os("AGY_HOME"))
+                .map(PathBuf::from)
+                .or_else(|| home().map(|h| h.join(".gemini/antigravity")))
+        }
         None => std::env::var_os("CODEX_HOME")
             .map(PathBuf::from)
             .or_else(|| home().map(|h| h.join(".codex"))),
@@ -45,6 +51,8 @@ pub fn dir(agent: &str, account: Option<&str>) -> Option<PathBuf> {
 fn env_key(agent: &str) -> &'static str {
     if agent.contains("claude") {
         "CLAUDE_CONFIG_DIR"
+    } else if agent.contains("antigravity") || agent.contains("agy") {
+        "ANTIGRAVITY_CONFIG_DIR"
     } else {
         "CODEX_HOME"
     }
@@ -107,6 +115,8 @@ pub fn remove(agent: &str, account: &str) -> anyhow::Result<()> {
 pub fn login_command(agent: &str, account: Option<&str>) -> String {
     let base = if agent.contains("claude") {
         "claude"
+    } else if agent.contains("antigravity") || agent.contains("agy") {
+        "agy login"
     } else {
         "codex login"
     };
@@ -124,12 +134,18 @@ mod tests {
     fn split_and_env() {
         assert_eq!(split("claude@work"), ("claude", Some("work")));
         assert_eq!(split("codex"), ("codex", None));
+        assert_eq!(split("antigravity"), ("antigravity", None));
         assert_eq!(split("codex@"), ("codex@", None));
         assert!(env_for("codex").is_empty());
+        assert!(env_for("antigravity").is_empty());
         let e = env_for("codex@work");
         assert_eq!(e[0].0, "CODEX_HOME");
         assert!(e[0].1.ends_with(".chorus/accounts/codex/work"));
         assert_eq!(env_for("claude@x")[0].0, "CLAUDE_CONFIG_DIR");
+        assert_eq!(env_for("antigravity@x")[0].0, "ANTIGRAVITY_CONFIG_DIR");
+        assert_eq!(login_command("antigravity", None), "agy login");
+        assert_eq!(login_command("codex", None), "codex login");
+        assert_eq!(login_command("claude", None), "claude");
         assert!(!valid_name("../x"));
         assert!(valid_name("work-2"));
     }

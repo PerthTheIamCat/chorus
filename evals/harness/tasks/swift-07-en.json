@@ -1,0 +1,14 @@
+{
+  "task_id": "swift-07-en",
+  "language": "en",
+  "domain": "swift",
+  "difficulty": "architectural",
+  "prompt_th": "ออกแบบสถาปัตยกรรม multi-window session coordinator รองรับ native macOS tabs, state restoration และ Stage Manager window grouping",
+  "prompt_en": "Design multi-window session coordinator architecture supporting native macOS window tabs, state restoration, and Stage Manager grouping",
+  "test_command": "swift test --filter MultiWindowCoordinatorTests",
+  "expected_files": [
+    "ChorusApp/Navigation/SessionCoordinator.swift",
+    "ChorusApp/Navigation/WindowManager.swift",
+    "ChorusApp/Navigation/StageManagerSupport.swift"
+  ]
+}

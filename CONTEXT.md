@@ -31,3 +31,28 @@ _Avoid_: Agent, which performs the dispatched work
 **Route proposal**:
 The router's recommended agent, model, and reasoning effort before the user has overridden it or Chorus has dispatched the turn.
 _Avoid_: Dispatched target, which is the final choice actually used
+
+**Subagent**:
+A child agent that an agent spawns inside its own turn, through the provider's own mechanism (for example, Claude Code's Task tool or a Codex spawned agent). Chorus observes subagents but does not create them.
+_Avoid_: Parallel agent, when the child was started through Chorus
+
+**Orchestrating agent**:
+An agent that asks Chorus, through Chorus's agent-facing control surface, to start and coordinate other agents. Chorus itself never plans or splits the work.
+_Avoid_: Router, which only picks a target for a user turn
+
+**Chat session**:
+A session not bound to any project, in which the answering model has read-only access and no workspace to change.
+_Avoid_: Session, when the project-bound kind is meant
+
+**In-process model**:
+A locally loaded model executed directly inside the Chorus engine process via embedded runtime (e.g. Metal GGUF) without an external daemon.
+_Avoid_: Ollama model, when referring to embedded weights
+
+**Model manager**:
+The Chorus component that downloads, verifies, and stores local model weights in user application support.
+_Avoid_: Package manager
+
+**Harness eval**:
+A repeatable task suite run through the real Chorus session engine to measure whether Chorus helps agents succeed, judged by outcome, tokens, time, and interventions rather than by model quality alone.
+_Avoid_: Bench, which measures storage and context assembly
+

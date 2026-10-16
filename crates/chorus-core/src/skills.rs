@@ -114,6 +114,60 @@ pub fn list_dir(root: &Path) -> Vec<(String, String, PathBuf)> {
     out
 }
 
+/// Every folder some agent loads skills from, tagged with a source key, in
+/// precedence order (first one wins on a name clash).
+///
+/// Project roots come first because that is how every loader resolves a
+/// clash. User roots: `~/.agents/skills` is the cross-agent location (Codex,
+/// Gemini CLI and Antigravity read it, and most installers put the real files
+/// there and symlink them into the others), then each agent's own folder.
+pub fn visible_roots(cwd: &Path, home: Option<&Path>) -> Vec<(&'static str, PathBuf)> {
+    let mut roots = vec![
+        ("chorus", cwd.join(SKILLS_DIR)),
+        ("project", cwd.join(CLAUDE_SKILLS_DIR)),
+        ("project", cwd.join(".agents/skills")),
+    ];
+    if let Some(home) = home {
+        roots.push(("agents", home.join(".agents/skills")));
+        roots.push(("user", home.join(".claude/skills")));
+        roots.push(("codex", home.join(".codex/skills")));
+        roots.push(("gemini", home.join(".gemini/skills")));
+        roots.push(("gemini", home.join(".gemini/config/skills")));
+    }
+    roots
+}
+
+/// One entry of [`list_visible`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Visible {
+    pub name: String,
+    pub description: String,
+    pub dir: PathBuf,
+    pub source: &'static str,
+}
+
+/// Every skill an agent in `cwd` could see, across all [`visible_roots`].
+///
+/// Deduplicated twice: by resolved directory, because `~/.claude/skills` is
+/// mostly symlinks into `~/.agents/skills` and listing each skill twice would
+/// be noise; and by name, because a slash command can only mean one skill and
+/// the earlier (higher-precedence) root is the one an agent would load.
+pub fn list_visible(cwd: &Path, home: Option<&Path>) -> Vec<Visible> {
+    let mut seen_dirs = std::collections::HashSet::new();
+    let mut seen_names = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (source, root) in visible_roots(cwd, home) {
+        for (name, description, dir) in list_dir(&root) {
+            let real = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+            if !seen_dirs.insert(real) || !seen_names.insert(name.clone()) {
+                continue;
+            }
+            out.push(Visible { name, description, dir, source });
+        }
+    }
+    out
+}
+
 /// Pull `name` and `description` out of a leading `---` block.
 ///
 /// A deliberately small parser, not a YAML dependency: the frontmatter we
@@ -253,6 +307,36 @@ mod tests {
         assert_eq!(rows.len(), 3, "header plus one row per skill: {idx}");
         assert!(idx.contains(".chorus/skills/a/SKILL.md"), "{idx}");
         assert!(!idx.contains("body"), "the index must not inline whole skills: {idx}");
+    }
+
+    #[test]
+    fn global_roots_are_listed_once_each_and_project_wins_a_clash() {
+        let cwd = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let put = |root: &Path, dir: &str, desc: &str| {
+            let d = root.join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("SKILL.md"), format!("---\ndescription: {desc}\n---\n")).unwrap();
+        };
+        let h = home.path();
+        put(&h.join(".agents/skills"), "tdd", "shared");
+        std::fs::create_dir_all(h.join(".claude/skills")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(h.join(".agents/skills/tdd"), h.join(".claude/skills/tdd"))
+            .unwrap();
+        put(&h.join(".codex/skills"), "pdf", "codex only");
+        put(&h.join(".gemini/skills"), "graft", "gemini only");
+        put(&h.join(".codex/skills"), "review", "global review");
+        put(&cwd.path().join(".agents/skills"), "review", "project review");
+
+        let found = list_visible(cwd.path(), Some(h));
+        let get = |n: &str| found.iter().filter(|s| s.name == n).collect::<Vec<_>>();
+        assert_eq!(get("tdd").len(), 1, "symlink into ~/.agents is not a second skill");
+        assert_eq!(get("tdd")[0].source, "agents");
+        assert_eq!(get("pdf")[0].source, "codex");
+        assert_eq!(get("graft")[0].source, "gemini");
+        assert_eq!(get("review").len(), 1);
+        assert_eq!(get("review")[0].description, "project review");
     }
 
     #[test]

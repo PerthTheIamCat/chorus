@@ -1,0 +1,12 @@
+{
+  "task_id": "rust-01-en",
+  "language": "en",
+  "domain": "rust",
+  "difficulty": "trivial",
+  "prompt_th": "แก้ข้อความสะกดผิดใน Error variant InvalidHeader ของ crate auth จาก Invalide เป็น Invalid",
+  "prompt_en": "Fix typo in Error variant InvalidHeader of the auth crate from Invalide to Invalid",
+  "test_command": "cargo test -p auth_service test_error_formatting",
+  "expected_files": [
+    "crates/auth/src/errors.rs"
+  ]
+}

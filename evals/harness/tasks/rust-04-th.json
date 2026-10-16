@@ -1,0 +1,12 @@
+{
+  "task_id": "rust-04-th",
+  "language": "th",
+  "domain": "rust",
+  "difficulty": "medium",
+  "prompt_th": "แก้ memory leak ที่เกิดจาก reference cycle ของ Arc<ConnectionPool> ใน event listener โดยเปลี่ยนเป็น Weak",
+  "prompt_en": "Fix memory leak caused by Arc<ConnectionPool> reference cycle in event listener by downgrading to Weak",
+  "test_command": "cargo test -p pool test_listener_drop_no_cycle",
+  "expected_files": [
+    "crates/pool/src/listener.rs"
+  ]
+}

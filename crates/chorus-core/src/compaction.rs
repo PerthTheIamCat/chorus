@@ -8,6 +8,7 @@
 //! model-backed summarizer (Ollama on an idle machine) implements the same
 //! trait and slots in without touching the assembler.
 
+use crate::inference::LocalInferenceEngine;
 use serde_json::Value;
 
 /// Shortens `text` to roughly `target_chars` characters, keeping whatever
@@ -203,9 +204,57 @@ impl Summarizer for Ollama {
     }
 }
 
-/// Pick the best available summariser: Ollama when `CHORUS_SUMMARY_MODEL`
-/// is set and reachable, else the model-free [`Extractive`].
+/// In-process model-backed summarizer using embedded local weights.
+pub struct InProcessSummarizer {
+    pub model_id: String,
+    pub engine: crate::inference::InProcessEngine,
+}
+
+impl InProcessSummarizer {
+    pub fn new(model_id: impl Into<String>) -> Self {
+        let id = model_id.into();
+        let engine = crate::inference::InProcessEngine::new(&id);
+        Self {
+            model_id: id,
+            engine,
+        }
+    }
+}
+
+impl Summarizer for InProcessSummarizer {
+    fn label(&self) -> String {
+        format!("in-process:{}", self.model_id)
+    }
+
+    fn summarize(&self, text: &str, target_chars: usize) -> String {
+        if text.chars().count() <= target_chars {
+            return text.trim().to_string();
+        }
+        let words = target_chars / 5;
+        let prompt = format!(
+            "Summarise the following in at most {words} words. Keep file paths, \
+             numbers, decisions and any error text verbatim. Output only the summary.\n\n{text}"
+        );
+        match self.engine.complete(&prompt, None) {
+            Ok(out) if !out.is_empty() => {
+                Extractive.summarize(&out, target_chars)
+            }
+            _ => Extractive.summarize(text, target_chars),
+        }
+    }
+}
+
+/// Pick the best available summariser: In-process local model first,
+/// then legacy Ollama if configured, else the model-free [`Extractive`].
 pub fn best() -> Box<dyn Summarizer> {
+    // 1. Check for installed in-process model (Zero-Ollama)
+    let compactor_id = "qwen2.5-coder:1.5b-instruct-q3_k_m";
+    let in_proc = InProcessSummarizer::new(compactor_id);
+    if in_proc.engine.is_ready() {
+        return Box::new(in_proc);
+    }
+
+    // 2. Fall back to legacy Ollama if explicitly configured via environment
     if let Ok(model) = std::env::var("CHORUS_SUMMARY_MODEL") {
         let o = Ollama::new(model);
         // One cheap probe so we don't pay a timeout per turn when Ollama is down.
@@ -213,6 +262,8 @@ pub fn best() -> Box<dyn Summarizer> {
             return Box::new(o);
         }
     }
+
+    // 3. Model-free extractive summarizer (default)
     Box::new(Extractive)
 }
 
