@@ -206,8 +206,7 @@ struct GeneralSettings: View {
     @AppStorage("chorus.inspectorWidth") private var inspectorWidth: Double = 330
     @AppStorage("chorus.codeViewerWidth") private var codeViewerWidth: Double = 520
     @State private var showLearnedRoutes = false
-    @State private var isCheckingUpdate = false
-    @State private var updateStatusText = "ตรวจหาเวอร์ชันล่าสุดจาก GitHub Releases"
+    @EnvironmentObject var updater: Updater
 
     var body: some View {
         Group {
@@ -433,17 +432,15 @@ struct GeneralSettings: View {
                 }
             }
             SettingsGroup(title: "เวอร์ชันและการอัปเดต") {
-                SettingsRow(title: "เวอร์ชันปัจจุบัน", detail: "Chorus v0.1.0 (Desktop Agent Harness)") {
-                    Text("v0.1.0")
+                SettingsRow(title: "เวอร์ชันปัจจุบัน", detail: "Chorus v\(Updater.appVersion)") {
+                    Text("v\(Updater.appVersion)")
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
                 }
                 Divider().padding(.leading, 12)
-                SettingsRow(title: "ตรวจสอบการอัปเดต", detail: updateStatusText) {
-                    Button(isCheckingUpdate ? "กำลังตรวจ…" : "ตรวจหาเวอร์ชันใหม่") {
-                        checkForUpdates()
-                    }
-                    .disabled(isCheckingUpdate)
+                SettingsRow(title: "ตรวจสอบการอัปเดต", detail: "ตรวจจาก GitHub Releases และติดตั้งให้ในแอป (ตรวจอัตโนมัติเมื่อเปิดแอป)") {
+                    Button("ตรวจหาเวอร์ชันใหม่") { updater.checkForUpdates() }
+                        .disabled(!updater.canCheck)
                 }
             }
         }
@@ -455,11 +452,6 @@ struct GeneralSettings: View {
             LearnedRoutesSheet(workspace: workspace)
                 .environmentObject(engine)
         }
-    }
-
-    private func checkForUpdates() {
-        isCheckingUpdate = false
-        updateStatusText = "ยังไม่ได้ตั้งค่าแหล่งตรวจสอบการอัปเดต"
     }
 }
 

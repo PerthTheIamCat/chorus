@@ -14,6 +14,11 @@ final class Updater: ObservableObject {
         controller.updater.publisher(for: \.canCheckForUpdates).assign(to: &$canCheck)
     }
 
+    /// Real bundle version (CFBundleShortVersionString), never a hard-coded string.
+    static var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+    }
+
     func checkForUpdates() { controller.checkForUpdates(nil) }
 }
 
