@@ -54,6 +54,16 @@ else
     cp ../../target/debug/chorusd "$APP/Contents/MacOS/chorusd"
 fi
 
+# App icon: build Chorus.icns from the 1024px master. Without CFBundleIconFile
+# + this file the Dock and Finder show the generic app icon.
+ICONSET="$(mktemp -d)/Chorus.iconset"
+mkdir -p "$ICONSET"
+for sz in 16 32 128 256 512; do
+    sips -z $sz $sz Resources/ChorusIcon-1024.png --out "$ICONSET/icon_${sz}x${sz}.png" >/dev/null
+    sips -z $((sz*2)) $((sz*2)) Resources/ChorusIcon-1024.png --out "$ICONSET/icon_${sz}x${sz}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/Chorus.icns"
+
 # Sparkle must live in Contents/Frameworks (the rpath Package.swift sets).
 SPARKLE_FW="$(find .build/artifacts -path '*macos-arm64_x86_64/Sparkle.framework' -maxdepth 6 | head -1)"
 mkdir -p "$APP/Contents/Frameworks"
@@ -67,6 +77,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key>              <string>Chorus</string>
     <key>CFBundleDisplayName</key>       <string>Chorus</string>
     <key>CFBundleExecutable</key>        <string>Chorus</string>
+    <key>CFBundleIconFile</key>          <string>Chorus</string>
     <key>CFBundleIdentifier</key>        <string>${BUNDLE_ID}</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>
