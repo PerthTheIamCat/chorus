@@ -23,9 +23,16 @@ DMG="$DIST/Chorus-$VERSION.dmg"
 FEED_DIR="$DIST/appcast"
 rm -rf "$FEED_DIR" && mkdir -p "$FEED_DIR"
 cp "$DMG" "$FEED_DIR/"
+# CI passes the private key via SPARKLE_ED_KEY (a repo secret) on stdin so it
+# never touches disk or argv; locally it is read from the login Keychain.
+if [ -n "${SPARKLE_ED_KEY:-}" ]; then
+    printf '%s' "$SPARKLE_ED_KEY" | "$BIN/generate_appcast" --ed-key-file - \
+        --download-url-prefix "https://github.com/$REPO/releases/download/v$VERSION/" "$FEED_DIR"
+else
 "$BIN/generate_appcast" --account chorus \
     --download-url-prefix "https://github.com/$REPO/releases/download/v$VERSION/" \
     "$FEED_DIR"
+fi
 echo "appcast: $FEED_DIR/appcast.xml"
 
 if [ "$PUBLISH" = "publish" ]; then
