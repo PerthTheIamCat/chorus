@@ -1827,20 +1827,19 @@ struct ContentView: View {
                           onPasteImage: { data, mime in importPastedImage(data, mime: mime) },
                           onRemoveAttachment: { id in
                               draftBox.attachments.removeAll { $0.id == id }
+                              AttachmentThumbnails.shared.forget(id)
                               engine.deleteAttachment(id)
                           },
-                          focusToken: composerFocus)
-            HStack(spacing: 8) {
-                Button { autoRoute.toggle() } label: {
-                    Label("Auto", systemImage: "arrow.triangle.branch")
-                        .font(.caption.weight(.medium))
+                          focusToken: composerFocus,
+                          isBusy: engine.busy,
+                          canSend: engine.sessionID >= 0,
+                          onStop: { engine.cancel(); queued.removeAll() },
+                          routeNoteEnabled: autoRoute) {
+                ComposerModeMenu(autoRoute: $autoRoute, parallel: $orchestrationEnabled) {
+                    settingsSection = .orchestration
+                    showSettings = true
                 }
-                .buttonStyle(InteractiveStyle(cornerRadius: 99, selected: autoRoute,
-                                              padding: .init(top: 4, leading: 9, bottom: 4, trailing: 9)))
-                .help(autoRoute ? "ให้โมเดลในเครื่องเลือกเอเจนต์ โมเดล และระดับคิด" : "ใช้โมเดลที่เลือกเอง")
-                if !autoRoute {
-                    ModelPicker(model: $model, onNeedsLogin: { settingsSection = .agents; showSettings = true })
-                }
+                RoutePresetMenu()
                 ChipPicker(
                     icon: permission == .ask ? "hand.raised" : "bolt.fill",
                     value: "\(permission.rawValue)",
@@ -1849,35 +1848,20 @@ struct ContentView: View {
                     selected: "\(permission.rawValue)"
                 ) { v in if let p = PermissionLevel(rawValue: Int32(v) ?? 0) { permission = p } }
                 .help(permission.hint)
-                Button { orchestrationEnabled.toggle() } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "point.3.connected.trianglepath.dotted")
-                        Text(orchestrationEnabled ? "ขนาน (เปิด)" : "ขนาน (ปิด)")
+            } trailing: {
+                if autoRoute {
+                    Button { autoRoute = false } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "arrow.triangle.branch")
+                            Text("router เลือก")
+                        }
+                        .font(.caption.weight(.medium))
                     }
-                    .font(.caption.weight(.medium))
+                    .buttonStyle(InteractiveStyle(cornerRadius: 7, padding: .init(top: 4, leading: 8, bottom: 4, trailing: 8)))
+                    .help("Auto route: router เสนอเอเจนต์และโมเดลตอนส่ง — คลิกเพื่อเลือกโมเดลเอง")
+                } else {
+                    ModelPicker(model: $model, onNeedsLogin: { settingsSection = .agents; showSettings = true })
                 }
-                .buttonStyle(InteractiveStyle(cornerRadius: 99, selected: orchestrationEnabled,
-                                              padding: .init(top: 4, leading: 9, bottom: 4, trailing: 9)))
-                .help(orchestrationEnabled
-                      ? "การทำงานคู่ขนานเปิดอยู่: เอเจนต์สามารถแตกงานย่อยไปยัง Git Worktrees แยกกันได้ (คลิกเพื่อปิด · คลิกขวาเพื่อตั้งค่า)"
-                      : "การทำงานคู่ขนานปิดอยู่: เอเจนต์จะทำงานเดี่ยวในกิ่งปัจจุบัน (คลิกเพื่อเปิดใช้งาน · คลิกขวาเพื่อตั้งค่า)")
-                .contextMenu {
-                    Button("ตั้งค่าออร์เคสตรา…") {
-                        settingsSection = .orchestration
-                        showSettings = true
-                    }
-                }
-                Spacer()
-                Button(action: submit) {
-                    Image(systemName: engine.busy ? "text.badge.plus" : "arrow.up")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 30, height: 30)
-                        .background(Color.accentColor, in: Circle())
-                }
-                .buttonStyle(InteractiveStyle(cornerRadius: 99, padding: .init()))
-                .disabled(engine.sessionID < 0)
-                .help(engine.busy ? "เข้าคิว (↩ หรือ ⌘↩)" : "ส่ง (↩ หรือ ⌘↩ · ⇧↩ ขึ้นบรรทัดใหม่)")
             }
         }
         .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 10)
@@ -1984,8 +1968,13 @@ struct ContentView: View {
         for url in urls {
             engine.importFile(url) { attachment, error in
                 importingFiles -= 1
-                if let attachment { draftBox.attachments.append(attachment) }
-                if let error { hint = error }
+                if let attachment {
+                    draftBox.attachments.append(attachment)
+                    AttachmentThumbnails.shared.load(id: attachment.id, url: url)
+                } else if let error {
+                    let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
+                    draftBox.rejected.append(RejectedAttachment(name: url.lastPathComponent, size: size, reason: error))
+                }
             }
         }
     }
@@ -1999,7 +1988,10 @@ struct ContentView: View {
         importingFiles += 1
         engine.importImage(data, mime: mime) { attachment, error in
             importingFiles -= 1
-            if let attachment { draftBox.attachments.append(attachment) }
+            if let attachment {
+                draftBox.attachments.append(attachment)
+                AttachmentThumbnails.shared.load(id: attachment.id, data: data)
+            }
             if let error { hint = error }
         }
     }
@@ -2060,6 +2052,7 @@ struct ContentView: View {
                                attachments: draftBox.attachments,
                                explicitAgent: explicitTag)
         draftBox.attachments = []
+        draftBox.rejected = []
         // Busy: line it up behind the running turn (Cursor-style queue)
         // instead of dropping the keystroke on a disabled button.
         if engine.busy || routingInProgress || pendingRoute != nil { queued.append(send); return }
