@@ -189,10 +189,25 @@ char *chorus_run_relay_with_attachments(ChorusEngine *e, const char *agents,
 
 /* Ask the local-only router to propose among supplied candidate tuples.
  * task_json and candidates_json must match chorus_core::router TaskSummary and
- * CandidateSet JSON. JSON success: {"ok":true,"route":{"status":...,
- * "result":...}}; routing unavailability is returned in route, not error. */
+ * CandidateSet JSON. preset is "economy" | "balanced" | "max"; NULL or an
+ * unknown name means balanced. Candidates without "tier" get one from the
+ * curated table (CHORUS_MODEL_TIERS overrides). JSON success:
+ * {"ok":true,"route":{"status":..., "result":...}}; routing unavailability
+ * is returned in route, not error. */
 char *chorus_route_json(const char *task_json, const char *candidates_json,
-                        const char *model);
+                        const char *model, const char *preset);
+
+/* The session's route preset, or "preset":null when not set this run (apply
+ * the Settings default with chorus_set_route_preset). Lists every preset for
+ * the composer menu.
+ * JSON: {"ok":true,"preset":"balanced"|null,"label":"สมดุล"|null,
+ *        "presets":[{"id":"economy","label":"ประหยัด","hint":"..."}, ...]} */
+char *chorus_route_preset(const ChorusEngine *e);
+
+/* Set the session's route preset ("economy" | "balanced" | "max"). Unknown
+ * names are an error. Kept across engine reopen for this process only.
+ * JSON: same shape as chorus_route_preset. */
+char *chorus_set_route_preset(ChorusEngine *e, const char *preset);
 
 /* Local Ollama router setup. Inventory success:
  * {"ok":true,"models":[{"name":"...","digest":...,"size_bytes":...}]}.
@@ -311,9 +326,11 @@ char *chorus_remove_worktree(const char *cwd, const char *branch);
 double chorus_session_cost_usd(const char *db_path, int64_t session_id);
 
 /* In-process fast routing and learning memory flywheel */
-char *chorus_route_fast_json(const char *prompt);
+char *chorus_route_fast_json(const char *prompt, const char *preset);
 char *chorus_router_list_learned_json(const char *db_path);
-char *chorus_router_record_learned_json(const char *db_path, const char *prompt, const char *model, const char *agent, const char *reason);
+/* Record a user override under preset (NULL = balanced). Never record the
+ * router's own pick. */
+char *chorus_router_record_learned_json(const char *db_path, const char *prompt, const char *model, const char *agent, const char *reason, const char *preset);
 char *chorus_router_clear_learned_json(const char *db_path);
 
 /* Cross-session search and export */

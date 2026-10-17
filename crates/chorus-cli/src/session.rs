@@ -309,6 +309,9 @@ pub struct Session {
     checkpoint: Option<Checkpoint>,
     /// agent name → the model id the user picked for it, if any.
     models: std::collections::HashMap<String, String>,
+    /// How Auto routing leans for this session (composer menu). Not stored
+    /// in the ledger: it is a dispatch setting, not something anyone said.
+    route_preset: chorus_core::router::RoutePreset,
     /// Sha the handoff brief's diff is measured from — the shadow repo's
     /// HEAD when the session opened. Immutable for the life of the `Session`.
     base_ckpt: String,
@@ -362,6 +365,7 @@ impl Session {
             log_permissions: false,
             checkpoint,
             models: std::collections::HashMap::new(),
+            route_preset: Default::default(),
             base_ckpt,
             mcp,
             memory: None,
@@ -394,6 +398,7 @@ impl Session {
             log_permissions: false,
             checkpoint,
             models: std::collections::HashMap::new(),
+            route_preset: Default::default(),
             base_ckpt,
             mcp,
             memory: None,
@@ -1263,6 +1268,16 @@ impl Session {
             .get(agent_name)
             .or_else(|| self.models.get(crate::accounts::split(agent_name).0))
             .cloned()
+    }
+
+    /// Set how Auto routing leans for this session's sends and, once
+    /// orchestra mode exists, for every child it routes.
+    pub fn set_route_preset(&mut self, preset: chorus_core::router::RoutePreset) {
+        self.route_preset = preset;
+    }
+
+    pub fn route_preset(&self) -> chorus_core::router::RoutePreset {
+        self.route_preset
     }
 
     /// What model is pinned for `agent_name`, if any.

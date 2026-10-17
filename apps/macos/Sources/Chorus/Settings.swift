@@ -195,6 +195,7 @@ struct GeneralSettings: View {
     @AppStorage("chorus.failoverAccounts") private var failoverAccounts = true
     @AppStorage("chorus.failoverProviders") private var failoverProviders = true
     @AppStorage("chorus.autoRoute") private var autoRoute = true
+    @AppStorage(Engine.defaultRoutePresetKey) private var defaultRoutePreset = "balanced"
     @AppStorage("chorus.conserveBatteryOnInference") private var conserveBatteryOnInference = true
     @AppStorage("chorus.routerModel") private var routerModel = "chorus-openthai-systemone:0.8b"
     @AppStorage("chorus.routerModelAuto") private var routerModelAuto = true
@@ -288,6 +289,15 @@ struct GeneralSettings: View {
                           footer: "Chorus รันโมเดลวิเคราะห์งานในเครื่องแบบ In-Process ผ่าน Apple Silicon Metal ออฟไลน์ 100% โดยไม่ต้องติดตั้งหรือเปิดโปรแกรม Ollama หากยังไม่ได้ดาวน์โหลดโมเดล ระบบจะใช้ Fast In-Process Classifier (3–8 ms) ทำงานให้อัตโนมัติ") {
                 SettingsRow(title: "ใช้ Auto Router ก่อนส่งงานใหม่") {
                     Toggle("", isOn: $autoRoute).labelsHidden().toggleStyle(.switch)
+                }
+                Divider().padding(.leading, 12)
+                SettingsRow(title: "โหมดเริ่มต้นของเซสชันใหม่",
+                            detail: engine.routePresets.first { $0.id == defaultRoutePreset }?.hint) {
+                    Picker("", selection: $defaultRoutePreset) {
+                        ForEach(engine.routePresets) { Text($0.label).tag($0.id) }
+                    }
+                    .labelsHidden().fixedSize()
+                    .disabled(engine.routePresets.isEmpty)
                 }
                 Divider().padding(.leading, 12)
 

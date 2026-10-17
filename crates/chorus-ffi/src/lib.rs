@@ -16,7 +16,7 @@ use chorus_cli::session::{Policy, Session};
 use chorus_core::attachments::{Attachment, MAX_FILE_BYTES};
 use chorus_core::handoff::HandoffReason;
 use chorus_core::integration_catalog;
-use chorus_core::router::{CandidateSet, Router, RouterConfig, TaskSummary};
+use chorus_core::router::{CandidateSet, RoutePreset, Router, RouterConfig, TaskSummary};
 use serde::Serialize;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -187,30 +187,47 @@ unsafe fn borrow_attachment_ids(p: *const c_char) -> Result<Vec<i64>, &'static s
     Ok(ids)
 }
 
+/// A preset name from the caller; null, empty or unknown means Balanced.
+unsafe fn borrow_preset(p: *const c_char) -> RoutePreset {
+    borrow(p).and_then(RoutePreset::parse).unwrap_or_default()
+}
+
 /// Run the local-only router against JSON task/candidate inputs.
 ///
+/// Candidates without a `tier` get one from the curated table in
+/// `chorus_cli::agents::model_tier`; names it does not know keep `None` and
+/// the router guesses from the name.
+///
 /// # Safety
-/// All three arguments must be valid NUL-terminated UTF-8 strings.
+/// The first three arguments must be valid NUL-terminated UTF-8 strings.
+/// `preset` may be null (Balanced).
 #[no_mangle]
 pub unsafe extern "C" fn chorus_route_json(
     task_json: *const c_char,
     candidates_json: *const c_char,
     model: *const c_char,
+    preset: *const c_char,
 ) -> *mut c_char {
     let (Some(task_json), Some(candidates_json), Some(model)) =
         (borrow(task_json), borrow(candidates_json), borrow(model))
     else {
         return err("task_json, candidates_json, and model must be valid UTF-8");
     };
+    let preset = borrow_preset(preset);
     if task_json.len() > 512 * 1024 || candidates_json.len() > 512 * 1024 {
         return err("router JSON inputs must each be at most 512 KiB");
     }
     match catch_unwind(AssertUnwindSafe(|| {
         let task: TaskSummary =
             serde_json::from_str(task_json).map_err(|e| format!("invalid task_json: {e}"))?;
-        let candidates: CandidateSet = serde_json::from_str(candidates_json)
+        let mut candidates: CandidateSet = serde_json::from_str(candidates_json)
             .map_err(|e| format!("invalid candidates_json: {e}"))?;
-        let router = Router::new(RouterConfig::local(model))
+        for candidate in &mut candidates.candidates {
+            if candidate.tier.is_none() {
+                candidate.tier = chorus_cli::agents::model_tier(&candidate.model);
+            }
+        }
+        let router = Router::new(RouterConfig::local(model).with_preset(preset))
             .map_err(|e| format!("invalid router configuration: {e}"))?;
         Ok::<_, String>(router.route_with_fallback(&task, &candidates))
     })) {
@@ -403,7 +420,10 @@ pub unsafe extern "C" fn chorus_engine_reopen(
 ) -> *mut ChorusEngine {
     let run = || -> Option<ChorusEngine> {
         let db = PathBuf::from(borrow(db_path)?);
-        let session = Session::open(&db, session_id).ok()?;
+        let mut session = Session::open(&db, session_id).ok()?;
+        if let Some(preset) = remembered_preset(session_id) {
+            session.set_route_preset(preset);
+        }
         Some(ChorusEngine { session })
     };
     match catch_unwind(AssertUnwindSafe(run)) {
@@ -1563,6 +1583,81 @@ pub unsafe extern "C" fn chorus_set_model(
     }
 }
 
+/// Presets chosen this run, by session id. The Swift shell opens a fresh
+/// engine handle on every session switch, so the choice has to outlive the
+/// handle; it does not outlive the process (no schema for it yet).
+fn route_presets() -> &'static std::sync::Mutex<std::collections::HashMap<i64, RoutePreset>> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<i64, RoutePreset>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(Default::default)
+}
+
+fn remembered_preset(session_id: i64) -> Option<RoutePreset> {
+    route_presets().lock().ok()?.get(&session_id).copied()
+}
+
+fn preset_json(current: Option<RoutePreset>) -> String {
+    let hint = |p: RoutePreset| match p {
+        RoutePreset::Economy => "ใช้รุ่นและระดับคิดต่ำกว่าปกติหนึ่งขั้น เมื่ออยากประหยัดโควตา",
+        RoutePreset::Balanced => "เลือกตามความยากของงาน ถ้าเสมอกันเลือกตัวที่ถูกกว่า",
+        RoutePreset::Max => "ใช้รุ่นและระดับคิดสูงกว่าปกติหนึ่งขั้น อย่างน้อยรุ่นกลาง",
+    };
+    let presets: Vec<_> = RoutePreset::ALL
+        .into_iter()
+        .map(|p| serde_json::json!({ "id": p.as_str(), "label": p.label(), "hint": hint(p) }))
+        .collect();
+    serde_json::json!({
+        "ok": true,
+        "preset": current.map(RoutePreset::as_str),
+        "label": current.map(RoutePreset::label),
+        "presets": presets,
+    })
+    .to_string()
+}
+
+/// The session's route preset, or `null` when it was never set in this
+/// run (the shell then applies its Settings default with
+/// `chorus_set_route_preset`). Also lists every preset with its Thai label
+/// and one-line hint, so the menu draws from here.
+/// JSON: {"ok":true,"preset":"balanced"|null,"label":"สมดุล"|null,
+///        "presets":[{"id","label","hint"}, ...]}
+///
+/// # Safety
+/// `e` must be a live engine handle.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_route_preset(e: *const ChorusEngine) -> *mut c_char {
+    let Some(engine) = e.as_ref() else {
+        return err("null engine");
+    };
+    let id = engine.session.session_id();
+    out(preset_json(remembered_preset(id)))
+}
+
+/// Set the session's route preset (`economy` | `balanced` | `max`).
+/// Unknown names are an error rather than a silent Balanced.
+/// JSON: same shape as `chorus_route_preset`.
+///
+/// # Safety
+/// `e` must be a live engine handle; `preset` a valid UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_route_preset(
+    e: *mut ChorusEngine,
+    preset: *const c_char,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let Some(preset) = borrow(preset).and_then(RoutePreset::parse) else {
+        return err("preset must be economy, balanced or max");
+    };
+    engine.session.set_route_preset(preset);
+    let id = engine.session.session_id();
+    if let Ok(mut map) = route_presets().lock() {
+        map.insert(id, preset);
+    }
+    out(preset_json(Some(preset)))
+}
+
 /// Every skill an agent in this workspace could see, grouped by where it lives:
 /// `chorus` (`.chorus/skills`, projected to every agent), `project`
 /// (`.claude/skills`, `.agents/skills`), and the user-global roots — `agents`
@@ -2012,12 +2107,17 @@ fn open_router_store(db_path: Option<&str>) -> std::result::Result<chorus_core::
 }
 
 /// Instant in-process fast routing decision (<5ms) with learned memory lookup.
+/// Only overrides learned under `preset` (null = Balanced) are consulted.
 #[no_mangle]
-pub unsafe extern "C" fn chorus_route_fast_json(prompt: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn chorus_route_fast_json(
+    prompt: *const c_char,
+    preset: *const c_char,
+) -> *mut c_char {
     let p = borrow(prompt).unwrap_or("");
+    let preset = borrow_preset(preset);
     let store = open_router_store(None).ok();
     let conn = store.as_ref().map(|s| s.conn());
-    let decision = chorus_core::local_router::route_task_fast_with_db(conn, p, &[]);
+    let decision = chorus_core::local_router::route_task_fast_with_db(conn, p, &[], preset);
     out(serde_json::json!({"ok": true, "decision": decision}).to_string())
 }
 
@@ -2036,7 +2136,8 @@ pub unsafe extern "C" fn chorus_router_list_learned_json(db_path: *const c_char)
     }
 }
 
-/// Record a route decision / user choice into the learning flywheel.
+/// Record a choice the *user* made, under the preset active at the time
+/// (null = Balanced). The router's own picks must not be recorded.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_router_record_learned_json(
     db_path: *const c_char,
@@ -2044,7 +2145,9 @@ pub unsafe extern "C" fn chorus_router_record_learned_json(
     model: *const c_char,
     agent: *const c_char,
     reason: *const c_char,
+    preset: *const c_char,
 ) -> *mut c_char {
+    let preset = borrow_preset(preset);
     let path = borrow(db_path);
     let p = borrow(prompt).unwrap_or("");
     let m = borrow(model).unwrap_or("");
@@ -2056,7 +2159,7 @@ pub unsafe extern "C" fn chorus_router_record_learned_json(
         Err(e) => return err(e),
     };
 
-    match chorus_core::local_router::record_route_learning(store.conn(), p, m, a, r) {
+    match chorus_core::local_router::record_route_learning(store.conn(), p, m, a, r, preset) {
         Ok(item) => out(serde_json::json!({ "ok": true, "route": item }).to_string()),
         Err(e) => err(format!("{e:#}")),
     }
@@ -2564,6 +2667,77 @@ mod tests {
     }
 
     #[test]
+    fn route_json_accepts_a_preset() {
+        // Scoring per preset is covered in router::scoring_tests; here the
+        // FFI must accept the extra argument and fill the curated tier.
+        let task = CString::new(r#"{"text":"fix typo"}"#).unwrap();
+        let candidates = CString::new(
+            r#"{"candidates":[{"id":"a","agent":"codex","model":"gpt-5.6-terra","effort":"low"}]}"#,
+        )
+        .unwrap();
+        let model = CString::new("in-process-heuristic").unwrap();
+        let bad = CString::new("turbo").unwrap();
+        // An unknown preset name is Balanced, never an error on the send path.
+        let ptr = unsafe {
+            chorus_route_json(
+                task.as_ptr(),
+                candidates.as_ptr(),
+                model.as_ptr(),
+                bad.as_ptr(),
+            )
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(ptr).to_str().unwrap() }).unwrap();
+        assert_eq!(v["ok"], true, "{v}");
+        unsafe { chorus_string_free(ptr) };
+        assert_eq!(chorus_cli::agents::model_tier("gpt-5.6-terra"), Some(1));
+    }
+
+    #[test]
+    fn route_preset_survives_a_handle_swap() {
+        let dir = std::env::temp_dir().join(format!("chorus-preset-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = CString::new(dir.join("s.db").to_str().unwrap()).unwrap();
+        let cwd = CString::new(dir.to_str().unwrap()).unwrap();
+        let title = CString::new("preset").unwrap();
+        let e = unsafe { chorus_engine_open(db.as_ptr(), cwd.as_ptr(), title.as_ptr()) };
+        assert!(!e.is_null());
+        let read = |e: *const ChorusEngine| -> serde_json::Value {
+            let ptr = unsafe { chorus_route_preset(e) };
+            let v = serde_json::from_str(unsafe { CStr::from_ptr(ptr).to_str().unwrap() }).unwrap();
+            unsafe { chorus_string_free(ptr) };
+            v
+        };
+        let fresh = read(e);
+        assert!(fresh["preset"].is_null(), "{fresh}");
+        assert_eq!(fresh["presets"].as_array().unwrap().len(), 3);
+
+        let bad = CString::new("turbo").unwrap();
+        let ptr = unsafe { chorus_set_route_preset(e, bad.as_ptr()) };
+        let v: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(ptr).to_str().unwrap() }).unwrap();
+        assert_eq!(v["ok"], false);
+        unsafe { chorus_string_free(ptr) };
+
+        let eco = CString::new("economy").unwrap();
+        unsafe { chorus_string_free(chorus_set_route_preset(e, eco.as_ptr())) };
+        let id = unsafe { chorus_engine_session_id(e) };
+        unsafe { chorus_engine_free(e) };
+
+        let again = unsafe { chorus_engine_reopen(db.as_ptr(), id) };
+        assert!(!again.is_null());
+        let v = read(again);
+        assert_eq!(v["preset"], "economy");
+        assert_eq!(v["label"], "ประหยัด");
+        assert_eq!(
+            unsafe { &*again }.session.route_preset(),
+            RoutePreset::Economy
+        );
+        unsafe { chorus_engine_free(again) };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn ffi_router_learning_lifecycle() {
         let temp_dir = std::env::temp_dir().join(format!("chorus-router-test-{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
@@ -2573,6 +2747,7 @@ mod tests {
         let model_c = CString::new("claude-sonnet-4-6").unwrap();
         let agent_c = CString::new("claude").unwrap();
         let reason_c = CString::new("งานเกี่ยวกับ UI แนะนำ Sonnet").unwrap();
+        let preset_c = CString::new("max").unwrap();
 
         // 1. Record
         let rec_ptr = unsafe {
@@ -2582,6 +2757,7 @@ mod tests {
                 model_c.as_ptr(),
                 agent_c.as_ptr(),
                 reason_c.as_ptr(),
+                preset_c.as_ptr(),
             )
         };
         assert!(!rec_ptr.is_null());
@@ -2599,6 +2775,7 @@ mod tests {
         let routes = list_json["routes"].as_array().unwrap();
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0]["chosen_model"].as_str().unwrap(), "claude-sonnet-4-6");
+        assert_eq!(routes[0]["preset"].as_str().unwrap(), "max");
         unsafe { chorus_string_free(list_ptr) };
 
         // 3. Clear

@@ -1948,6 +1948,16 @@ struct ContentView: View {
                 .buttonStyle(InteractiveStyle(cornerRadius: 99, selected: autoRoute,
                                               padding: .init(top: 4, leading: 9, bottom: 4, trailing: 9)))
                 .help(autoRoute ? "ให้โมเดลในเครื่องเลือกเอเจนต์ โมเดล และระดับคิด" : "ใช้โมเดลที่เลือกเอง")
+                if autoRoute, !engine.routePresets.isEmpty {
+                    ChipPicker(
+                        icon: "gauge.with.dots.needle.50percent",
+                        value: engine.routePreset,
+                        options: engine.routePresets.map(\.id),
+                        labels: Dictionary(uniqueKeysWithValues: engine.routePresets.map { ($0.id, $0.label) }),
+                        selected: engine.routePreset
+                    ) { engine.setRoutePreset($0) }
+                    .help(engine.routePresets.first { $0.id == engine.routePreset }?.hint ?? "")
+                }
                 if !autoRoute {
                     ModelPicker(model: $model, onNeedsLogin: { settingsSection = .agents; showSettings = true })
                 }
@@ -2209,15 +2219,10 @@ struct ContentView: View {
                     agent: engine.agents.first(where: { $0.id == chosen.2 })?.label ?? chosen.2,
                     model: id.base,
                     effort: id.effort ?? "ค่าเริ่มต้น",
+                    preset: engine.routePresetLabel,
                     reason: chosenReason
                 )
-                engine.recordLearnedRoute(
-                    workspace: workspace,
-                    prompt: send.text,
-                    model: chosen.1,
-                    agent: chosen.2,
-                    reason: chosenReason
-                )
+                // The router's own pick is not learned: only user overrides are.
                 dispatch(chosen.1, send.text,
                          attachments: send.attachments.map(\.id),
                          agentOverride: chosen.2)
@@ -2243,7 +2248,8 @@ struct ContentView: View {
             routeStatus = .chosen(
                 agent: engine.agents.first(where: { $0.id == pendingRoute.agentID })?.label
                     ?? agentFor(reviewModel)?.label ?? "Agent",
-                model: id.base, effort: id.effort ?? "ค่าเริ่มต้น", reason: pendingRoute.reason)
+                model: id.base, effort: id.effort ?? "ค่าเริ่มต้น",
+                preset: engine.routePresetLabel, reason: pendingRoute.reason)
         } else {
             routeStatus = nil
         }

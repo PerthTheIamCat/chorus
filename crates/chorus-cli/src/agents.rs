@@ -533,3 +533,112 @@ pub fn list_agents() -> Vec<AgentInfo> {
         auth_status("antigravity"),
     ]
 }
+
+/// Model tier for the router: 0 small, 1 mid, 2 large. Model ids carry no
+/// price, and the router's word-match guess is wrong for any name that does
+/// not contain "mini"/"opus"/…, so the ids the bridges actually report
+/// (measured 12 Sep 2026, see CLAUDE.md 7.19) are ranked here by hand.
+///
+/// Matched by prefix, so `gpt-5.6-luna[high]` and `gemini-3.8-flash-high`
+/// hit their base entry. The first match wins: put longer prefixes first.
+/// The sol > terra > luna order is still a guess from the product names; a
+/// name we have no basis for (e.g. `gpt-6-luna`) is left out on purpose so
+/// the router's own guess applies and `CHORUS_MODEL_TIERS` can correct it.
+const MODEL_TIERS: &[(&str, u8)] = &[
+    // Codex
+    ("gpt-6-astra", 2),
+    ("gpt-5.6-sol", 2),
+    ("gpt-5.6-terra", 1),
+    ("gpt-5.6-luna", 0),
+    ("gpt-5.5", 1),
+    ("gpt-5.1-codex-mini", 0),
+    ("gpt-5.1-codex", 1),
+    ("gpt-oss-120b", 1),
+    // Claude (claude-agent-acp reports aliases, the API reports full ids)
+    ("opus", 2),
+    ("sonnet", 1),
+    ("haiku", 0),
+    ("default", 1),
+    ("claude-opus", 2),
+    ("claude-sonnet", 1),
+    ("claude-haiku", 0),
+    // Gemini / Antigravity
+    ("gemini-3.1-pro", 2),
+    ("gemini-3.8-flash", 0),
+    ("gemini-3.7-flash", 0),
+];
+
+/// `model` is `prefix` itself or `prefix` followed by a separator, so
+/// `gpt-5.5` does not swallow a future `gpt-5.55`.
+fn has_prefix(model: &str, prefix: &str) -> bool {
+    model
+        .strip_prefix(prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', '[', '@', ':']))
+}
+
+/// Parse `CHORUS_MODEL_TIERS`: comma-separated `model=tier` pairs, tier 0–2.
+/// Bad pairs are skipped rather than failing the whole override.
+fn parse_tiers(spec: &str) -> Vec<(String, u8)> {
+    spec.split(',')
+        .filter_map(|part| {
+            let (model, tier) = part.split_once('=')?;
+            let tier: u8 = tier.trim().parse().ok().filter(|t| *t <= 2)?;
+            let model = model.trim().to_ascii_lowercase();
+            (!model.is_empty()).then_some((model, tier))
+        })
+        .collect()
+}
+
+fn tier_from(model: &str, overrides: &[(String, u8)]) -> Option<u8> {
+    let model = model.trim().to_ascii_lowercase();
+    overrides
+        .iter()
+        .find(|(prefix, _)| has_prefix(&model, prefix))
+        .map(|(_, tier)| *tier)
+        .or_else(|| {
+            MODEL_TIERS
+                .iter()
+                .find(|(prefix, _)| has_prefix(&model, prefix))
+                .map(|(_, tier)| *tier)
+        })
+}
+
+/// Curated tier for `model`, with `CHORUS_MODEL_TIERS` taking precedence.
+/// `None` for a name in neither: the router then guesses from the name.
+pub fn model_tier(model: &str) -> Option<u8> {
+    let overrides = std::env::var("CHORUS_MODEL_TIERS")
+        .map(|v| parse_tiers(&v))
+        .unwrap_or_default();
+    tier_from(model, &overrides)
+}
+
+#[cfg(test)]
+mod tier_tests {
+    use super::*;
+
+    #[test]
+    fn curated_names_and_suffixes() {
+        assert_eq!(tier_from("gpt-6-astra", &[]), Some(2));
+        assert_eq!(tier_from("gpt-5.6-luna[high]", &[]), Some(0));
+        assert_eq!(tier_from("gpt-5.6-terra", &[]), Some(1));
+        assert_eq!(tier_from("gemini-3.8-flash-high", &[]), Some(0));
+        assert_eq!(tier_from("opus[1m]", &[]), Some(2));
+        assert_eq!(tier_from("claude-sonnet-5-5-low", &[]), Some(1));
+        assert_eq!(tier_from("Haiku", &[]), Some(0));
+    }
+
+    #[test]
+    fn unknown_names_fall_through() {
+        assert_eq!(tier_from("gpt-5.55", &[]), None);
+        assert_eq!(tier_from("llama-4", &[]), None);
+    }
+
+    #[test]
+    fn env_override_wins_and_skips_bad_pairs() {
+        let overrides = parse_tiers("gpt-5.6-luna=2, llama-4=0, broken, x=9, =1");
+        assert_eq!(overrides.len(), 2);
+        assert_eq!(tier_from("gpt-5.6-luna[low]", &overrides), Some(2));
+        assert_eq!(tier_from("llama-4", &overrides), Some(0));
+        assert_eq!(tier_from("gpt-6-astra", &overrides), Some(2));
+    }
+}
