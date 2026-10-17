@@ -1,6 +1,6 @@
 # Workbench layout v2
 
-Status: ready-for-agent
+Status: resolved
 Blocked by: 03
 Parent: ../spec.md
 Decided in: [Workbench layout v2](../../chorus-ux-overhaul/issues/07-workbench-layout-v2.md) · prototype `../../chorus-ux-overhaul/prototypes/07-workbench-layout-v2.html?variant=A`

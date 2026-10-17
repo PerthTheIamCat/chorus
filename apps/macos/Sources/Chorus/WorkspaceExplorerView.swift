@@ -7,13 +7,13 @@ struct WorkspaceExplorerView: View {
     @ObservedObject var engine: Engine
     let workspace: String
     var isMaximized: Bool = false
+    var isRailMode: Bool = false
     var onToggleMaximize: (() -> Void)? = nil
     var onSelectFile: (String) -> Void
-    var onSelectWorktree: (Engine.WorktreeInfo) -> Void
+    var onSelectWorktree: ((Engine.WorktreeInfo) -> Void)? = nil
 
     @State private var filterText = ""
     @State private var fileTree: Engine.FileTreeResult?
-    @State private var activeWorktrees: [Engine.WorktreeInfo] = []
     @State private var expandedPaths: Set<String> = []
     /// Workspace whose top level has already been auto-expanded. Seeding runs
     /// once per folder, so a refresh (every 15 s, on diff, on activation)
@@ -23,147 +23,148 @@ struct WorkspaceExplorerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header & Filter field
-            VStack(spacing: 8) {
-                HStack {
-                    Image(systemName: "folder.fill")
-                        .foregroundColor(.secondary)
-                    Text("EXPLORER")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(.secondary)
-                    Spacer()
+            if isRailMode {
+                // Icon rail view when window is < 1200 px
+                VStack(spacing: 12) {
                     Button(action: refreshTree) {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 11))
+                        Image(systemName: "folder.fill")
+                            .font(.system(size: 14))
+                            .foregroundColor(.secondary)
                     }
                     .buttonStyle(.plain)
-                    .help("Refresh explorer")
+                    .help("โครงสร้างไฟล์ (Rail Mode)")
+                    .padding(.top, 10)
 
-                    if let onToggleMaximize {
-                        PanelMaximizeButton(isMaximized: isMaximized, onToggle: onToggleMaximize)
+                    Divider()
+
+                    ScrollView {
+                        VStack(spacing: 8) {
+                            if let tree = fileTree {
+                                ForEach(tree.nodes.prefix(30), id: \.id) { node in
+                                    Button(action: {
+                                        if !node.is_dir { onSelectFile(node.rel_path) }
+                                    }) {
+                                        ZStack(alignment: .topTrailing) {
+                                            FileTypeIcon(key: node.icon, size: 16)
+                                            if node.is_focus {
+                                                Circle()
+                                                    .fill(Color.blue)
+                                                    .frame(width: 5, height: 5)
+                                                    .offset(x: 3, y: -2)
+                                            }
+                                        }
+                                        .frame(width: 28, height: 28)
+                                        .background(node.is_focus ? Color.blue.opacity(0.12) : Color.clear)
+                                        .cornerRadius(6)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help(node.name)
+                                }
+                            }
+                        }
+                        .padding(.vertical, 4)
                     }
+                    .chorusScrollIndicators()
                 }
-                .padding(.horizontal, 12)
-                .padding(.top, 10)
-
-                HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundColor(.secondary)
-                        .font(.system(size: 11))
-                    TextField("Filter files... (⌘P)", text: $filterText)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 12))
-                    if !filterText.isEmpty {
-                        Button(action: { filterText = "" }) {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(.secondary)
+                .frame(width: 44)
+            } else {
+                // Header & Filter field
+                VStack(spacing: 8) {
+                    HStack {
+                        Image(systemName: "folder.fill")
+                            .foregroundColor(.secondary)
+                        Text("FILES")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Button(action: refreshTree) {
+                            Image(systemName: "arrow.clockwise")
                                 .font(.system(size: 11))
                         }
                         .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
-                .cornerRadius(6)
-                .padding(.horizontal, 10)
-            }
-            .padding(.bottom, 8)
+                        .help("Refresh explorer")
 
-            Divider()
-
-            if workspace.isEmpty {
-                VStack(spacing: 8) {
-                    Spacer()
-                    Image(systemName: "folder.badge.questionmark")
-                        .font(.system(size: 28))
-                        .foregroundColor(.secondary.opacity(0.6))
-                    Text("ยังไม่ได้เลือกโปรเจกต์")
-                        .font(.system(size: 12, weight: .medium))
-                    Text("เลือกโฟลเดอร์จากแถบด้านซ้าย\nเพื่อดูโครงสร้างไฟล์")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 16)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                // Tree Content
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 1) {
-                        if let tree = fileTree {
-                            ForEach(filteredNodes(tree.nodes), id: \.id) { node in
-                                FileTreeNodeRow(
-                                    node: node,
-                                    depth: 0,
-                                    expandedPaths: $expandedPaths,
-                                    onSelectFile: onSelectFile
-                                )
-                            }
-                        } else if isLoading {
-                            HStack {
-                                Spacer()
-                                ProgressView()
-                                    .scaleEffect(0.7)
-                                Spacer()
-                            }
-                            .padding(.top, 20)
-                        } else {
-                            Text("ไม่มีไฟล์ในโฟลเดอร์นี้")
-                                .font(.system(size: 11))
-                                .foregroundColor(.secondary)
-                                .padding(.horizontal, 12)
-                                .padding(.top, 10)
+                        if let onToggleMaximize {
+                            PanelMaximizeButton(isMaximized: isMaximized, onToggle: onToggleMaximize)
                         }
                     }
-                    .padding(.vertical, 4)
-                }
-                .chorusScrollIndicators()
+                    .padding(.horizontal, 12)
+                    .padding(.top, 10)
 
-                // Orchestrator Worktrees Section (Only shown when worktrees are running)
-                if !activeWorktrees.isEmpty {
-                    Divider()
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Image(systemName: "point.3.connected.trianglepath.dotted")
-                                .foregroundColor(.accentColor)
-                                .font(.system(size: 10))
-                            Text("WORKTREES ที่กำลังรัน")
-                                .font(.system(size: 9.5, weight: .bold))
-                                .foregroundColor(.secondary)
-                            Spacer()
-                            Text("\(activeWorktrees.count) RUNNING")
-                                .font(.system(size: 8.5, weight: .bold))
-                                .foregroundColor(.orange)
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.top, 8)
-
-                        ForEach(activeWorktrees, id: \.id) { wt in
-                            Button(action: { onSelectWorktree(wt) }) {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "arrow.triangle.branch")
-                                        .foregroundColor(.green)
-                                        .font(.system(size: 11))
-                                    Text(wt.branch)
-                                        .font(.system(size: 11, design: .monospaced))
-                                        .lineLimit(1)
-                                    Spacer()
-                                    Text(":\(wt.allocated_port)")
-                                        .font(.system(size: 10, design: .monospaced))
-                                        .foregroundColor(.secondary)
-                                }
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 4)
-                                .background(Color.primary.opacity(0.04))
-                                .cornerRadius(4)
+                    HStack(spacing: 6) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(.secondary)
+                            .font(.system(size: 11))
+                        TextField("Filter files... (⌘P)", text: $filterText)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 12))
+                        if !filterText.isEmpty {
+                            Button(action: { filterText = "" }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.secondary)
+                                    .font(.system(size: 11))
                             }
                             .buttonStyle(.plain)
-                            .padding(.horizontal, 8)
                         }
                     }
-                    .padding(.bottom, 8)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+                    .cornerRadius(6)
+                    .padding(.horizontal, 10)
+                }
+                .padding(.bottom, 8)
+
+                Divider()
+
+                if workspace.isEmpty {
+                    VStack(spacing: 8) {
+                        Spacer()
+                        Image(systemName: "folder.badge.questionmark")
+                            .font(.system(size: 28))
+                            .foregroundColor(.secondary.opacity(0.6))
+                        Text("ยังไม่ได้เลือกโปรเจกต์")
+                            .font(.system(size: 12, weight: .medium))
+                        Text("เลือกโฟลเดอร์จากแถบด้านซ้าย\nเพื่อดูโครงสร้างไฟล์")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 16)
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    // Tree Content
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 1) {
+                            if let tree = fileTree {
+                                ForEach(filteredNodes(tree.nodes), id: \.id) { node in
+                                    FileTreeNodeRow(
+                                        node: node,
+                                        depth: 0,
+                                        expandedPaths: $expandedPaths,
+                                        onSelectFile: onSelectFile
+                                    )
+                                }
+                            } else if isLoading {
+                                HStack {
+                                    Spacer()
+                                    ProgressView()
+                                        .scaleEffect(0.7)
+                                    Spacer()
+                                }
+                                .padding(.top, 20)
+                            } else {
+                                Text("ไม่มีไฟล์ในโฟลเดอร์นี้")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal, 12)
+                                    .padding(.top, 10)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .chorusScrollIndicators()
                 }
             }
         }
@@ -171,6 +172,9 @@ struct WorkspaceExplorerView: View {
             refreshTree()
         }
         .onChange(of: workspace) { _, _ in
+            refreshTree()
+        }
+        .onChange(of: engine.agentFocusFile) { _, _ in
             refreshTree()
         }
         .onChange(of: engine.workingDiff) { _, _ in
@@ -202,7 +206,7 @@ struct WorkspaceExplorerView: View {
         guard !workspace.isEmpty else { return }
         isLoading = true
         let root = workspace
-        engine.fetchFileTree(cwd: root) { tree in
+        engine.fetchFileTree(cwd: root, focusFile: engine.agentFocusFile) { tree in
             self.fileTree = tree
             self.isLoading = false
             if let rootNodes = tree?.nodes,
@@ -210,9 +214,6 @@ struct WorkspaceExplorerView: View {
                 self.seededRoot = root
                 self.expandedPaths = seeded
             }
-        }
-        engine.fetchWorktrees(cwd: workspace) { wts in
-            self.activeWorktrees = wts
         }
     }
 

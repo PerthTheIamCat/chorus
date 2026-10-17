@@ -22,6 +22,24 @@ struct LiveFold {
     var diffChanged = false
     /// `running` | `idle` | `failed`, for every session that reported.
     var statuses: [Int64: String] = [:]
+    /// Focus file reported by tool or chorus_show_file
+    var focusFile: String? = nil
+
+    static func extractFocusPath(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.starts(with: "chorus_show_file") {
+            if let start = trimmed.firstIndex(of: "("), let end = trimmed.lastIndex(of: ")") {
+                let inner = trimmed[trimmed.index(after: start)..<end].trimmingCharacters(in: .whitespacesAndNewlines)
+                let path = inner.split(separator: ",").first?.trimmingCharacters(in: CharacterSet(charactersIn: "\"\' "))
+                return path.flatMap { $0.isEmpty ? nil : String($0) }
+            }
+            let parts = trimmed.split(separator: " ", omittingEmptySubsequences: true)
+            if parts.count > 1 {
+                return String(parts[1]).trimmingCharacters(in: CharacterSet(charactersIn: "\"\' "))
+            }
+        }
+        return nil
+    }
 
     static func apply(_ batch: [LivePush], session: Int64, lastSeq: Int64,
                       turn: Engine.LiveTurn, contextUsed: Int64?, contextWindow: Int64?) -> LiveFold {
@@ -34,7 +52,13 @@ struct LiveFold {
             switch p.kind {
             case "thought": f.turn.thoughts += p.text
             case "message": f.turn.message += p.text
-            case "tool": f.turn.tools.append(.init(title: p.text))
+            case "tool":
+                f.turn.tools.append(.init(title: p.text))
+                if let focus = extractFocusPath(from: p.text) {
+                    f.focusFile = focus
+                }
+            case "show_file":
+                f.focusFile = p.text.trimmingCharacters(in: CharacterSet(charactersIn: "\"\' "))
             case "tool_done":
                 let parts = p.text.split(separator: "\t", maxSplits: 1).map(String.init)
                 let state = parts.first ?? "completed"
@@ -42,6 +66,9 @@ struct LiveFold {
                 if let i = f.turn.tools.lastIndex(where: { $0.state == "running" && (title.isEmpty || $0.title == title) })
                     ?? f.turn.tools.lastIndex(where: { $0.state == "running" }) {
                     f.turn.tools[i].state = state
+                }
+                if let focus = extractFocusPath(from: title) {
+                    f.focusFile = focus
                 }
                 f.diffChanged = true
             case "usage":

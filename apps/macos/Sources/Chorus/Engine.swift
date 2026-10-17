@@ -475,6 +475,8 @@ final class Engine: ObservableObject {
     /// The finished turn's reasoning. Agents send it but it is not stored in
     /// the ledger, so it lives here until the next turn starts.
     @Published var lastThoughts = ""
+    /// The active file the agent is looking at or editing (Security D3 confined).
+    @Published var agentFocusFile: String? = nil
 
     private var pushRegistered = false
     private lazy var pushes = PushCoalescer { [weak self] batch in self?.absorb(batch) }
@@ -508,6 +510,7 @@ final class Engine: ObservableObject {
         if f.contextUsed != contextUsed { contextUsed = f.contextUsed }
         if f.contextWindow != contextWindow { contextWindow = f.contextWindow }
         for (id, status) in f.statuses where sessionStatus[id] != status { sessionStatus[id] = status }
+        if let focus = f.focusFile { agentFocusFile = focus }
         if f.pull { pullDelta() }
         if f.diffChanged { scheduleLiveDiff() }
     }

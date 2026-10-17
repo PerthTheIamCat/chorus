@@ -71,20 +71,71 @@ pub fn collect_git_status(root: &Path) -> HashMap<String, String> {
     map
 }
 
+/// Sanitize and confine a focus file path strictly to the workspace root (Security D3).
+pub fn sanitize_focus_path(root: &Path, focus: &str) -> Option<String> {
+    let trimmed = focus.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let p = Path::new(trimmed);
+    let candidate = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        root.join(p)
+    };
+
+    if let (Ok(canon_root), Ok(canon_candidate)) = (root.canonicalize(), candidate.canonicalize()) {
+        if canon_candidate.starts_with(&canon_root) {
+            return canon_candidate
+                .strip_prefix(&canon_root)
+                .ok()
+                .map(|s| s.to_string_lossy().to_string());
+        } else {
+            return None; // Traversal attempt outside root
+        }
+    }
+
+    let rel = if candidate.is_absolute() {
+        match candidate.strip_prefix(root) {
+            Ok(r) => r,
+            Err(_) => return None,
+        }
+    } else {
+        p
+    };
+
+    let mut normalized = std::path::PathBuf::new();
+    for comp in rel.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    return None; // Escapes root!
+                }
+            }
+            std::path::Component::Normal(c) => normalized.push(c),
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+
+    let result = normalized.to_string_lossy().to_string();
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
 /// Build file tree for workspace
-pub fn build_file_tree(
-    root: &Path,
-    focus_file: Option<&str>,
-    max_depth: usize,
-) -> FileTreeResult {
+pub fn build_file_tree(root: &Path, focus_file: Option<&str>, max_depth: usize) -> FileTreeResult {
     let git_statuses = collect_git_status(root);
     let mut total_files = 0;
-    let focus_norm = focus_file.map(|f| f.trim_start_matches('/'));
+    let focus_norm = focus_file.and_then(|f| sanitize_focus_path(root, f));
 
     let nodes = walk_dir(
         root,
         root,
-        focus_norm,
+        focus_norm.as_deref(),
         &git_statuses,
         0,
         max_depth,
@@ -156,9 +207,13 @@ fn walk_dir(
         };
 
         let git_status = git_statuses.get(&rel_path).cloned();
-        let is_focus = focus_file.map(|f| f == rel_path || rel_path.ends_with(f)).unwrap_or(false);
+        let is_focus = focus_file.map(|f| f == rel_path).unwrap_or(false);
 
-        let icon = if is_dir { None } else { crate::file_icons::icon_for(&name).map(str::to_string) };
+        let icon = if is_dir {
+            None
+        } else {
+            crate::file_icons::icon_for(&name).map(str::to_string)
+        };
 
         let children = if is_dir {
             walk_dir(
@@ -187,4 +242,80 @@ fn walk_dir(
     }
 
     nodes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_sanitize_focus_path_security_d3() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // 1. Valid relative path inside root
+        let valid_rel = "src/main.rs";
+        assert_eq!(
+            sanitize_focus_path(root, valid_rel),
+            Some("src/main.rs".to_string())
+        );
+
+        // 2. Traversal attempt out of root
+        assert_eq!(sanitize_focus_path(root, "../../etc/passwd"), None);
+        assert_eq!(sanitize_focus_path(root, "foo/../../.."), None);
+
+        // 3. Absolute path outside root
+        assert_eq!(sanitize_focus_path(root, "/etc/passwd"), None);
+
+        // 4. Empty or whitespace
+        assert_eq!(sanitize_focus_path(root, ""), None);
+        assert_eq!(sanitize_focus_path(root, "   "), None);
+
+        // 5. Existing file inside root
+        let file_path = root.join("lib.rs");
+        fs::write(&file_path, "pub fn test() {}").unwrap();
+        assert_eq!(
+            sanitize_focus_path(root, file_path.to_str().unwrap()),
+            Some("lib.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_file_tree_with_focus() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        let sub = root.join("src");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("main.rs"), "fn main() {}").unwrap();
+        fs::write(root.join("README.md"), "# Test").unwrap();
+
+        let tree = build_file_tree(root, Some("src/main.rs"), 4);
+        assert_eq!(tree.total_files, 2);
+
+        // Find src directory and main.rs inside it
+        let src_node = tree
+            .nodes
+            .iter()
+            .find(|n| n.name == "src")
+            .expect("src dir");
+        assert!(src_node.is_dir);
+        let main_node = src_node
+            .children
+            .iter()
+            .find(|n| n.name == "main.rs")
+            .expect("main.rs");
+        assert!(main_node.is_focus, "main.rs should have is_focus = true");
+
+        let readme_node = tree
+            .nodes
+            .iter()
+            .find(|n| n.name == "README.md")
+            .expect("README.md");
+        assert!(
+            !readme_node.is_focus,
+            "README.md should have is_focus = false"
+        );
+    }
 }

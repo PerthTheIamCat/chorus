@@ -94,33 +94,10 @@ struct CodeViewerView: View {
 
     // MARK: - Header Bar
     private var headerBar: some View {
-        HStack(spacing: 10) {
-            // Back to Chat button
-            Button(action: onClose) {
-                HStack(spacing: 4) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 11, weight: .semibold))
-                    Text("กลับไปที่แชท")
-                        .font(.system(size: 11, weight: .medium))
-                }
-                .foregroundColor(.accentColor)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3.5)
-                .background(Color.accentColor.opacity(0.12))
-                .cornerRadius(6)
-            }
-            .buttonStyle(.plain)
-            .keyboardShortcut(.escape, modifiers: [])
-            .help("กลับไปที่บทสนทนา (Esc)")
-
-            Divider()
-                .frame(height: 14)
-
+        HStack(spacing: 8) {
             // File Icon & Breadcrumb
             HStack(spacing: 6) {
-                Image(systemName: fileIcon.name)
-                    .foregroundColor(fileIcon.color)
-                    .font(.system(size: 13, weight: .semibold))
+                FileTypeIcon(key: (filePath as NSString).pathExtension.lowercased(), size: 14)
 
                 HStack(spacing: 4) {
                     let parts = breadcrumbParts
@@ -133,13 +110,22 @@ struct CodeViewerView: View {
                             Text(part)
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundColor(.secondary)
-                            Text("/")
+                            Text("›")
                                 .font(.system(size: 10, design: .monospaced))
                                 .foregroundColor(.secondary.opacity(0.4))
                         }
                     }
                 }
             }
+
+            // Read-only badge
+            Text("อ่านอย่างเดียว")
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.primary.opacity(0.04))
+                .clipShape(Capsule())
 
             // Stats pill (lines count)
             Text("\(lines.count) lines")
@@ -196,7 +182,7 @@ struct CodeViewerView: View {
                 PanelMaximizeButton(isMaximized: isMaximized, onToggle: onToggleMaximize)
             }
 
-            // Close Button
+            // Close Button (✕)
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .semibold))
@@ -206,7 +192,8 @@ struct CodeViewerView: View {
                     .clipShape(Circle())
             }
             .buttonStyle(.plain)
-            .help("Close file viewer")
+            .keyboardShortcut(.escape, modifiers: [])
+            .help("Close file viewer (Esc)")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
@@ -228,7 +215,18 @@ struct CodeViewerView: View {
 
     private func loadFile() {
         guard !filePath.isEmpty, !cwd.isEmpty else { return }
-        let fullPath = (cwd as NSString).appendingPathComponent(filePath)
+        let candidatePath = (cwd as NSString).appendingPathComponent(filePath)
+        let resolvedCandidate = URL(fileURLWithPath: candidatePath).standardized.path
+        let resolvedRoot = URL(fileURLWithPath: cwd).standardized.path
+
+        // Confine file path to the workspace (security D3)
+        guard resolvedCandidate.hasPrefix(resolvedRoot) else {
+            lines = ["// Error: Access denied: path outside workspace"]
+            highlighted = []
+            return
+        }
+
+        let fullPath = resolvedCandidate
         let path = filePath
         let token = UUID()
         loadToken = token

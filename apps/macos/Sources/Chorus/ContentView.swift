@@ -463,11 +463,12 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private var explorerPanel: some View {
+    private func explorerPanel(isRail: Bool = false) -> some View {
         WorkspaceExplorerView(
             engine: engine,
             workspace: workspace,
             isMaximized: maximizedPanel == .explorer,
+            isRailMode: isRail,
             onToggleMaximize: {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                     maximizedPanel = (maximizedPanel == .explorer) ? .none : .explorer
@@ -478,11 +479,11 @@ struct ContentView: View {
             },
             onSelectWorktree: { _ in }
         )
-        .frame(width: maximizedPanel == .explorer ? nil : explorerWidth)
+        .frame(width: maximizedPanel == .explorer ? nil : (isRail ? 44 : explorerWidth))
         .floatingPanel(cornerRadius: 20)
         .transition(.asymmetric(
-            insertion: .move(edge: explorerPosition == "trailing" ? .trailing : .leading).combined(with: .opacity).combined(with: .scale(scale: 0.98)),
-            removal: .move(edge: explorerPosition == "trailing" ? .trailing : .leading).combined(with: .opacity)
+            insertion: .move(edge: .leading).combined(with: .opacity).combined(with: .scale(scale: 0.98)),
+            removal: .move(edge: .leading).combined(with: .opacity)
         ))
     }
 
@@ -529,7 +530,7 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private func codeViewerPanel(for file: String) -> some View {
+    private func codeViewerPanel(for file: String, isCenterStage: Bool = false) -> some View {
         CodeViewerView(
             filePath: file,
             cwd: workspace,
@@ -544,11 +545,12 @@ struct ContentView: View {
                 selectedFile = nil
             }
         )
-        .frame(width: maximizedPanel == .codeViewer ? nil : codeViewerWidth)
+        .frame(width: (maximizedPanel == .codeViewer || isCenterStage) ? nil : codeViewerWidth)
+        .frame(maxWidth: isCenterStage ? .infinity : nil)
         .floatingPanel(cornerRadius: 20)
         .transition(.asymmetric(
-            insertion: .move(edge: .trailing).combined(with: .opacity).combined(with: .scale(scale: 0.98)),
-            removal: .move(edge: .trailing).combined(with: .opacity)
+            insertion: .opacity.combined(with: .scale(scale: 0.98)),
+            removal: .opacity
         ))
     }
 
@@ -621,9 +623,10 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private var multiPanelLayout: some View {
+    private func multiPanelLayout(containerWidth: CGFloat) -> some View {
+        let isNarrow = containerWidth < 1200
         HStack(spacing: 4) {
-            // 1. Sidebar (always leading)
+            // 1. Sidebar (Sessions: 230–260 px)
             if showSidebar {
                 sidebarPanel
                 PanelResizeGrip(width: $sidebarWidth, minWidth: 180, maxWidth: 420, direction: .forward) {
@@ -631,43 +634,35 @@ struct ContentView: View {
                 }
             }
 
-            // 2. Left-positioned Explorer
-            if showExplorer && explorerPosition == "leading" {
-                explorerPanel
-                PanelResizeGrip(width: $explorerWidth, minWidth: 200, maxWidth: 480, direction: .forward) {
-                    explorerWidth = 260
+            // 2. File tree / Explorer (210–240 px, or 44 px icon rail when < 1200 px)
+            if showExplorer {
+                explorerPanel(isRail: isNarrow)
+                if !isNarrow {
+                    PanelResizeGrip(width: $explorerWidth, minWidth: 200, maxWidth: 480, direction: .forward) {
+                        explorerWidth = 240
+                    }
                 }
             }
 
-            // 3. Left-positioned Inspector
-            if showInspector && inspectorPosition == "leading" {
-                inspectorPanel
-                PanelResizeGrip(width: $inspectorWidth, minWidth: 260, maxWidth: 700, direction: .forward) {
-                    inspectorWidth = 330
-                }
-            }
-
-            // 4. Center Stage (Thread / Orchestrator / Live Preview)
-            centerStageView
-
-            // 5. Code Viewer (side-by-side)
-            if let file = selectedFile {
-                PanelResizeGrip(width: $codeViewerWidth, minWidth: 360, maxWidth: 900, direction: .reversed) {
+            // 3. File viewer (opens next to tree, only while a file is open, in wide mode)
+            if !isNarrow, let file = selectedFile {
+                codeViewerPanel(for: file, isCenterStage: false)
+                PanelResizeGrip(width: $codeViewerWidth, minWidth: 320, maxWidth: 900, direction: .forward) {
                     codeViewerWidth = 520
                 }
-                codeViewerPanel(for: file)
             }
 
-            // 6. Right-positioned Explorer
-            if showExplorer && explorerPosition == "trailing" {
-                PanelResizeGrip(width: $explorerWidth, minWidth: 200, maxWidth: 480, direction: .reversed) {
-                    explorerWidth = 260
-                }
-                explorerPanel
+            // 4. Center Stage / Chat (min 380 px)
+            // In narrow mode (< 1200 px), open file temporarily replaces chat.
+            if isNarrow, let file = selectedFile {
+                codeViewerPanel(for: file, isCenterStage: true)
+            } else {
+                centerStageView
+                    .frame(minWidth: 380)
             }
 
-            // 7. Right-positioned Inspector
-            if showInspector && inspectorPosition == "trailing" {
+            // 5. Inspector (stays a toggled right panel ⌥⌘I)
+            if showInspector {
                 PanelResizeGrip(width: $inspectorWidth, minWidth: 260, maxWidth: 700, direction: .reversed) {
                     inspectorWidth = 330
                 }
@@ -677,18 +672,18 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private var maximizedLayout: some View {
+    private func maximizedLayout(containerWidth: CGFloat) -> some View {
         switch maximizedPanel {
         case .codeViewer:
             if let file = selectedFile {
-                codeViewerPanel(for: file)
+                codeViewerPanel(for: file, isCenterStage: true)
             } else {
                 centerStageView
             }
         case .diffReviewer:
             inspectorPanel
         case .explorer:
-            explorerPanel
+            explorerPanel(isRail: false)
         case .thread:
             thread
         case .orchestrator:
@@ -714,17 +709,20 @@ struct ContentView: View {
             )
             .floatingPanel(cornerRadius: 20)
         case .none:
-            multiPanelLayout
+            multiPanelLayout(containerWidth: containerWidth)
         }
     }
 
     var body: some View {
-        Group {
-            if maximizedPanel != .none {
-                maximizedLayout
-            } else {
-                multiPanelLayout
+        GeometryReader { proxy in
+            Group {
+                if maximizedPanel != .none {
+                    maximizedLayout(containerWidth: proxy.size.width)
+                } else {
+                    multiPanelLayout(containerWidth: proxy.size.width)
+                }
             }
+            .frame(width: proxy.size.width, height: proxy.size.height)
         }
         .padding(10)
         .background(Backdrop())
