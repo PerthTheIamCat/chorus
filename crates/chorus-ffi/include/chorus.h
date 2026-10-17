@@ -423,6 +423,10 @@ char *chorus_pairing_revoke_json(const char *device_id);
 /* Subagents & Multi-Agent Sessions */
 char *chorus_list_subagents(const char *db_path, int64_t parent_sess);
 char *chorus_cancel_subagent(const char *db_path, int64_t subagent_id);
+char *chorus_resume_subagent(const char *db_path, int64_t subagent_id);
 char *chorus_message_subagent(const char *db_path, int64_t subagent_id, const char *message);
+char *chorus_cancel_orchestration(const char *db_path, int64_t parent_sess);
+char *chorus_get_checklist_json(const char *db_path, int64_t session_id);
+char *chorus_update_checklist_json(const char *db_path, int64_t session_id, const char *items_json);
 
 #endif /* CHORUS_H */

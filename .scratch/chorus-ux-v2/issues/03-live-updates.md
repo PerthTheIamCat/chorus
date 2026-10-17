@@ -1,6 +1,7 @@
 # Live updates while a turn runs
 
-Status: ready-for-agent
+Status: resolved
+Resolved in: 5fe4eda
 Blocked by: 02
 Parent: ../spec.md
 Decided in: [Live updates](../../chorus-ux-overhaul/issues/19-live-updates.md)

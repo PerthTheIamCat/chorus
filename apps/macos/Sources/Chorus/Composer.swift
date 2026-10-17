@@ -517,30 +517,74 @@ private struct RejectedChip: View {
     }
 }
 
-// MARK: - Control row (issue 14 wires Orchestra)
+// MARK: - Control row (Issue 14 Orchestra Mode UX)
 
-/// Mode: `Orchestra` (issue 14, not wired yet) or `Auto route`. Choosing a
-/// model by hand turns Auto route off. The route preset chip sits next to
-/// it in ContentView.
+/// Mode of operation for the composer in a session.
+enum SessionMode: String, CaseIterable, Identifiable {
+    case autoRoute = "auto"
+    case orchestra = "orchestra"
+    case manual = "manual"
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .autoRoute: return "Auto route"
+        case .orchestra: return "Orchestra"
+        case .manual: return "เลือกเอง"
+        }
+    }
+}
+
+/// Mode: `Auto route | Orchestra | manual`. Choosing a model by hand switches
+/// to `manual`. The composer mode is per session and takes effect from the next turn.
 struct ComposerModeMenu: View {
-    @Binding var autoRoute: Bool
+    @Binding var mode: SessionMode
     var openOrchestraSettings: () -> Void = {}
 
     var body: some View {
         Menu {
-            Button {} label: { Text("Orchestra — เร็ว ๆ นี้") }.disabled(true)
-            Toggle("Auto route", isOn: $autoRoute)
-            Toggle("เลือกโมเดลเอง", isOn: Binding(get: { !autoRoute }, set: { autoRoute = !$0 }))
-            Button("ตั้งค่าออร์เคสตรา…", action: openOrchestraSettings)
+            Button {
+                mode = .autoRoute
+            } label: {
+                HStack {
+                    Text("Auto route")
+                    if mode == .autoRoute { Image(systemName: "checkmark") }
+                }
+            }
+            Button {
+                mode = .orchestra
+            } label: {
+                HStack {
+                    Text("Orchestra")
+                    if mode == .orchestra { Image(systemName: "checkmark") }
+                }
+            }
+            Button {
+                mode = .manual
+            } label: {
+                HStack {
+                    Text("เลือกโมเดลเอง")
+                    if mode == .manual { Image(systemName: "checkmark") }
+                }
+            }
+            Divider()
+            Button("ตั้งค่า Orchestra…", action: openOrchestraSettings)
         } label: {
-            Text(autoRoute ? "Auto route" : "เลือกเอง").font(.caption.weight(.medium))
+            HStack(spacing: 4) {
+                Image(systemName: mode == .orchestra ? "point.3.connected.trianglepath.dotted" : (mode == .autoRoute ? "arrow.triangle.branch" : "cpu"))
+                    .font(.system(size: 9))
+                Text(mode.label).font(.caption.weight(.medium))
+            }
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
         .padding(.horizontal, 8).padding(.vertical, 4)
-        .background(autoRoute ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.06),
-                    in: RoundedRectangle(cornerRadius: 7))
-        .help(autoRoute ? "ให้ router เลือกเอเจนต์ โมเดล และระดับคิด" : "ใช้โมเดลที่เลือกในปุ่มโมเดลทางขวา")
+        .background(
+            mode == .orchestra ? Color.purple.opacity(0.14) : (mode == .autoRoute ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.06)),
+            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+        )
+        .foregroundStyle(mode == .orchestra ? Color.purple : (mode == .autoRoute ? Color.accentColor : Color.primary))
+        .help(mode == .orchestra ? "Orchestra: โมเดลหลักวางแผนและแจกงานให้ agent ย่อย" : (mode == .autoRoute ? "Auto route: router เลือกโมเดลให้ทุกเทิร์น" : "เลือกโมเดลเอง"))
     }
 }
 

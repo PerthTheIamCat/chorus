@@ -69,6 +69,26 @@ struct ContentView: View {
     @State private var permission = PermissionLevel.ask
     @State private var model = ""
     @AppStorage("chorus.autoRoute") private var autoRoute = true
+    @State private var sessionModes: [Int64: SessionMode] = [:]
+    @AppStorage(SettingsKey.defaultMode) private var defaultSessionMode = "auto"
+    @AppStorage(SettingsKey.orchestratorModel) private var configuredOrchestrator = ""
+    @AppStorage(SettingsKey.orchestraAskBeforePlan) private var askBeforePlan = false
+    @State private var planApprovedSessions: Set<Int64> = []
+
+    private var currentSessionMode: SessionMode {
+        get {
+            guard engine.sessionID >= 0 else {
+                return SessionMode(rawValue: defaultSessionMode) ?? .autoRoute
+            }
+            if let m = sessionModes[engine.sessionID] { return m }
+            return SessionMode(rawValue: defaultSessionMode) ?? .autoRoute
+        }
+        nonmutating set {
+            if engine.sessionID >= 0 {
+                sessionModes[engine.sessionID] = newValue
+            }
+        }
+    }
     @AppStorage("chorus.routerModel") private var routerModel = "chorus-openthai-systemone:0.8b"
     @AppStorage("chorus.routerModelAuto") private var routerModelAuto = true
     @AppStorage("chorus.autoCatalogUpdates") private var autoCatalogUpdates = true
@@ -118,7 +138,6 @@ struct ContentView: View {
 
     enum CenterStageMode: String, Equatable {
         case thread
-        case orchestrator
         case livePreview
     }
     @State private var centerStageMode: CenterStageMode = .thread
@@ -131,9 +150,8 @@ struct ContentView: View {
         case .diffReviewer: return "แผงตรวจสอบ Git Diff (เต็มจอ)"
         case .thread: return "บทสนทนาเต็มจอ"
         case .explorer: return "แผงโครงสร้างไฟล์ (เต็มจอ)"
-        case .orchestrator: return "แผงควบคุม Multi-Agent Orchestrator (เต็มจอ)"
         case .livePreview: return "แผงพรีวิวเว็บ Live Preview (เต็มจอ)"
-        case .none: return ""
+        case .none, .orchestrator: return ""
         }
     }
     @State private var expanded: Set<String> = []
@@ -634,17 +652,6 @@ struct ContentView: View {
             switch centerStageMode {
             case .thread:
                 thread
-            case .orchestrator:
-                OrchestratorView(
-                    engine: engine,
-                    workspace: workspace,
-                    onSelectWorktree: { _ in },
-                    onDispatchParallelPrompt: { prompt in
-                        draftBox.text = prompt
-                        centerStageMode = .thread
-                    }
-                )
-                .floatingPanel(cornerRadius: 20)
             case .livePreview:
                 LivePreviewView(
                     currentURLString: $previewURLString,
@@ -737,17 +744,7 @@ struct ContentView: View {
         case .thread:
             thread
         case .orchestrator:
-            OrchestratorView(
-                engine: engine,
-                workspace: workspace,
-                onSelectWorktree: { _ in },
-                onDispatchParallelPrompt: { prompt in
-                    draftBox.text = prompt
-                    centerStageMode = .thread
-                    maximizedPanel = .none
-                }
-            )
-            .floatingPanel(cornerRadius: 20)
+            centerStageView
         case .livePreview:
             LivePreviewView(
                 currentURLString: $previewURLString,
@@ -898,15 +895,12 @@ struct ContentView: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
-                        centerStageMode = (centerStageMode == .orchestrator) ? .thread : .orchestrator
-                    }
+                    settingsSection = .orchestration
+                    showSettings = true
                 } label: {
-                    Label(centerStageMode == .orchestrator ? "กลับสู่บทสนทนา" : "Swarm Orchestrator",
-                          systemImage: centerStageMode == .orchestrator ? "point.3.filled.connected.trianglepath.dotted" : "point.3.connected.trianglepath.dotted")
-                        .foregroundStyle(centerStageMode == .orchestrator ? Color.accentColor : Color.primary)
+                    Label("Orchestra & Roles", systemImage: "point.3.connected.trianglepath.dotted")
                 }
-                .help(centerStageMode == .orchestrator ? "กลับสู่บทสนทนา (⌘⌥O)" : "เปิด Multi-Agent Orchestrator (⌘⌥O)")
+                .help("เปิดการตั้งค่า Orchestra และ Role Library (⌘⌥O)")
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -1712,6 +1706,7 @@ struct ContentView: View {
                                                })
                                         .id("working")
                                 }
+                                orchestraStatusSection
                                 Color.clear.frame(height: 1).id("chatBottom")
                             }
                             .frame(maxWidth: 820)
@@ -1816,6 +1811,56 @@ struct ContentView: View {
         .frame(minWidth: 420)
         .clipShape(RoundedRectangle(cornerRadius: 20))
         .onDrop(of: [UTType.fileURL, UTType.url, UTType.image], isTargeted: nil, perform: importDroppedProviders)
+    }
+
+    @ViewBuilder
+    private var orchestraStatusSection: some View {
+        if !engine.checklist.isEmpty {
+            PlanChecklistView(
+                items: engine.checklist,
+                askBeforePlan: askBeforePlan,
+                isPlanApproved: !askBeforePlan || (engine.sessionID >= 0 && planApprovedSessions.contains(engine.sessionID)),
+                onStartPlan: {
+                    if engine.sessionID >= 0 {
+                        planApprovedSessions.insert(engine.sessionID)
+                        let currentSubs = engine.subagentsByParent[engine.sessionID] ?? (engine.subagentsByDB[dbPath] ?? [])
+                        let waitingSubs = currentSubs.filter { $0.status == "waiting" && $0.kind == "chorus" }
+                        for sub in waitingSubs {
+                            engine.resumeSubagent(db: dbPath, id: sub.id)
+                        }
+                    }
+                },
+                onStop: {
+                    if engine.sessionID >= 0 {
+                        engine.cancelOrchestration(db: dbPath, parentSess: engine.sessionID)
+                    }
+                    engine.cancel()
+                    queued.removeAll()
+                }
+            )
+            .id("planChecklist")
+        }
+        let currentSubs = (engine.sessionID >= 0 ? engine.subagentsByParent[engine.sessionID] : nil) ?? (engine.subagentsByDB[dbPath] ?? [])
+        let waitingSubs = currentSubs.filter { $0.status == "waiting" && $0.kind == "chorus" }
+        if !waitingSubs.isEmpty {
+            CapPausePromptCard(
+                subagents: waitingSubs,
+                onContinue: { subId in
+                    engine.resumeSubagent(db: dbPath, id: subId)
+                },
+                onStop: { subId in
+                    engine.cancelSubagent(db: dbPath, id: subId)
+                },
+                onStopAll: {
+                    if engine.sessionID >= 0 {
+                        engine.cancelOrchestration(db: dbPath, parentSess: engine.sessionID)
+                    }
+                    engine.cancel()
+                    queued.removeAll()
+                }
+            )
+            .id("capPause")
+        }
     }
 
     private var emptyState: some View {
@@ -1948,12 +1993,15 @@ struct ContentView: View {
                           isBusy: engine.busy,
                           canSend: engine.sessionID >= 0,
                           onStop: { engine.cancel(); queued.removeAll() },
-                          routeNoteEnabled: autoRoute) {
-                ComposerModeMenu(autoRoute: $autoRoute) {
+                          routeNoteEnabled: currentSessionMode == .autoRoute) {
+                ComposerModeMenu(mode: Binding(
+                    get: { currentSessionMode },
+                    set: { currentSessionMode = $0 }
+                )) {
                     settingsSection = .orchestration
                     showSettings = true
                 }
-                if autoRoute, !engine.routePresets.isEmpty {
+                if currentSessionMode == .autoRoute, !engine.routePresets.isEmpty {
                     ChipPicker(
                         icon: "gauge.with.dots.needle.50percent",
                         value: engine.routePreset,
@@ -1972,8 +2020,24 @@ struct ContentView: View {
                 ) { v in if let p = PermissionLevel(rawValue: Int32(v) ?? 0) { permission = p } }
                 .help(permission.hint)
             } trailing: {
-                if autoRoute {
-                    Button { autoRoute = false } label: {
+                if currentSessionMode == .orchestra {
+                    let orchLabel = configuredOrchestrator.isEmpty ? "Claude Opus 5.5" : ModelID(configuredOrchestrator).base
+                    Button {
+                        settingsSection = .orchestration
+                        showSettings = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "crown.fill")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.yellow)
+                            Text("นำโดย \(orchLabel)")
+                                .font(.caption.weight(.medium))
+                        }
+                    }
+                    .buttonStyle(InteractiveStyle(cornerRadius: 7, padding: .init(top: 4, leading: 8, bottom: 4, trailing: 8)))
+                    .help("Orchestra: วางแผนและแจกงานให้ agent ย่อย (คลิกเพื่อตั้งค่าโมเดล)")
+                } else if currentSessionMode == .autoRoute {
+                    Button { currentSessionMode = .manual } label: {
                         HStack(spacing: 3) {
                             Image(systemName: "arrow.triangle.branch")
                             Text("router เลือก")
@@ -2042,7 +2106,8 @@ struct ContentView: View {
             rightTab = RightTab.allCases[i]
             showInspector = true
         case .toggleOrchestrator:
-            withAnimation(spring) { centerStageMode = centerStageMode == .orchestrator ? .thread : .orchestrator }
+            settingsSection = .orchestration
+            showSettings = true
         case .toggleLivePreview:
             withAnimation(spring) { centerStageMode = centerStageMode == .livePreview ? .thread : .livePreview }
         case .toggleTerminal:
@@ -2216,7 +2281,12 @@ struct ContentView: View {
     }
 
     private func routeOrDispatch(_ send: PendingSend) {
-        guard autoRoute, !send.explicitAgent else {
+        if currentSessionMode == .orchestra && !send.explicitAgent {
+            let orchModel = configuredOrchestrator.isEmpty ? "claude-opus-5.5" : configuredOrchestrator
+            dispatch(orchModel, send.text, attachments: send.attachments.map(\.id))
+            return
+        }
+        guard currentSessionMode == .autoRoute, !send.explicitAgent else {
             engine.recordLearnedRoute(
                 workspace: workspace,
                 prompt: send.text,
@@ -2953,6 +3023,22 @@ struct ContentView: View {
                                 if engine.busy {
                                     engine.cancel()
                                     queued.removeAll()
+                                }
+                            },
+                            onKeepRole: { roleName, sub in
+                                let roleToSave = Engine.AgentRole(
+                                    name: roleName.lowercased(),
+                                    description: "บทบาทสังเคราะห์สำหรับงาน: \(sub.task)",
+                                    system_prompt: "คุณคือผู้เชี่ยวชาญในบทบาท \(roleName)\nภารกิจ: \(sub.task)",
+                                    tools: (sub.worktree != nil && !sub.worktree!.isEmpty) ? ["read", "bash", "edit", "write"] : ["read", "bash"],
+                                    model: sub.model
+                                )
+                                engine.saveRole(cwd: folder, role: roleToSave) { ok, err in
+                                    if ok {
+                                        hint = "บันทึก Role '\(roleName)' ลง .chorus/agents/ เรียบร้อยแล้ว"
+                                    } else if let err = err {
+                                        hint = "บันทึก Role ไม่สำเร็จ: \(err)"
+                                    }
                                 }
                             }
                         )
@@ -4368,6 +4454,144 @@ private struct OpenAtBottom: ViewModifier {
     }
 }
 
+struct PlanChecklistView: View {
+    let items: [Engine.ChecklistItem]
+    let askBeforePlan: Bool
+    let isPlanApproved: Bool
+    let onStartPlan: () -> Void
+    let onStop: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "checklist")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.purple)
+
+                Text("แผนงาน Orchestra")
+                    .font(.caption.weight(.semibold))
+
+                Spacer()
+
+                if askBeforePlan && !isPlanApproved {
+                    Button(action: onStartPlan) {
+                        Label("เริ่มทำตามแผน", systemImage: "play.fill")
+                            .font(.caption.weight(.medium))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+
+                Button(role: .destructive, action: onStop) {
+                    Label("หยุด", systemImage: "stop.fill")
+                        .font(.caption.weight(.medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("หยุดการทำงานของแผนงาน Orchestra ทั้งหมด")
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(items) { item in
+                    HStack(alignment: .top, spacing: 8) {
+                        if item.done {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.green)
+                        } else if item.in_progress {
+                            ProgressView()
+                                .controlSize(.mini)
+                        } else {
+                            Image(systemName: "circle")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Text(item.text)
+                            .font(.caption)
+                            .foregroundStyle(item.done ? .secondary : .primary)
+                            .strikethrough(item.done)
+                    }
+                }
+            }
+            .padding(.top, 2)
+        }
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.8), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+    }
+}
+
+struct CapPausePromptCard: View {
+    let subagents: [Engine.SubagentInfo]
+    let onContinue: (Int64) -> Void
+    let onStop: (Int64) -> Void
+    let onStopAll: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("รอ")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Color.orange, in: Capsule())
+
+                Text("งานย่อยหยุดรอ (ติด Concurrency Cap หรือรอการยืนยัน)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+
+                Spacer()
+
+                Button(role: .destructive, action: onStopAll) {
+                    Text("หยุดทั้งหมด")
+                        .font(.caption2)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(subagents) { sub in
+                    HStack(spacing: 8) {
+                        Text(sub.role)
+                            .font(.caption.weight(.semibold))
+                        Text(sub.task)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+
+                        Spacer()
+
+                        Button {
+                            onContinue(sub.id)
+                        } label: {
+                            Label("ทำต่อ", systemImage: "play.fill")
+                                .font(.caption2.weight(.medium))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.mini)
+
+                        Button(role: .destructive) {
+                            onStop(sub.id)
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .bold))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                        .help("ยกเลิกงานย่อยนี้")
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.orange.opacity(0.25), lineWidth: 1))
+    }
+}
+
 struct SubagentTreeRow: View {
     let sub: Engine.SubagentInfo
     let siblings: [Engine.SubagentInfo]
@@ -4380,9 +4604,11 @@ struct SubagentTreeRow: View {
     let onMessage: (Engine.SubagentInfo) -> Void
     let onCancel: (Int64) -> Void
     let onCancelParent: () -> Void
+    var onKeepRole: ((String, Engine.SubagentInfo) -> Void)? = nil
 
     var body: some View {
         let isSelected = folder == currentWorkspace && sub.child_sess != nil && sub.child_sess == selectedSessionID
+        let isBuiltin = ["orchestrator", "investigator", "builder", "reviewer"].contains(sub.role.lowercased())
         let roleSiblings = siblings.filter { $0.role == sub.role }.sorted { $0.created_ms < $1.created_ms }
         let repeatIndex = roleSiblings.firstIndex(where: { $0.id == sub.id }).map { $0 + 1 } ?? 1
         let roleTitle = roleSiblings.count > 1 ? "\(sub.role) \(repeatIndex)" : sub.role
@@ -4439,6 +4665,33 @@ struct SubagentTreeRow: View {
 
                     Spacer(minLength: 4)
 
+                    // New role badge & Keep action
+                    if !isBuiltin && sub.kind == "chorus" {
+                        HStack(spacing: 3) {
+                            Text("new role")
+                                .font(.system(size: 8, weight: .semibold))
+                                .foregroundStyle(.purple)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 0.5)
+                                .background(Color.purple.opacity(0.12), in: Capsule())
+
+                            if let onKeepRole {
+                                Button {
+                                    onKeepRole(sub.role, sub)
+                                } label: {
+                                    Text("Keep")
+                                        .font(.system(size: 8, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 0.5)
+                                        .background(Color.purple, in: Capsule())
+                                }
+                                .buttonStyle(.plain)
+                                .help("บันทึก Role '\(sub.role)' ลง .chorus/agents/\(sub.role).md")
+                            }
+                        }
+                    }
+
                     // Model chip
                     if let m = sub.model, !m.isEmpty {
                         Text(ModelID(m).base)
@@ -4457,6 +4710,11 @@ struct SubagentTreeRow: View {
             .help(displayName)
             .contextMenu {
                 if sub.kind == "chorus" {
+                    if !isBuiltin {
+                        Button("Keep Role '\(sub.role)' (.chorus/agents/)") {
+                            onKeepRole?(sub.role, sub)
+                        }
+                    }
                     if sub.status == "running" || sub.status == "waiting" {
                         Button("ส่งข้อความถึงงานย่อย…") {
                             onMessage(sub)
@@ -4493,7 +4751,8 @@ struct SubagentTreeRow: View {
                             onSelect: onSelect,
                             onMessage: onMessage,
                             onCancel: onCancel,
-                            onCancelParent: onCancelParent
+                            onCancelParent: onCancelParent,
+                            onKeepRole: onKeepRole
                         )
                     }
                 } else {

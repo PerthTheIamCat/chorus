@@ -41,12 +41,11 @@ Every change keeps CLAUDE.md rules 2.1–2.3: storage is separate from context, 
 
 Perth approved these on 2026-10-17:
 
-- **Schema:** migration v7, adding the `session_usage` table and the `session.review_base` column.
+- **Schema:** migration v7, adding the `session_usage` table, the `session.review_base` column, and `subagent.kind` with a `waiting` status (the `subagent` part was approved later the same day).
 - **Dependencies:** `htmd`, `pulldown-cmark`, and workspace `rust-version` raised to 1.85.
 
 ## Still needs Perth's approval when reached
 
-- **Schema:** the `subagent` table's kind column and its waiting status (issue 02 covers this; ask before writing the migration).
 - **New dependencies:** any not listed above.
 - **New FFI:** a "last N events" FFI call, if chat paging turns out to need one.
 

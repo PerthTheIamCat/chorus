@@ -1040,25 +1040,13 @@ struct OrchestrationSettings: View {
                 Toggle("คัดลอก .env ไป worktree", isOn: $copyEnv).labelsHidden().toggleStyle(.switch)
             }
         }
-        SettingsGroup(title: "บทบาท") {
-            SettingsRow(title: "บทบาทและ worktree", info: "บทบาทใน .chorus/agents และ worktree ของงานย่อย") {
-                Button("เปิด") { showRoles = true }
-                    .disabled(workspace.isEmpty)
+        SettingsGroup(title: "คลังบทบาท (Role Library)", footer: "บทบาท agent ที่กำหนดเองจะถูกบันทึกใน .chorus/agents/*.md") {
+            if !workspace.isEmpty {
+                OrchestratorView(engine: engine, workspace: workspace)
+                    .padding(.vertical, 4)
+            } else {
+                Text("เลือก workspace เพื่อจัดการบทบาท").font(.caption).foregroundStyle(.secondary)
             }
-        }
-        .sheet(isPresented: $showRoles) {
-            VStack(spacing: 0) {
-                HStack {
-                    Text("บทบาทและ worktree").font(.headline)
-                    Spacer()
-                    Button("เสร็จ") { showRoles = false }.keyboardShortcut(.defaultAction)
-                }
-                .padding(14)
-                Divider()
-                OrchestratorView(engine: engine, workspace: workspace,
-                                 onSelectWorktree: { _ in }, onDispatchParallelPrompt: { _ in })
-            }
-            .frame(minWidth: 760, minHeight: 560)
         }
     }
 

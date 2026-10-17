@@ -2718,6 +2718,121 @@ pub unsafe extern "C" fn chorus_message_subagent(
     }
 }
 
+/// Resume a waiting child subagent (e.g. paused at a cap).
+///
+/// # Safety
+/// Caller must pass a valid null-terminated UTF-8 string for `db_path`.
+/// The returned pointer must be freed with `chorus_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_resume_subagent(
+    db_path: *const c_char,
+    subagent_id: i64,
+) -> *mut c_char {
+    let Some(db_path) = borrow(db_path) else {
+        return err("db_path must be valid UTF-8");
+    };
+    let db = PathBuf::from(db_path);
+    let r = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
+        let store = chorus_core::store::Store::open(&db).map_err(|e| e.to_string())?;
+        let sub = chorus_core::agent_control::resume_subagent(store.conn(), subagent_id)
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({ "ok": true, "subagent": sub }))
+    }));
+    match r {
+        Ok(Ok(val)) => out(val.to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in resume_subagent"),
+    }
+}
+
+/// Cancel all running and waiting children of an orchestration.
+///
+/// # Safety
+/// Caller must pass a valid null-terminated UTF-8 string for `db_path`.
+/// The returned pointer must be freed with `chorus_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_cancel_orchestration(
+    db_path: *const c_char,
+    parent_sess: i64,
+) -> *mut c_char {
+    let Some(db_path) = borrow(db_path) else {
+        return err("db_path must be valid UTF-8");
+    };
+    let db = PathBuf::from(db_path);
+    let r = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
+        let store = chorus_core::store::Store::open(&db).map_err(|e| e.to_string())?;
+        chorus_core::agent_control::cancel_orchestration(store.conn(), parent_sess)
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({ "ok": true }))
+    }));
+    match r {
+        Ok(Ok(val)) => out(val.to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in cancel_orchestration"),
+    }
+}
+
+/// Get the active task checklist for a session.
+///
+/// # Safety
+/// Caller must pass a valid null-terminated UTF-8 string for `db_path`.
+/// The returned pointer must be freed with `chorus_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_get_checklist_json(
+    db_path: *const c_char,
+    session_id: i64,
+) -> *mut c_char {
+    let Some(db_path) = borrow(db_path) else {
+        return err("db_path must be valid UTF-8");
+    };
+    let db = PathBuf::from(db_path);
+    let r = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
+        let store = chorus_core::store::Store::open(&db).map_err(|e| e.to_string())?;
+        let items = chorus_core::agent_control::get_checklist(store.conn(), session_id)
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({ "ok": true, "items": items }))
+    }));
+    match r {
+        Ok(Ok(val)) => out(val.to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in get_checklist_json"),
+    }
+}
+
+/// Update the active task checklist for a session.
+///
+/// # Safety
+/// Caller must pass valid null-terminated UTF-8 strings for `db_path` and `items_json`.
+/// The returned pointer must be freed with `chorus_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_update_checklist_json(
+    db_path: *const c_char,
+    session_id: i64,
+    items_json: *const c_char,
+) -> *mut c_char {
+    let Some(db_path) = borrow(db_path) else {
+        return err("db_path must be valid UTF-8");
+    };
+    let Some(items_str) = borrow(items_json) else {
+        return err("items_json must be valid UTF-8");
+    };
+    let db = PathBuf::from(db_path);
+    let r = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
+        let items: Vec<chorus_core::agent_control::ChecklistItem> =
+            serde_json::from_str(items_str).map_err(|e| e.to_string())?;
+        let store = chorus_core::store::Store::open(&db).map_err(|e| e.to_string())?;
+        let updated =
+            chorus_core::agent_control::update_checklist(store.conn(), session_id, &items)
+                .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({ "ok": true, "items": updated }))
+    }));
+    match r {
+        Ok(Ok(val)) => out(val.to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in update_checklist_json"),
+    }
+}
+
 /// List all turn checkpoints for a session.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_checkpoint_list_json(
@@ -3439,6 +3554,81 @@ mod tests {
         assert!(cancel_val["ok"].as_bool().unwrap());
         assert_eq!(cancel_val["subagent"]["status"], "cancelled");
         unsafe { chorus_string_free(cancel_ptr) };
+    }
+
+    #[test]
+    fn ffi_orchestra_checklist_and_resume() {
+        let dir = std::env::temp_dir().join(format!("chorus-ffi-orch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let db = dir.join("store.db");
+        let store = chorus_core::store::Store::open(&db).unwrap();
+        let sess_id =
+            chorus_core::ledger::new_session(store.conn(), "orchestration", dir.to_str().unwrap())
+                .unwrap();
+
+        let db_c = CString::new(db.to_string_lossy().to_string()).unwrap();
+
+        // 1. Checklist
+        let items_json = CString::new(
+            r#"[{"text":"Design database","done":true,"in_progress":false},{"text":"Build backend","done":false,"in_progress":true}]"#,
+        )
+        .unwrap();
+        let update_ptr =
+            unsafe { chorus_update_checklist_json(db_c.as_ptr(), sess_id, items_json.as_ptr()) };
+        let update_str = unsafe { CStr::from_ptr(update_ptr).to_str().unwrap() };
+        let update_val: serde_json::Value = serde_json::from_str(update_str).unwrap();
+        assert!(update_val["ok"].as_bool().unwrap());
+        assert_eq!(update_val["items"].as_array().unwrap().len(), 2);
+        unsafe { chorus_string_free(update_ptr) };
+
+        let get_ptr = unsafe { chorus_get_checklist_json(db_c.as_ptr(), sess_id) };
+        let get_str = unsafe { CStr::from_ptr(get_ptr).to_str().unwrap() };
+        let get_val: serde_json::Value = serde_json::from_str(get_str).unwrap();
+        assert!(get_val["ok"].as_bool().unwrap());
+        assert_eq!(get_val["items"][0]["text"], "Design database");
+        assert_eq!(get_val["items"][1]["in_progress"], true);
+        unsafe { chorus_string_free(get_ptr) };
+
+        // 2. Waiting subagent & resume
+        let sub = chorus_core::agent_control::spawn_agent_with_options(
+            store.conn(),
+            Some(sess_id),
+            "builder",
+            "compile engine",
+            None,
+            false,
+            dir.to_str().unwrap(),
+            None,
+        )
+        .unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE subagent SET status = 'waiting', summary = 'Cap reached' WHERE id = ?1",
+                [sub.id],
+            )
+            .unwrap();
+
+        let resume_ptr = unsafe { chorus_resume_subagent(db_c.as_ptr(), sub.id) };
+        let resume_str = unsafe { CStr::from_ptr(resume_ptr).to_str().unwrap() };
+        let resume_val: serde_json::Value = serde_json::from_str(resume_str).unwrap();
+        assert!(resume_val["ok"].as_bool().unwrap());
+        assert_eq!(resume_val["subagent"]["status"], "running");
+        unsafe { chorus_string_free(resume_ptr) };
+
+        // 3. Cancel orchestration
+        let cancel_orch_ptr = unsafe { chorus_cancel_orchestration(db_c.as_ptr(), sess_id) };
+        let cancel_orch_str = unsafe { CStr::from_ptr(cancel_orch_ptr).to_str().unwrap() };
+        let cancel_orch_val: serde_json::Value = serde_json::from_str(cancel_orch_str).unwrap();
+        assert!(cancel_orch_val["ok"].as_bool().unwrap());
+        unsafe { chorus_string_free(cancel_orch_ptr) };
+
+        let sub_after = chorus_core::agent_control::get_subagent(store.conn(), sub.id).unwrap();
+        assert_eq!(
+            sub_after.status,
+            chorus_core::agent_control::SubagentStatus::Cancelled
+        );
     }
 }
 

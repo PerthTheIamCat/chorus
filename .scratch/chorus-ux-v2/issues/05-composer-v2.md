@@ -1,6 +1,6 @@
 # Composer v2
 
-Status: ready-for-agent
+Status: resolved
 Blocked by: 01
 Parent: ../spec.md
 Decided in: [Composer layout](../../chorus-ux-overhaul/issues/08-composer-layout.md) · [Composer paste options](../../chorus-ux-overhaul/issues/04-composer-paste-and-preview.md) · [Rich paste dependency](../../chorus-ux-overhaul/issues/18-rich-paste-dependency.md) · prototype `08-composer-layout.html?variant=A`
@@ -19,3 +19,7 @@ Decided in: [Composer layout](../../chorus-ux-overhaul/issues/08-composer-layout
 
 - Rust tests: HTML from Slack, Notion and GitHub fixtures converts to the expected Markdown; caps trigger the fallback.
 - Check in the app: paste a web page section, a Finder file, a screenshot and a PDF; real thumbnails show; IME Return still doesn't send.
+
+## Comments
+
+- 2026-10-17: committed 6e058e5, merged as 0db1b00. Conflict in ContentView: kept the v2 composer row and replaced the `RoutePresetMenu` stub (its own key, and `full` instead of `max`) with the real preset chip from Route presets. Removed the "งานขนาน" toggle, whose `chorus.orchestrationEnabled` key Settings v2 had removed (Orchestra mode Q1). Checked in the app by the session: paste, thumbnails, growth. Not checked: Stop while streaming, IME Return, file-promise drags.

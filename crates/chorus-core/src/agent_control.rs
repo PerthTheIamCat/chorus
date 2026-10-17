@@ -649,6 +649,23 @@ pub fn cancel_agent(conn: &Connection, subagent_id: i64, reason: Option<&str>) -
     get_subagent(conn, subagent_id)
 }
 
+/// Resume a waiting child agent session (e.g. after cap pause or user approval).
+pub fn resume_subagent(conn: &Connection, subagent_id: i64) -> Result<Subagent> {
+    let now = now_ms();
+    conn.execute(
+        "UPDATE subagent SET status = 'running', summary = NULL, updated_ms = ?1 \
+         WHERE id = ?2 AND status = 'waiting'",
+        params![now, subagent_id],
+    )?;
+
+    let subagent = get_subagent(conn, subagent_id)?;
+    if let Some(runner) = get_child_runner() {
+        let _ = runner.run_child(&subagent, None);
+    }
+
+    Ok(subagent)
+}
+
 /// Cancel all running and waiting children belonging to parent orchestration.
 pub fn cancel_orchestration(conn: &Connection, parent_sess: i64) -> Result<()> {
     let now = now_ms();

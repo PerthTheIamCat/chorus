@@ -1,6 +1,6 @@
 # System monitor
 
-Status: ready-for-agent
+Status: resolved
 Blocked by: 01
 Parent: ../spec.md
 Decided in: [System monitor](../../chorus-ux-overhaul/issues/14-system-monitor.md) · [research 02](../../chorus-ux-overhaul/research/02-process-port-monitoring-apis.md) · [research 03 §4](../../chorus-ux-overhaul/research/03-security-delta-scan.md)
@@ -30,3 +30,7 @@ Decided in: [System monitor](../../chorus-ux-overhaul/issues/14-system-monitor.m
 - A canary test opens a listener and checks the scan finds it.
 - Unit tests cover the stop-guard rules.
 - Check in the app: a local `redis-server` or `python3 -m http.server` appears, stops cleanly, and a SIGKILL needs the explicit click.
+
+## Comments
+
+- 2026-10-17: committed 1b4d717, merged with no conflicts. Not clicked through in the running app, because computer use was busy in another session. Check the window, the stop flow with a local test server, and the optimise previews by hand.

@@ -1,6 +1,7 @@
 # Subagent normalizer in chorus-acp
 
-Status: ready-for-agent
+Status: resolved
+Resolved in: ad9af2f
 Blocked by: 02
 Parent: ../spec.md
 Decided in: [Sub sessions](../../chorus-ux-overhaul/issues/11-sub-sessions.md) Q7 · [harness research 06](../../chorus-harness-roadmap/issues/06-subagent-visibility-in-bridges.md)

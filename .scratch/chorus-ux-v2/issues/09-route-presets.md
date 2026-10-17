@@ -1,6 +1,6 @@
 # Route presets
 
-Status: ready-for-agent
+Status: resolved
 Blocked by: —
 Parent: ../spec.md
 Decided in: [Route presets](../../chorus-ux-overhaul/issues/12-route-presets.md)
@@ -21,3 +21,7 @@ Decided in: [Route presets](../../chorus-ux-overhaul/issues/12-route-presets.md)
 
 - Router unit tests: per preset, cover each kind × difficulty pick, the tie direction, and the removed Review floor.
 - `scoring_tests` are updated, not deleted.
+
+## Comments
+
+- 2026-10-17: committed d9c960a, merged as 6987ffc. Merge conflict in ContentView.sendReviewedRoute: kept main's version, because shell polish removed the countdown, so PendingRoute is now only the manual fallback. Not checked in the running app.

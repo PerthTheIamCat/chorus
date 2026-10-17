@@ -169,7 +169,11 @@ fn checked_policy(cwd: &Path, profile: Profile) -> Result<String, String> {
     // outside any sandbox.
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         let ssh = canonical(&home).join(".ssh");
-        if let Some(kh) = ssh.join("known_hosts").to_str().filter(|b| !b.contains('"')) {
+        if let Some(kh) = ssh
+            .join("known_hosts")
+            .to_str()
+            .filter(|b| !b.contains('"'))
+        {
             s.push_str(&format!("(allow file-write* (literal \"{kh}\"))\n"));
             s.push_str(&format!(
                 "(allow file-write* (regex #\"^{}\\.[^/]*$\"))\n",
@@ -352,7 +356,9 @@ mod tests {
             .map(|h| canonical(&PathBuf::from(h)).join(".ssh"))
             .unwrap();
         let ssh = ssh.to_str().unwrap();
-        assert!(p.contains(&format!("(allow file-write* (literal \"{ssh}/known_hosts\"))")));
+        assert!(p.contains(&format!(
+            "(allow file-write* (literal \"{ssh}/known_hosts\"))"
+        )));
         assert!(!p.contains(&format!("(allow file-write* (subpath \"{ssh}\"))")));
         assert!(!p.contains("authorized_keys"));
     }

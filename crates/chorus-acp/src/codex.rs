@@ -237,7 +237,10 @@ pub fn models_from(res: &Value) -> Vec<ModelInfo> {
     let Some(m) = res.get("models") else {
         return Vec::new();
     };
-    let current = m.get("currentModelId").and_then(Value::as_str).unwrap_or("");
+    let current = m
+        .get("currentModelId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     m.get("availableModels")
         .and_then(Value::as_array)
         .map(|a| {
@@ -549,7 +552,11 @@ impl CodexAgent {
     /// reason this returns a report instead of nothing.
     fn pin_mode(&mut self, mode: Option<&str>) -> ModeOutcome {
         let Some(mode) = mode else {
-            return ModeOutcome { requested: String::new(), effective: None, via: "none" };
+            return ModeOutcome {
+                requested: String::new(),
+                effective: None,
+                via: "none",
+            };
         };
         let requested = mode.to_string();
 
@@ -559,7 +566,11 @@ impl CodexAgent {
         ) {
             if let Ok(res) = self.pump(id, Duration::from_secs(15)) {
                 if let Some(v) = current_config(&res, "mode") {
-                    return ModeOutcome { requested, effective: Some(v), via: "config_option" };
+                    return ModeOutcome {
+                        requested,
+                        effective: Some(v),
+                        via: "config_option",
+                    };
                 }
             }
         }
@@ -569,10 +580,18 @@ impl CodexAgent {
             json!({ "sessionId": self.session_id, "modeId": mode }),
         ) {
             if self.pump(id, Duration::from_secs(15)).is_ok() {
-                return ModeOutcome { requested, effective: None, via: "set_mode" };
+                return ModeOutcome {
+                    requested,
+                    effective: None,
+                    via: "set_mode",
+                };
             }
         }
-        ModeOutcome { requested, effective: None, via: "none" }
+        ModeOutcome {
+            requested,
+            effective: None,
+            via: "none",
+        }
     }
 
     /// Wait for the response to `id`, discarding any `session/update` frames
@@ -744,7 +763,10 @@ fn resolve_inside(cwd: &Path, path: &str) -> Result<PathBuf> {
 /// Forward one parent-session `session/update` to the live progress sink.
 /// Child frames never come here: they would stream into the parent's bubble.
 fn report_progress(update: &Value) {
-    let kind = update.get("sessionUpdate").and_then(Value::as_str).unwrap_or("");
+    let kind = update
+        .get("sessionUpdate")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     match kind {
         "agent_thought_chunk" => {
             if let Some(t) = chunk_text(update) {
@@ -757,7 +779,10 @@ fn report_progress(update: &Value) {
             }
         }
         "tool_call" => {
-            let title = update.get("title").and_then(Value::as_str).unwrap_or("tool");
+            let title = update
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("tool");
             crate::emit_progress("tool", title);
         }
         "tool_call_update" => {
@@ -904,7 +929,10 @@ impl Transcript {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                let id = update.get("toolCallId").and_then(Value::as_str).unwrap_or("");
+                let id = update
+                    .get("toolCallId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
                 if !id.is_empty() {
                     self.titles.insert(id.to_string(), title.clone());
                 }
@@ -1015,7 +1043,10 @@ impl Accumulator {
             .get("sessionUpdate")
             .and_then(Value::as_str)
             .unwrap_or("");
-        let session_id = params.get("sessionId").and_then(Value::as_str).unwrap_or("");
+        let session_id = params
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let str_of = |k: &str| update.get(k).and_then(Value::as_str);
         match kind {
             "subagent_spawned" => {
@@ -1050,9 +1081,10 @@ impl Accumulator {
                             str_of("description").unwrap_or(""),
                         );
                     }
-                    let state = update
-                        .get("state")
-                        .and_then(|s| s.as_str().or_else(|| s.get("state").and_then(Value::as_str)));
+                    let state = update.get("state").and_then(|s| {
+                        s.as_str()
+                            .or_else(|| s.get("state").and_then(Value::as_str))
+                    });
                     if let Some(state) = state {
                         self.set_state(child, normalize_state(state));
                     }
@@ -1187,15 +1219,22 @@ impl Accumulator {
         let t = self.transcript_of(parent);
         t.flush_message();
         t.events.push(spawned);
-        self.child_index.insert(key.to_string(), self.children.len());
-        self.children.push(Child { out, t: Transcript::default(), result: String::new() });
+        self.child_index
+            .insert(key.to_string(), self.children.len());
+        self.children.push(Child {
+            out,
+            t: Transcript::default(),
+            result: String::new(),
+        });
         push_subagent(self.children.last().expect("just pushed"), None);
     }
 
     /// Move a child to `state`. The first terminal state closes the child:
     /// its final result goes into the parent's transcript as the tool result.
     fn set_state(&mut self, key: &str, state: &str) {
-        let Some(&i) = self.child_index.get(key) else { return };
+        let Some(&i) = self.child_index.get(key) else {
+            return;
+        };
         if is_terminal(&self.children[i].out.state) || self.children[i].out.state == state {
             return;
         }
@@ -1232,7 +1271,10 @@ impl Accumulator {
 
     /// The child a `session/request_permission` is on behalf of, if any.
     fn child_for_request(&self, params: &Value) -> Option<String> {
-        let sid = params.get("sessionId").and_then(Value::as_str).unwrap_or("");
+        let sid = params
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if !sid.is_empty() && sid != self.root_session_id && self.child_index.contains_key(sid) {
             return Some(sid.to_string());
         }
@@ -1241,7 +1283,9 @@ impl Accumulator {
         if let Some(p) = p.filter(|p| self.child_index.contains_key(*p)) {
             return Some(p.to_string());
         }
-        let id = tc.and_then(|t| t.get("toolCallId")).and_then(Value::as_str)?;
+        let id = tc
+            .and_then(|t| t.get("toolCallId"))
+            .and_then(Value::as_str)?;
         self.tool_owner.get(id).cloned()
     }
 
@@ -1280,7 +1324,11 @@ impl Accumulator {
         // A child the bridge never closed cannot outlive the turn. Innermost
         // first, so a nested child's result is in its parent before that
         // parent's own result is taken.
-        let end = if self.stop_reason == "cancelled" { "cancelled" } else { "completed" };
+        let end = if self.stop_reason == "cancelled" {
+            "cancelled"
+        } else {
+            "completed"
+        };
         for i in (0..self.children.len()).rev() {
             let key = self.children[i].out.session_id.clone();
             self.set_state(&key, end);
@@ -1296,7 +1344,10 @@ impl Accumulator {
         let children = self
             .children
             .into_iter()
-            .map(|c| ChildOutcome { events: c.t.events, ..c.out })
+            .map(|c| ChildOutcome {
+                events: c.t.events,
+                ..c.out
+            })
             .collect();
         TurnOutcome {
             message,
@@ -1354,9 +1405,13 @@ mod usage_tests {
     fn usage_update_keeps_context_and_usd_cost() {
         let mut acc = Accumulator::default();
         // Shape claude-agent-acp sends; Codex omits `cost`.
-        acc.absorb(&json!({"update": {"sessionUpdate": "usage_update", "used": 1200, "size": 200000,
-                                      "cost": {"amount": 0.042, "currency": "USD"}}}));
-        acc.absorb(&json!({"update": {"sessionUpdate": "usage_update", "used": 1500, "size": 200000}}));
+        acc.absorb(
+            &json!({"update": {"sessionUpdate": "usage_update", "used": 1200, "size": 200000,
+                                      "cost": {"amount": 0.042, "currency": "USD"}}}),
+        );
+        acc.absorb(
+            &json!({"update": {"sessionUpdate": "usage_update", "used": 1500, "size": 200000}}),
+        );
         let out = acc.finish();
         assert_eq!(out.context_used, Some(1500));
         assert_eq!(out.context_window, Some(200000));
@@ -1366,8 +1421,10 @@ mod usage_tests {
     #[test]
     fn non_usd_cost_is_ignored() {
         let mut acc = Accumulator::default();
-        acc.absorb(&json!({"update": {"sessionUpdate": "usage_update", "used": 10,
-                                      "cost": {"amount": 5.0, "currency": "EUR"}}}));
+        acc.absorb(
+            &json!({"update": {"sessionUpdate": "usage_update", "used": 10,
+                                      "cost": {"amount": 5.0, "currency": "EUR"}}}),
+        );
         assert_eq!(acc.finish().cost_usd, None);
     }
 }

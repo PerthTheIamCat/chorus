@@ -234,11 +234,15 @@ final class Engine: ObservableObject {
     /// workspace tree (checkpoint.rs) — slow on a big folder, so it runs on
     /// `queue`, not the main thread.
     func open(db: String, cwd: String, title: String) {
+        checklist = []
+        loadSubagents(db: db)
         swap { chorus_engine_open(db, cwd, title) }
     }
 
     /// Reopen a session that already exists, without starting a new one.
     func reopen(db: String, sessionID: Int64) {
+        loadChecklist(db: db, sessionID: sessionID)
+        loadSubagents(db: db)
         swap { chorus_engine_reopen(db, sessionID) }
     }
 
@@ -311,6 +315,7 @@ final class Engine: ObservableObject {
         sessionCostUSD = nil
         sessionTokensIn = 0
         sessionTokensOut = 0
+        checklist = []
         if let oldReader = reader {
             reader = nil
             readQueue.async { chorus_reader_free(oldReader.raw) }
@@ -1660,6 +1665,8 @@ final class Engine: ObservableObject {
     /// Subagents per project database and per parent session.
     @Published var subagentsByDB: [String: [SubagentInfo]] = [:]
     @Published var subagentsByParent: [Int64: [SubagentInfo]] = [:]
+    /// Live task checklist from chorus_task_update for the current session.
+    @Published var checklist: [ChecklistItem] = []
 
     /// Pin the model an agent runs. Must be called for the picker to mean
     /// anything: the engine defaults to whatever the agent's own CLI is
@@ -1867,6 +1874,52 @@ final class Engine: ObservableObject {
             }
             DispatchQueue.main.async {
                 self?.loadSubagents(db: db)
+            }
+        }
+    }
+
+    /// Resume a waiting child subagent (e.g. paused at a cap).
+    func resumeSubagent(db: String, id: Int64) {
+        ioQueue.async { [weak self] in
+            _ = db.withCString { Self.string(from: chorus_resume_subagent($0, id)) }
+            DispatchQueue.main.async {
+                self?.loadSubagents(db: db)
+            }
+        }
+    }
+
+    /// Cancel all children of an orchestration.
+    func cancelOrchestration(db: String, parentSess: Int64) {
+        ioQueue.async { [weak self] in
+            _ = db.withCString { Self.string(from: chorus_cancel_orchestration($0, parentSess)) }
+            DispatchQueue.main.async {
+                self?.loadSubagents(db: db)
+            }
+        }
+    }
+
+    /// Task checklist items for a session.
+    struct ChecklistItem: Identifiable, Codable, Equatable {
+        var id: String { text }
+        let text: String
+        let done: Bool
+        let in_progress: Bool
+    }
+    struct ChecklistResult: Codable {
+        let ok: Bool
+        let items: [ChecklistItem]?
+    }
+
+    func loadChecklist(db: String, sessionID: Int64) {
+        guard sessionID >= 0 else {
+            self.checklist = []
+            return
+        }
+        ioQueue.async { [weak self] in
+            let json = db.withCString { Self.string(from: chorus_get_checklist_json($0, sessionID)) }
+            let r = Self.decode(ChecklistResult.self, json)
+            DispatchQueue.main.async {
+                self?.checklist = r?.items ?? []
             }
         }
     }

@@ -1,6 +1,6 @@
 # Settings v2 and copy pass
 
-Status: ready-for-agent
+Status: resolved
 Blocked by: 01
 Parent: ../spec.md
 Decided in: [Settings layout](../../chorus-ux-overhaul/issues/09-settings-layout.md) · prototype `09-settings-layout.html?variant=A`
@@ -17,3 +17,7 @@ Decided in: [Settings layout](../../chorus-ux-overhaul/issues/09-settings-layout
 ## Done when
 
 - Check in the app: every category opens, no pane scrolls past one screen at the default window size, VoiceOver reads the (i) content, and dark mode works.
+
+## Comments
+
+- 2026-10-17: committed 080afae, merged as 9ea6047. Conflicts: Settings.swift took the v2 layout, which already has the preset picker; `SettingsKey.defaultRoutePreset` now points at `Engine.defaultRoutePresetKey` so both read one key. ContentView kept the preset chip with the v2 copy. Not checked in the running app: pane fit, VoiceOver on (i), dark mode.

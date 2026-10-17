@@ -7,8 +7,8 @@ import AppKit
 struct OrchestratorView: View {
     @ObservedObject var engine: Engine
     let workspace: String
-    var onSelectWorktree: (Engine.WorktreeInfo) -> Void
-    var onDispatchParallelPrompt: (String) -> Void
+    var onSelectWorktree: ((Engine.WorktreeInfo) -> Void)? = nil
+    var onDispatchParallelPrompt: ((String) -> Void)? = nil
 
     @State private var worktrees: [Engine.WorktreeInfo] = []
     @State private var roles: [Engine.AgentRole] = []
@@ -20,65 +20,10 @@ struct OrchestratorView: View {
     @State private var roleToDelete: Engine.AgentRole? = nil
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            HStack(spacing: 10) {
-                Image(systemName: "point.3.connected.trianglepath.dotted")
-                    .foregroundColor(.accentColor)
-                    .font(.system(size: 16, weight: .semibold))
-
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text("ORCHESTRATOR")
-                            .font(.system(size: 13, weight: .bold))
-                        Text("MULTI-AGENT")
-                            .font(.system(size: 9, weight: .heavy))
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1.5)
-                            .background(Color.accentColor.opacity(0.15))
-                            .foregroundColor(.accentColor)
-                            .clipShape(Capsule())
-                    }
-                    Text("การกระจายงานขนาน & กิ่งแยก Git Worktree")
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                }
-
-                Spacer()
-
-                Button(action: reloadWorktrees) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 11))
-                }
-                .buttonStyle(.plain)
-                .help("รีเฟรชข้อมูล Worktree")
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
-
-            Divider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    // Status Overview Card
-                    statusOverviewCard
-
-                    // Parallel Worktrees Section
-                    worktreesSection
-
-                    // Available Roles Section
-                    agentRolesSection
-
-                    // Quick Actions
-                    quickActionsSection
-                }
-                .padding(12)
-            }
-            .chorusScrollIndicators()
+        VStack(alignment: .leading, spacing: 12) {
+            agentRolesSection
         }
         .onAppear {
-            reloadWorktrees()
             reloadRoles()
         }
         .sheet(isPresented: $isShowingRoleEditor) {
@@ -118,136 +63,6 @@ struct OrchestratorView: View {
             }
         } message: {
             Text("ระบบจะลบไฟล์ .chorus/agents/\(roleToDelete?.name ?? "").md ออกจากโปรเจกต์")
-        }
-    }
-
-    // MARK: - Status Overview Card
-    private var statusOverviewCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "crown.fill")
-                    .foregroundColor(.yellow)
-                    .font(.system(size: 13))
-                Text("หลักการทำงาน ORCHESTRATION & ROLES")
-                    .font(.system(size: 11, weight: .bold))
-                Spacer()
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(worktrees.isEmpty ? Color.green : Color.orange)
-                        .frame(width: 8, height: 8)
-                    Text(worktrees.isEmpty ? "สแตนด์บาย (พร้อมรับงานขนาน)" : "กำลังทำงานขนาน (\(worktrees.count) งาน)")
-                        .font(.system(size: 10, weight: .semibold))
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .top, spacing: 8) {
-                    Text("👑")
-                        .font(.system(size: 13))
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Lead Orchestrator (ตัวคุมงาน)")
-                            .font(.system(size: 11, weight: .bold))
-                        Text("ตามหลักการควรเลือกโมเดลที่ฉลาดและมี Reasoning สูงที่สุด ที่มีอยู่ เพื่อทำหน้าที่วิเคราะห์เป้าหมาย แตกงานย่อย ควบคุมลำดับงาน และสังเคราะห์ข้อสรุปรวม")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-
-                Divider().opacity(0.4)
-
-                HStack(alignment: .top, spacing: 8) {
-                    Text("👷")
-                        .font(.system(size: 13))
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Specialist Subagents (ลูกทีมทำงานขนาน)")
-                            .font(.system(size: 11, weight: .bold))
-                        Text("สามารถกำหนดโมเดลที่เร็วและประหยัด (เช่น Gemini Flash, Haiku, Codex) แยกทำหน้าที่ค้นหาโค้ด (investigator) หรือเขียนโค้ด (builder) ใน Git Worktrees (.chorus/worktrees/) โดยไม่กระทบกิ่งหลัก")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-            .padding(10)
-            .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
-            .cornerRadius(7)
-        }
-        .padding(12)
-        .background(Color.primary.opacity(0.04))
-        .cornerRadius(9)
-    }
-
-    // MARK: - Worktrees Section
-    private var worktreesSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: "arrow.triangle.branch")
-                    .foregroundColor(.accentColor)
-                    .font(.system(size: 11))
-                Text("ACTIVE AGENT WORKTREES")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.secondary)
-                Spacer()
-                Text("\(worktrees.count) ACTIVE")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundColor(worktrees.isEmpty ? .secondary : .orange)
-            }
-
-            if worktrees.isEmpty {
-                HStack(spacing: 8) {
-                    Image(systemName: "checkmark.shield")
-                        .foregroundColor(.secondary)
-                        .font(.system(size: 14))
-                    Text("ไม่มี Worktree ที่ทำงานค้างอยู่ (ระบบอยู่ในสถานะ Clean)")
-                        .font(.system(size: 10.5))
-                        .foregroundColor(.secondary)
-                }
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.primary.opacity(0.02))
-                .cornerRadius(6)
-            } else {
-                ForEach(worktrees, id: \.id) { wt in
-                    Button(action: { onSelectWorktree(wt) }) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "cpu")
-                                    .foregroundColor(.orange)
-                                    .font(.system(size: 11))
-                                Text(wt.role.uppercased())
-                                    .font(.system(size: 10, weight: .bold))
-                                    .foregroundColor(.primary)
-
-                                Spacer()
-
-                                Text("PORT :\(wt.allocated_port)")
-                                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 1)
-                                    .background(Color.blue.opacity(0.15))
-                                    .foregroundColor(.blue)
-                                    .cornerRadius(4)
-                            }
-
-                            HStack(spacing: 4) {
-                                Image(systemName: "arrow.triangle.branch")
-                                    .foregroundColor(.secondary)
-                                    .font(.system(size: 9))
-                                Text(wt.branch)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(1)
-                            }
-                        }
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.primary.opacity(0.05))
-                        .cornerRadius(6)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
         }
     }
 
@@ -421,7 +236,7 @@ struct OrchestratorView: View {
 
             HStack(spacing: 4) {
                 Button(action: {
-                    onDispatchParallelPrompt("แตกงานย่อยให้ subagent ในบทบาท \(role.name) (ขอบเขต: \(role.description))")
+                    onDispatchParallelPrompt?("แตกงานย่อยให้ subagent ในบทบาท \(role.name) (ขอบเขต: \(role.description))")
                 }) {
                     Image(systemName: "bolt.fill")
                         .font(.system(size: 10))
@@ -482,70 +297,11 @@ struct OrchestratorView: View {
         }
     }
 
-    // MARK: - Quick Actions
-    private var quickActionsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("QUICK DISPATCH")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundColor(.secondary)
-
-            Button(action: {
-                onDispatchParallelPrompt("กรุณาวิเคราะห์ปัญหานี้ แล้วแตกงานให้ subagent ขนานกันใน Git worktree แยก เพื่อดำเนินการพร้อมกัน")
-            }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "bolt.badge.automatic.fill")
-                        .foregroundColor(.accentColor)
-                    Text("สั่งงานขนาน")
-                        .font(.system(size: 11, weight: .semibold))
-                    Spacer()
-                    Image(systemName: "arrow.up.right")
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                }
-                .padding(8)
-                .background(Color.accentColor.opacity(0.1))
-                .cornerRadius(6)
-            }
-            .buttonStyle(.plain)
-
-            if !workspace.isEmpty {
-                Button(action: openWorktreesFolder) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "folder")
-                            .foregroundColor(.secondary)
-                        Text("เปิดโฟลเดอร์ .chorus/worktrees")
-                            .font(.system(size: 10.5))
-                            .foregroundColor(.secondary)
-                        Spacer()
-                    }
-                    .padding(6)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.top, 4)
-    }
-
-    private func reloadWorktrees() {
-        guard !workspace.isEmpty else { return }
-        isLoading = true
-        engine.fetchWorktrees(cwd: workspace) { list in
-            self.worktrees = list
-            self.isLoading = false
-        }
-    }
-
     private func reloadRoles() {
+        guard !workspace.isEmpty else { return }
         engine.fetchRoles(cwd: workspace) { list in
             self.roles = list
         }
-    }
-
-    private func openWorktreesFolder() {
-        let path = (workspace as NSString).appendingPathComponent(".chorus/worktrees")
-        let url = URL(fileURLWithPath: path)
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        NSWorkspace.shared.open(url)
     }
 }
 
