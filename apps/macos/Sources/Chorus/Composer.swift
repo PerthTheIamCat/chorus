@@ -87,6 +87,8 @@ struct ComposerField: View {
     var onImportURLs: ([URL]) -> Void = { _ in }
     var onPasteImage: (Data, String) -> Void = { _, _ in }
     var onRemoveAttachment: (Int64) -> Void = { _ in }
+    /// Bump to pull keyboard focus into the field (session opened, turn sent).
+    var focusToken = 0
     var placeholder = "ขอให้ทำอะไร… ( / คำสั่ง · @ ไฟล์หรือเอเจนต์ )"
 
     @AppStorage("chorus.enterSends") private var enterSends = true
@@ -94,7 +96,6 @@ struct ComposerField: View {
     @State private var dismissed = false
     @State private var showingImporter = false
     @State private var dropTargeted = false
-    @FocusState private var focused: Bool
     @ObservedObject private var voiceDictation = VoiceDictationManager.shared
 
     /// The token under completion: `/xyz` at the very start, or the last
@@ -146,6 +147,7 @@ struct ComposerField: View {
                     onPasteImage: onPasteImage,
                     onImportURLs: onImportURLs,
                     onSubmit: onSubmit,
+                    focusToken: focusToken,
                     onKeyNav: { nav in
                         guard !list.isEmpty else { return false }
                         switch nav {
@@ -232,7 +234,6 @@ struct ComposerField: View {
             if case let .success(urls) = result, !urls.isEmpty { onImportURLs(urls) }
         }
         .onChange(of: box.text) { _, _ in selected = 0; dismissed = false }
-        .onAppear { focused = true }
     }
 
     private var attachmentChips: some View {
@@ -319,60 +320,6 @@ struct ComposerField: View {
         }
     }
 
-    private func pasteFromClipboard() -> Bool {
-        let pb = NSPasteboard.general
-        // 1. Direct image data in pasteboard (PNG, TIFF)
-        if let pngData = pb.data(forType: .png) {
-            onPasteImage(pngData, "image/png")
-            return true
-        }
-        if let tiffData = pb.data(forType: .tiff) {
-            if let rep = NSBitmapImageRep(data: tiffData),
-               let pngData = rep.representation(using: .png, properties: [:]) {
-                onPasteImage(pngData, "image/png")
-                return true
-            }
-        }
-        // 2. NSImage fallback (covers screenshots from shortcuts)
-        let imageTypes = [NSPasteboard.PasteboardType.png.rawValue,
-                          NSPasteboard.PasteboardType.tiff.rawValue,
-                          "public.image"]
-        if pb.canReadItem(withDataConformingToTypes: imageTypes),
-           let image = NSImage(pasteboard: pb),
-           let tiffData = image.tiffRepresentation,
-           let rep = NSBitmapImageRep(data: tiffData),
-           let pngData = rep.representation(using: .png, properties: [:]) {
-            onPasteImage(pngData, "image/png")
-            return true
-        }
-        // 3. Copied file URLs from Finder
-        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
-            let fileUrls = urls.filter(\.isFileURL)
-            if !fileUrls.isEmpty {
-                onImportURLs(fileUrls)
-                return true
-            }
-        }
-        return false
-    }
-
-    private func handle(_ press: KeyPress, _ list: [Suggestion]) -> KeyPress.Result {
-        if !list.isEmpty {
-            switch press.key {
-            case .upArrow: selected = (selected - 1 + list.count) % list.count; return .handled
-            case .downArrow: selected = (selected + 1) % list.count; return .handled
-            case .escape: dismissed = true; return .handled
-            case .return, .tab: apply(list[min(selected, list.count - 1)]); return .handled
-            default: return .ignored
-            }
-        }
-        if press.key == .return {
-            let send = enterSends ? !press.modifiers.contains(.shift) : press.modifiers.contains(.command)
-            if send { onSubmit(); return .handled }
-        }
-        return .ignored
-    }
-
     private func apply(_ s: Suggestion) {
         guard let tok = token else { return }
         if let insert = s.insert {
@@ -423,6 +370,7 @@ struct NativeComposerTextView: NSViewRepresentable {
     var onPasteImage: (Data, String) -> Void
     var onImportURLs: ([URL]) -> Void
     var onSubmit: () -> Void
+    var focusToken: Int
     var onKeyNav: (KeyPressNav) -> Bool
 
     func makeCoordinator() -> Coordinator {
@@ -469,11 +417,18 @@ struct NativeComposerTextView: NSViewRepresentable {
         if tv.string != text {
             tv.string = text
         }
+        if context.coordinator.focusToken != focusToken {
+            context.coordinator.focusToken = focusToken
+            // Next runloop: the field may not be in a window yet on the
+            // update that created it.
+            DispatchQueue.main.async { tv.focusIfPossible() }
+        }
     }
 
     class Coordinator: NSObject, NSTextViewDelegate {
         var parent: NativeComposerTextView
         weak var textView: ChatNSTextView?
+        var focusToken = Int.min
 
         init(_ parent: NativeComposerTextView) {
             self.parent = parent
@@ -501,21 +456,33 @@ final class ChatNSTextView: NSTextView {
         return super.performKeyEquivalent(with: event)
     }
 
+    /// Finder puts both the file URL and the file's *icon* (TIFF) on the
+    /// pasteboard, so file URLs must win over image data or a copied file
+    /// arrives as a picture of its icon.
     private func checkPasteboardForMedia() -> Bool {
         let pb = NSPasteboard.general
-        // 1. Direct PNG
+        // 1. Copied file URLs (Finder)
+        if let urls = pb.readObjects(forClasses: [NSURL.self],
+                                     options: [.urlReadingFileURLsOnly: true]) as? [URL] {
+            let files = urls.filter(\.isFileURL)
+            if !files.isEmpty {
+                parentView?.onImportURLs(files)
+                return true
+            }
+        }
+        // 2. Direct PNG
         if let png = pb.data(forType: .png) {
             parentView?.onPasteImage(png, "image/png")
             return true
         }
-        // 2. TIFF to PNG
+        // 3. TIFF to PNG
         if let tiff = pb.data(forType: .tiff),
            let rep = NSBitmapImageRep(data: tiff),
            let png = rep.representation(using: .png, properties: [:]) {
             parentView?.onPasteImage(png, "image/png")
             return true
         }
-        // 3. NSImage fallback (screenshot shortcut Cmd+Ctrl+Shift+4)
+        // 4. NSImage fallback (screenshot shortcut Cmd+Ctrl+Shift+4)
         let imageTypes = [NSPasteboard.PasteboardType.png.rawValue,
                           NSPasteboard.PasteboardType.tiff.rawValue,
                           "public.image"]
@@ -527,19 +494,30 @@ final class ChatNSTextView: NSTextView {
             parentView?.onPasteImage(png, "image/png")
             return true
         }
-        // 4. Copied file URLs from Finder
-        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
-            let files = urls.filter(\.isFileURL)
-            if !files.isEmpty {
-                parentView?.onImportURLs(files)
-                return true
-            }
-        }
         return false
+    }
+
+    /// Become first responder once the field is in a key window, unless the
+    /// user is typing somewhere else (a sheet, search field, terminal).
+    func focusIfPossible() {
+        guard let window, window.attachedSheet == nil else { return }
+        if let other = window.firstResponder as? NSText, other !== self, other.isEditable { return }
+        window.makeFirstResponder(self)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { DispatchQueue.main.async { [weak self] in self?.focusIfPossible() } }
     }
 
     override func keyDown(with event: NSEvent) {
         let key = event.keyCode
+        // IME composition (Thai, Japanese, …): Return/arrows/Esc belong to the
+        // input method — commit or navigate the candidate, never send.
+        if hasMarkedText() {
+            super.keyDown(with: event)
+            return
+        }
         // Up Arrow: 126, Down Arrow: 125, Esc: 53, Tab: 48, Return: 36
         if key == 126 {
             if parentView?.onKeyNav(.up) == true { return }
@@ -549,7 +527,7 @@ final class ChatNSTextView: NSTextView {
             if parentView?.onKeyNav(.escape) == true { return }
         } else if key == 48 {
             if parentView?.onKeyNav(.tab) == true { return }
-        } else if key == 36 {
+        } else if key == 36 || key == 76 { // Return, keypad Enter
             if parentView?.onKeyNav(.enter) == true { return }
             let enterSends = parentView?.enterSends ?? true
             if enterSends {

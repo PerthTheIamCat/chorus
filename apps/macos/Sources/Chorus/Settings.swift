@@ -727,31 +727,15 @@ struct OrchestrationSettings: View {
 
     @State private var worktrees: [Engine.WorktreeInfo] = []
 
-    private var availableModels: [String] {
-        var list = [
-            "claude-3-7-sonnet-20250219",
-            "gpt-5.1-codex",
-            "gemini-2.5-flash",
-            "gemini-2.5-pro",
-            "o3-mini"
-        ]
-        for a in engine.agents {
-            for m in a.baseModels {
-                if !list.contains(m.id) { list.append(m.id) }
-            }
-        }
-        return list
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             SettingsGroup(title: "โมเดลหลักสำหรับ Orchestrator (Lead Conductor)") {
                 SettingsRow(title: "โมเดลผู้คุมงาน (Lead Orchestrator)",
-                            detail: "โมเดลสำหรับวางแผน แตกงาน และสรุปผลรวม (แนะนำโมเดลเก่งที่สุด เช่น Claude 3.7 Sonnet, o3-mini)") {
+                            detail: "โมเดลสำหรับวางแผน แตกงาน และสรุปผลรวม (แนะนำโมเดลที่เก่งที่สุดที่มี)") {
                     Picker("", selection: $orchestratorLeadModel) {
                         Text("ตามที่เลือกใน Composer (ค่าเริ่มต้น)").tag("")
-                        ForEach(availableModels, id: \.self) { m in
-                            Text(m).tag(m)
+                        ForEach(engine.knownBaseModels(keeping: orchestratorLeadModel), id: \.id) { m in
+                            Text(m.label).tag(m.id)
                         }
                     }
                     .labelsHidden()
@@ -1077,14 +1061,18 @@ struct LearnedRoutesSheet: View {
         }
     }
 
+    /// Example routes use whatever the agents actually report (7.19), so the
+    /// seeded history never points at a model id that no longer exists.
     private func seedExampleRoutes() {
-        let examples: [(prompt: String, model: String, agent: String, reason: String)] = [
-            ("ช่วยรีแฟกเตอร์ฟังก์ชันใน Rust ให้เป็น async หน่อย", "claude-3-7-sonnet", "claude", "งานเขียนโค้ด Rust ลึกซึ้ง เหมาะกับ Claude 3.7 Sonnet"),
-            ("ออกแบบ UI Settings ด้วย SwiftUI บน macOS", "o3-mini", "codex", "งานออกแบบ Swift/macOS เหมาะกับ Codex"),
-            ("อธิบายความหมายของ FFI สั้นๆ ให้หน่อย", "gemini-2.0-flash", "antigravity", "คำถามสั้นต้องการคำตอบเร็ว เหมาะกับ Gemini Flash")
+        let examples: [(prompt: String, agent: String, reason: String)] = [
+            ("ช่วยรีแฟกเตอร์ฟังก์ชันใน Rust ให้เป็น async หน่อย", "claude", "งานเขียนโค้ด Rust ลึกซึ้ง เหมาะกับ Claude"),
+            ("ออกแบบ UI Settings ด้วย SwiftUI บน macOS", "codex", "งานออกแบบ Swift/macOS เหมาะกับ Codex"),
+            ("อธิบายความหมายของ FFI สั้นๆ ให้หน่อย", "antigravity", "คำถามสั้นต้องการคำตอบเร็ว เหมาะกับโมเดลเร็ว")
         ]
         for ex in examples {
-            engine.recordLearnedRoute(workspace: workspace, prompt: ex.prompt, model: ex.model, agent: ex.agent, reason: ex.reason)
+            guard let agent = engine.agents.first(where: { $0.id == ex.agent }) else { continue }
+            engine.recordLearnedRoute(workspace: workspace, prompt: ex.prompt, model: agent.defaultModel,
+                                      agent: ex.agent, reason: ex.reason)
         }
     }
 

@@ -72,6 +72,13 @@ struct DiffReviewerView: View {
     }
 
     var body: some View {
+        content
+            .onReceive(AppCommandCenter.shared.fire) { command in
+                if command == .sendReview, !pendingComments.isEmpty { sendToAgent() }
+            }
+    }
+
+    private var content: some View {
         VStack(spacing: 0) {
             // Header Controls
             VStack(spacing: 6) {
@@ -244,7 +251,7 @@ struct DiffReviewerView: View {
                         HStack(spacing: 4) {
                             Image(systemName: "paperplane.fill")
                                 .font(.system(size: 10))
-                            Text("Send to Agent (⌘↩)")
+                            Text("Send to Agent (⇧⌘↩)")
                                 .font(.system(size: 11, weight: .bold))
                         }
                         .foregroundColor(.white)
@@ -254,7 +261,6 @@ struct DiffReviewerView: View {
                         .cornerRadius(5)
                     }
                     .buttonStyle(.plain)
-                    .keyboardShortcut(.return, modifiers: .command)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)

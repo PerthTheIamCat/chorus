@@ -161,6 +161,8 @@ struct ContentView: View {
     @State private var queued: [PendingSend] = []
     @State private var hint: String?
     @State private var importingFiles = 0
+    /// Bumped to hand keyboard focus to the composer (session opened, turn sent).
+    @State private var composerFocus = 0
     @State private var confirmRevert = false
     @State private var rejected: Set<String> = []
     @State private var collapsedFiles: Set<String> = []
@@ -181,8 +183,6 @@ struct ContentView: View {
         let id = UUID()
         let send: PendingSend
         let reason: String
-        var automatic: Bool
-        var agentID: String? = nil
     }
 
     private struct RouterEnvelope: Decodable {
@@ -445,7 +445,6 @@ struct ContentView: View {
                                               padding: .init(top: 6, leading: 2, bottom: 5, trailing: 2)))
                 .help("\(t.tooltip) (⌘⌥\(index + 1))")
                 .accessibilityLabel(t.rawValue)
-                .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: [.command, .option])
             }
         }
         .padding(8)
@@ -562,14 +561,13 @@ struct ContentView: View {
                 .foregroundColor(.accentColor)
             Text(maximizedPanelTitle)
                 .font(.system(size: 12, weight: .semibold))
-            Button("ย่อขนาดกลับ (Esc)") {
+            Button("ย่อขนาดกลับ (⇧⌘M)") {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                     maximizedPanel = .none
                 }
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
-            .keyboardShortcut(.escape, modifiers: [])
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
@@ -753,14 +751,12 @@ struct ContentView: View {
                 Button { showSidebar.toggle() } label: {
                     Label("แถบโปรเจกต์", systemImage: "sidebar.left")
                 }
-                .keyboardShortcut("s", modifiers: [.command, .control])
                 .help("เปิด/ปิดแถบโปรเจกต์ (⌃⌘S)")
             }
             ToolbarItem(placement: .navigation) {
                 Button { showExplorer.toggle() } label: {
                     Label("ไฟล์", systemImage: "folder")
                 }
-                .keyboardShortcut("b", modifiers: [.command])
                 .help("เปิด/ปิดแถบไฟล์ (⌘B)")
             }
             ToolbarItem(placement: .navigation) {
@@ -824,8 +820,7 @@ struct ContentView: View {
                 Button { showSearchSheet = true } label: {
                     Label("ค้นหา", systemImage: "magnifyingglass")
                 }
-                .keyboardShortcut("f", modifiers: [.command])
-                .help("ค้นหาบทสนทนาข้ามเซสชัน (⌘F)")
+                .help("ค้นหาบทสนทนาข้ามเซสชัน (⇧⌘F)")
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -836,7 +831,6 @@ struct ContentView: View {
                     Label(maximizedPanel == .thread ? "ออกจากโหมดโฟกัส" : "โหมดโฟกัส",
                           systemImage: maximizedPanel == .thread ? "arrow.down.right.and.arrow.up.left" : "viewfinder")
                 }
-                .keyboardShortcut("m", modifiers: [.command, .shift])
                 .help(maximizedPanel == .thread ? "ออกจากโหมดโฟกัส (⇧⌘M)" : "ขยายบทสนทนาเต็มจอ / โหมดโฟกัส (⇧⌘M)")
             }
             ToolbarItem(placement: .primaryAction) {
@@ -865,7 +859,6 @@ struct ContentView: View {
                           systemImage: centerStageMode == .orchestrator ? "point.3.filled.connected.trianglepath.dotted" : "point.3.connected.trianglepath.dotted")
                         .foregroundStyle(centerStageMode == .orchestrator ? Color.accentColor : Color.primary)
                 }
-                .keyboardShortcut("o", modifiers: [.command, .option])
                 .help(centerStageMode == .orchestrator ? "กลับสู่บทสนทนา (⌘⌥O)" : "เปิด Multi-Agent Orchestrator (⌘⌥O)")
             }
             ToolbarItem(placement: .primaryAction) {
@@ -878,7 +871,6 @@ struct ContentView: View {
                           systemImage: centerStageMode == .livePreview ? "globe.badge.chevron.backward" : "globe")
                         .foregroundStyle(centerStageMode == .livePreview ? Color.accentColor : Color.primary)
                 }
-                .keyboardShortcut("p", modifiers: [.command, .option])
                 .help(centerStageMode == .livePreview ? "กลับสู่บทสนทนา (⌘⌥P)" : "เปิด Web Live Preview (⌘⌥P)")
             }
             ToolbarItem(placement: .primaryAction) {
@@ -891,15 +883,13 @@ struct ContentView: View {
                           systemImage: showTerminalDrawer ? "terminal.fill" : "terminal")
                         .foregroundStyle(showTerminalDrawer ? Color.accentColor : Color.primary)
                 }
-                .keyboardShortcut("`", modifiers: [.command])
-                .help("เปิด/ปิดเทอร์มินัลในตัว (⌘~ / ⌘`)")
+                .help("เปิด/ปิดเทอร์มินัลในตัว (⌃`)")
             }
             // Declared last so it sits at the far right, over the panel it opens.
             ToolbarItem(placement: .primaryAction) {
                 Button { showInspector.toggle() } label: {
                     Label("แผงข้อมูล", systemImage: "sidebar.right")
                 }
-                .keyboardShortcut("i", modifiers: [.command, .option])
                 .help("เปิด/ปิดแผงคอนเท็กซ์ ที่แก้ไป ความจำ (⌘⌥I)")
             }
         }
@@ -996,6 +986,7 @@ struct ContentView: View {
             }
             if id >= 0 {
                 engine.updateSessionCost(db: dbPath, id: id)
+                composerFocus &+= 1
             }
         }
         .onChange(of: engine.busy) { _, busy in
@@ -1054,51 +1045,34 @@ struct ContentView: View {
                           },
                           onDelete: editingIsNew ? nil : { projects.remove(p) })
         }
-        .background(
-            ZStack {
-                Button("") { showPalette = true }
-                    .keyboardShortcut("k", modifiers: .command)
-                Button("") {
-                    if workspace.isEmpty || engine.busy {
-                        editing = ChorusProject(name: "", folders: []); editingIsNew = true
-                    } else { startSession() }
-                }
-                .keyboardShortcut("n", modifiers: .command)
-            }
-            .frame(width: 0, height: 0)
-            .opacity(0)
-            .allowsHitTesting(false)
-        )
+        .onReceive(AppCommandCenter.shared.fire) { run($0) }
+        .onAppear { syncCommandState() }
+        .onChange(of: engine.sessionID) { _, _ in syncCommandState() }
+        .onChange(of: engine.busy) { _, _ in syncCommandState() }
+        .onChange(of: selectedFile) { _, _ in syncCommandState() }
+        .onChange(of: rightTab) { _, _ in syncCommandState() }
+        .onChange(of: showInspector) { _, _ in syncCommandState() }
+        .onChange(of: maximizedPanel) { _, _ in syncCommandState() }
         .sheet(isPresented: $showSettings) {
             SettingsSheet(workspace: workspace, section: settingsSection).environmentObject(engine)
         }
         .sheet(item: $pendingRoute) { proposal in
-            if proposal.automatic {
-                RouteReview(agent: engine.agents.first(where: { $0.id == proposal.agentID })?.label
-                                ?? agentFor(reviewModel)?.label ?? "Agent",
-                            model: ModelID(reviewModel).base,
-                            effort: ModelID(reviewModel).effort ?? "ค่าเริ่มต้น",
-                            reason: proposal.reason,
-                            onSendNow: sendReviewedRoute,
-                            onChange: { pendingRoute?.automatic = false },
-                            onCancel: cancelReviewedRoute)
-            } else {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text("เลือกผู้ทำงาน").font(.title3.bold())
-                    Text(proposal.reason).font(.callout).foregroundStyle(.secondary)
-                    ModelPicker(model: $reviewModel, onNeedsLogin: { pendingRoute = nil; showSettings = true })
-                        .environmentObject(engine)
-                    HStack {
-                        Button("ยกเลิก", action: cancelReviewedRoute)
-                        Spacer()
-                        Button("ส่งงาน", action: sendReviewedRoute)
-                            .buttonStyle(.borderedProminent)
-                            .disabled(agentFor(reviewModel)?.ready != true)
-                    }
+            VStack(alignment: .leading, spacing: 14) {
+                Text("เลือกผู้ทำงาน").font(.title3.bold())
+                Text(proposal.reason).font(.callout).foregroundStyle(.secondary)
+                ModelPicker(model: $reviewModel, onNeedsLogin: { pendingRoute = nil; showSettings = true },
+                            respondsToMenu: false)
+                    .environmentObject(engine)
+                HStack {
+                    Button("ยกเลิก", action: cancelReviewedRoute)
+                    Spacer()
+                    Button("ส่งงาน", action: sendReviewedRoute)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(agentFor(reviewModel)?.ready != true)
                 }
-                .padding(20)
-                .frame(width: 390)
             }
+            .padding(20)
+            .frame(width: 390)
         }
         .sheet(isPresented: Binding(get: { compareOutput != nil }, set: { if !$0 { compareOutput = nil } })) {
             CompareResultsSheet(json: compareOutput ?? "")
@@ -1109,7 +1083,7 @@ struct ContentView: View {
         .sheet(item: $engine.pendingAsk) { ask in
             VStack(alignment: .leading, spacing: 14) {
                 Text("ขออนุญาต").font(.title3.bold())
-                Text("\(agent) wants to: **\(ask.tool)**")
+                Text("\(askingAgentLabel(ask.agent)) wants to: **\(ask.tool)**")
                 if !ask.kind.isEmpty {
                     Text("kind: \(ask.kind)").font(.caption).foregroundStyle(.secondary)
                 }
@@ -1342,7 +1316,6 @@ struct ContentView: View {
                         .background(Color.primary.opacity(0.04), in: Circle())
                 }
                 .buttonStyle(.plain)
-                .keyboardShortcut(",", modifiers: .command)
                 .help("ตั้งค่า (⌘,)")
             }
             .padding(.horizontal, 10).padding(.vertical, 8)
@@ -1609,13 +1582,6 @@ struct ContentView: View {
     @ViewBuilder
     private func rowForEvent(_ ev: LedgerEvent, atts: [SessionAttachment], lastAgentMsg: Int64?) -> some View {
         let isUser = ev.actor == "user"
-        let trans = reduceMotion ? AnyTransition.opacity :
-            AnyTransition.asymmetric(
-                insertion: .scale(scale: 0.97, anchor: isUser ? .bottomTrailing : .bottomLeading)
-                    .combined(with: .offset(y: 10))
-                    .combined(with: .opacity),
-                removal: .scale(scale: 0.96).combined(with: .opacity)
-            )
         let isLastAgentMsg = !engine.busy
             && !isUser
             && ev.kind == "msg"
@@ -1627,9 +1593,6 @@ struct ContentView: View {
                  thoughts: th,
                  onDeleteAttachment: engine.deleteAttachment)
             .id(ev.seq)
-            .transition(trans)
-            .compositingGroup()
-            .geometryGroup()
     }
 
     private var thread: some View {
@@ -1654,23 +1617,23 @@ struct ContentView: View {
                                     rowForEvent(ev, atts: attsBySeq[ev.seq] ?? [], lastAgentMsg: lastAgentMsg)
                                 }
                                 if engine.busy {
-                                    workingRow
+                                    WorkingRow(stream: engine.liveStream,
+                                               agentID: engine.liveAgent ?? currentAgentID,
+                                               agentLabel: engine.agents.first(where: { $0.id == (engine.liveAgent ?? currentAgentID) })?.label ?? "Agent",
+                                               startedAt: engine.turnStartedAt,
+                                               onStop: { engine.cancel(); queued.removeAll() },
+                                               onGrow: {
+                                                   if engine.busy && chatPinned {
+                                                       proxy.scrollTo("chatBottom", anchor: .bottom)
+                                                   }
+                                               })
                                         .id("working")
-                                        .transition(
-                                            reduceMotion ? .opacity :
-                                                .scale(scale: 0.98, anchor: .bottomLeading)
-                                                .combined(with: .offset(y: 8))
-                                                .combined(with: .opacity)
-                                        )
-                                        .compositingGroup()
-                                        .geometryGroup()
                                 }
                                 Color.clear.frame(height: 1).id("chatBottom")
                             }
                             .frame(maxWidth: 820)
                             .frame(maxWidth: .infinity)
                             .padding(.horizontal, 20).padding(.vertical, 16)
-                            .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.82), value: engine.events.count)
                             .background(GeometryReader { g in
                                 let f = g.frame(in: .named("chatScroll"))
                                 Color.clear.preference(key: ChatContentFrameKey.self,
@@ -1700,11 +1663,6 @@ struct ContentView: View {
                                 withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
                                     proxy.scrollTo("chatBottom", anchor: .bottom)
                                 }
-                            }
-                        }
-                        .onChange(of: (engine.live.message.count / 80) + (engine.live.thoughts.count / 150) + engine.live.tools.count) { _, _ in
-                            if engine.busy && chatPinned {
-                                proxy.scrollTo("chatBottom", anchor: .bottom)
                             }
                         }
                         .onChange(of: engine.busy) { _, b in
@@ -1775,75 +1733,6 @@ struct ContentView: View {
         .frame(minWidth: 420)
         .clipShape(RoundedRectangle(cornerRadius: 20))
         .onDrop(of: [UTType.fileURL, UTType.url, UTType.image], isTargeted: nil, perform: importDroppedProviders)
-    }
-
-    /// The running turn, live: reasoning (collapsible, like the thinking
-    /// block in Claude/Codex), tool calls as they start and finish, and the
-    /// answer as it streams — then Stop.
-    private var workingRow: some View {
-        let live = engine.live
-        let activeAgentID = engine.liveAgent ?? currentAgentID
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 7) {
-                ProviderIcon(provider: activeAgentID, size: 16)
-                Text(engine.agents.first(where: { $0.id == activeAgentID })?.label ?? "Agent")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                ProgressView().controlSize(.mini)
-                Spacer()
-                if let t = engine.turnStartedAt {
-                    TurnTimerView(startedAt: t, isEmpty: live.isEmpty)
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.tertiary)
-                }
-                Button { engine.cancel(); queued.removeAll() } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "stop.fill").font(.system(size: 8))
-                        Text("หยุด")
-                    }
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.red)
-                    .padding(.horizontal, 8).padding(.vertical, 3.5)
-                    .background(Color.red.opacity(0.08), in: Capsule())
-                }
-                .buttonStyle(.plain)
-                .keyboardShortcut(".", modifiers: .command)
-                .help("หยุดเทิร์นนี้ (⌘.) — ล้างคิวด้วย")
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            if !live.thoughts.isEmpty {
-                ThinkingBlock(text: live.thoughts, running: live.message.isEmpty)
-            }
-
-            ForEach(live.tools) { t in
-                HStack(spacing: 7) {
-                    switch t.state {
-                    case "running": ProgressView().controlSize(.mini)
-                    case "failed": Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
-                    default: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                    }
-                    Text(t.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-            }
-
-            if !live.message.isEmpty {
-                MarkdownText(text: live.message)
-            } else if live.tools.isEmpty && live.thoughts.isEmpty {
-                HStack(spacing: 6) {
-                    Circle().frame(width: 6, height: 6).foregroundStyle(Color.accentColor).opacity(0.8)
-                    Text("กำลังเตรียมการประมวลผล…")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                .padding(.vertical, 4)
-            }
-        }
-        .padding(14)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.55), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.primary.opacity(0.07), lineWidth: 1))
-        .shadow(color: .black.opacity(0.03), radius: 6, y: 2)
     }
 
     private var emptyState: some View {
@@ -1939,7 +1828,8 @@ struct ContentView: View {
                           onRemoveAttachment: { id in
                               draftBox.attachments.removeAll { $0.id == id }
                               engine.deleteAttachment(id)
-                          })
+                          },
+                          focusToken: composerFocus)
             HStack(spacing: 8) {
                 Button { autoRoute.toggle() } label: {
                     Label("Auto", systemImage: "arrow.triangle.branch")
@@ -1986,9 +1876,8 @@ struct ContentView: View {
                         .background(Color.accentColor, in: Circle())
                 }
                 .buttonStyle(InteractiveStyle(cornerRadius: 99, padding: .init()))
-                .keyboardShortcut(.return, modifiers: .command)
                 .disabled(engine.sessionID < 0)
-                .help(engine.busy ? "เข้าคิว (↩)" : "ส่ง (↩ · ⇧↩ ขึ้นบรรทัดใหม่)")
+                .help(engine.busy ? "เข้าคิว (↩ หรือ ⌘↩)" : "ส่ง (↩ หรือ ⌘↩ · ⇧↩ ขึ้นบรรทัดใหม่)")
             }
         }
         .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 10)
@@ -2023,6 +1912,65 @@ struct ContentView: View {
             return true
         }
         return false
+    }
+
+    /// Menu bar → window. The menu (`ChorusCommands`) owns every shortcut;
+    /// this only maps a command onto the same state the toolbar buttons flip.
+    private func run(_ command: AppCommand) {
+        let spring = Animation.spring(response: 0.28, dampingFraction: 0.85)
+        switch command {
+        case .newSession:
+            if workspace.isEmpty || engine.busy {
+                editing = ChorusProject(name: "", folders: []); editingIsNew = true
+            } else { startSession() }
+        case .settings: showSettings = true
+        case .commandPalette: showPalette = true
+        case .searchSessions: showSearchSheet = true
+        case .toggleSidebar: showSidebar.toggle()
+        case .toggleExplorer: showExplorer.toggle()
+        case .toggleInspector: showInspector.toggle()
+        case .inspectorTab(let i):
+            guard RightTab.allCases.indices.contains(i) else { return }
+            rightTab = RightTab.allCases[i]
+            showInspector = true
+        case .toggleOrchestrator:
+            withAnimation(spring) { centerStageMode = centerStageMode == .orchestrator ? .thread : .orchestrator }
+        case .toggleLivePreview:
+            withAnimation(spring) { centerStageMode = centerStageMode == .livePreview ? .thread : .livePreview }
+        case .toggleTerminal:
+            withAnimation(spring) { showTerminalDrawer.toggle() }
+        case .toggleFocusMode:
+            // One meaning: leave whatever panel is maximized, else focus the thread.
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                maximizedPanel = maximizedPanel == .none ? .thread : .none
+            }
+        case .send:
+            // A sheet (project editor, settings) owns ⌘↩ while it is up.
+            guard NSApp.mainWindow?.attachedSheet == nil else { return }
+            submit()
+        case .stop:
+            guard engine.busy else { return }
+            engine.cancel(); queued.removeAll()
+        case .chooseModel, .nextEffort, .sendReview, .openInEditor:
+            break // handled by ModelPicker / DiffReviewerView / CodeViewerView
+        }
+    }
+
+    /// "claude@work" → "Claude (work)"; falls back to the raw name.
+    private func askingAgentLabel(_ name: String) -> String {
+        let parts = name.split(separator: "@", maxSplits: 1).map(String.init)
+        let id = parts.first ?? name
+        let label = engine.agents.first { $0.id == id }?.label ?? id
+        return parts.count > 1 ? "\(label) (\(parts[1]))" : label
+    }
+
+    private func syncCommandState() {
+        let c = AppCommandCenter.shared
+        c.hasSession = engine.sessionID >= 0
+        c.busy = engine.busy
+        c.fileOpen = selectedFile != nil
+        c.reviewVisible = (showInspector && rightTab == .changes) || maximizedPanel == .diffReviewer
+        c.focusMode = maximizedPanel != .none
     }
 
     private func importFiles(_ urls: [URL]) {
@@ -2099,6 +2047,7 @@ struct ContentView: View {
         }
         hint = nil
         draftBox.text = ""
+        composerFocus &+= 1
         let explicitTag = raw.hasPrefix("@")
             && engine.agents.contains { candidate in
                 let tag = raw.dropFirst().split(separator: " ", maxSplits: 1).first.map(String.init) ?? ""
@@ -2183,7 +2132,7 @@ struct ContentView: View {
               let candidatesJSON = String(data: candidatesData, encoding: .utf8),
               !routerModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             reviewModel = send.model
-            pendingRoute = PendingRoute(send: send, reason: "ตั้งค่าโมเดล router ในตั้งค่าก่อน หรือเลือกโมเดลเอง", automatic: false)
+            pendingRoute = PendingRoute(send: send, reason: "ตั้งค่าโมเดล router ในตั้งค่าก่อน หรือเลือกโมเดลเอง")
             return
         }
         let conserveEnergy = PowerManager.shared.shouldConserveEnergyForInference
@@ -2226,8 +2175,7 @@ struct ContentView: View {
                 reviewModel = send.model
                 pendingRoute = PendingRoute(send: send,
                     reason: response?.route?.result?.message ?? response?.error
-                        ?? "Router ในเครื่องยังเลือกไม่ได้ กรุณาเลือกโมเดลและยืนยันส่งเอง",
-                    automatic: false)
+                        ?? "Router ในเครื่องยังเลือกไม่ได้ กรุณาเลือกโมเดลและยืนยันส่งเอง")
             }
         }
     }
@@ -2235,28 +2183,17 @@ struct ContentView: View {
     private func sendReviewedRoute() {
         guard let pendingRoute else { return }
         self.pendingRoute = nil
-        let chosenAgent = pendingRoute.automatic
-            ? (pendingRoute.agentID ?? agentFor(reviewModel)?.id ?? "agent")
-            : (agentFor(reviewModel)?.id ?? "agent")
-        if pendingRoute.automatic {
-            let id = ModelID(reviewModel)
-            routeStatus = .chosen(
-                agent: engine.agents.first(where: { $0.id == pendingRoute.agentID })?.label
-                    ?? agentFor(reviewModel)?.label ?? "Agent",
-                model: id.base, effort: id.effort ?? "ค่าเริ่มต้น", reason: pendingRoute.reason)
-        } else {
-            routeStatus = nil
-        }
+        routeStatus = nil
         engine.recordLearnedRoute(
             workspace: workspace,
             prompt: pendingRoute.send.text,
             model: reviewModel,
-            agent: chosenAgent,
-            reason: pendingRoute.automatic ? pendingRoute.reason : "ผู้ใช้ยืนยันและเลือกโมเดลนี้เอง"
+            agent: agentFor(reviewModel)?.id ?? "agent",
+            reason: "ผู้ใช้ยืนยันและเลือกโมเดลนี้เอง"
         )
         dispatch(reviewModel, pendingRoute.send.text,
                  attachments: pendingRoute.send.attachments.map(\.id),
-                 agentOverride: pendingRoute.automatic ? pendingRoute.agentID : nil)
+                 agentOverride: nil)
     }
 
     private func cancelReviewedRoute() {
@@ -3840,19 +3777,121 @@ struct CodeBlockView: View {
     }
 }
 
+/// The running turn, live: reasoning (collapsible, like the thinking
+/// block in Claude/Codex), tool calls as they start and finish, and the
+/// answer as it streams — then Stop.
+struct WorkingRow: View {
+    @ObservedObject var stream: LiveStream
+    let agentID: String
+    let agentLabel: String
+    let startedAt: Date?
+    let onStop: () -> Void
+    /// Called when the streamed content grows by a visible step, so the
+    /// thread can keep following the bottom.
+    let onGrow: () -> Void
+
+    private var growth: Int {
+        stream.turn.message.count / 80 + stream.turn.thoughts.count / 150 + stream.turn.tools.count
+    }
+
+    var body: some View {
+        let live = stream.turn
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 7) {
+                ProviderIcon(provider: agentID, size: 16)
+                Text(agentLabel)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                ProgressView().controlSize(.mini)
+                Spacer()
+                if let t = startedAt {
+                    TurnTimerView(startedAt: t, isEmpty: live.isEmpty)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+                Button(action: onStop) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "stop.fill").font(.system(size: 8))
+                        Text("หยุด")
+                    }
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 8).padding(.vertical, 3.5)
+                    .background(Color.red.opacity(0.08), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("หยุดเทิร์นนี้ (⌘.) — ล้างคิวด้วย")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if !live.thoughts.isEmpty {
+                ThinkingBlock(text: live.thoughts, running: live.message.isEmpty)
+            }
+
+            ForEach(live.tools) { t in
+                HStack(spacing: 7) {
+                    switch t.state {
+                    case "running": ProgressView().controlSize(.mini)
+                    case "failed": Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
+                    default: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    }
+                    Text(t.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+
+            if !live.message.isEmpty {
+                MarkdownText(text: live.message)
+            } else if live.tools.isEmpty && live.thoughts.isEmpty {
+                HStack(spacing: 6) {
+                    Circle().frame(width: 6, height: 6).foregroundStyle(Color.accentColor).opacity(0.8)
+                    Text("กำลังเตรียมการประมวลผล…")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+            }
+        }
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.55), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.primary.opacity(0.07), lineWidth: 1))
+        .shadow(color: .black.opacity(0.03), radius: 6, y: 2)
+        .onChange(of: growth) { _, _ in onGrow() }
+    }
+}
+
 /// Markdown for agent output: fenced code becomes a monospaced block with header,
 /// the rest goes through `AttributedString` (bold, italic, inline code, links) with
 /// whitespace preserved so lists and paragraphs keep their shape.
 struct MarkdownText: View {
     let text: String
 
-    private struct Part {
-        let isCode: Bool
-        let language: String
-        let body: String
+    enum Part {
+        case code(language: String, body: String)
+        case prose(AttributedString)
     }
 
-    private var parts: [Part] {
+    /// Parsed parts keyed by the exact text. Rows re-render far more often than
+    /// their text changes (every scroll, hover and engine publish), and both
+    /// the fence split and `AttributedString(markdown:)` used to run each time.
+    /// Cost is the text length, so a streamed reply's many short-lived
+    /// prefixes are evicted before the stable history is.
+    private final class Box { let parts: [Part]; init(_ p: [Part]) { parts = p } }
+    private static let cache: NSCache<NSString, Box> = {
+        let c = NSCache<NSString, Box>()
+        c.totalCostLimit = 8 * 1024 * 1024
+        return c
+    }()
+
+    static func parts(for text: String) -> [Part] {
+        let key = text as NSString
+        if let hit = cache.object(forKey: key) { return hit.parts }
+        let parsed = parse(text)
+        cache.setObject(Box(parsed), forKey: key, cost: key.length * 2)
+        return parsed
+    }
+
+    static func parse(_ text: String) -> [Part] {
         var out: [Part] = []
         for (i, chunk) in text.components(separatedBy: "```").enumerated() {
             guard !chunk.isEmpty else { continue }
@@ -3860,12 +3899,14 @@ struct MarkdownText: View {
                 let lines = chunk.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
                 let lang = lines.first.map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
                 let codeBody = lines.count > 1 ? String(lines[1]).trimmingCharacters(in: .newlines) : chunk.trimmingCharacters(in: .newlines)
-                out.append(Part(isCode: true, language: lang, body: codeBody))
+                out.append(.code(language: lang, body: codeBody))
             } else {
                 let trimmed = chunk.trimmingCharacters(in: .newlines)
-                if !trimmed.isEmpty {
-                    out.append(Part(isCode: false, language: "", body: trimmed))
-                }
+                guard !trimmed.isEmpty else { continue }
+                let attributed = (try? AttributedString(
+                    markdown: trimmed,
+                    options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(trimmed)
+                out.append(.prose(attributed))
             }
         }
         return out
@@ -3873,15 +3914,12 @@ struct MarkdownText: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(parts.enumerated()), id: \.offset) { _, p in
-                if p.isCode {
-                    CodeBlockView(language: p.language, code: p.body)
-                } else if let a = try? AttributedString(
-                    markdown: p.body,
-                    options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+            ForEach(Array(Self.parts(for: text).enumerated()), id: \.offset) { _, p in
+                switch p {
+                case let .code(language, body):
+                    CodeBlockView(language: language, code: body)
+                case let .prose(a):
                     Text(a).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    Text(p.body).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }

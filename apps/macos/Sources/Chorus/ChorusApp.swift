@@ -39,6 +39,7 @@ struct ChorusApp: App {
         .commands {
             AboutCommand()
             CheckForUpdatesCommand(updater: updater)
+            ChorusCommands(center: AppCommandCenter.shared)
         }
     }
 }

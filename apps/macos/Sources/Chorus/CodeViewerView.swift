@@ -44,6 +44,13 @@ struct CodeViewerView: View {
     }
 
     var body: some View {
+        content
+            .onReceive(AppCommandCenter.shared.fire) { command in
+                if command == .openInEditor { openInExternalEditor() }
+            }
+    }
+
+    private var content: some View {
         VStack(spacing: 0) {
             // Header Bar
             headerBar
@@ -172,7 +179,7 @@ struct CodeViewerView: View {
                         .foregroundColor(.accentColor)
                     Text("Open in \(detectedEditor)")
                         .font(.system(size: 11, weight: .medium))
-                    Text("⇧⌘E")
+                    Text("⌥⌘E")
                         .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
                         .foregroundColor(.secondary)
                 }
@@ -182,7 +189,6 @@ struct CodeViewerView: View {
                 .cornerRadius(5)
             }
             .buttonStyle(.plain)
-            .keyboardShortcut("e", modifiers: [.shift, .command])
             .help("Open in \(detectedEditor) at line \(selectedLine ?? 1)")
 
             // Maximize / Restore Button

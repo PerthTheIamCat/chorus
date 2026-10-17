@@ -62,11 +62,32 @@ extension Engine.AgentInfo {
     }
 }
 
+extension Engine {
+    /// Every base model the agents report, from the `chorus models` cache
+    /// (CLAUDE.md 7.19) — never a hardcoded list. `keeping` is a stored pick
+    /// that is no longer reported; it stays in the list so a Picker bound to it
+    /// does not render blank (7.14).
+    func knownBaseModels(keeping stored: String = "") -> [(id: String, label: String)] {
+        var seen = Set<String>()
+        var out: [(id: String, label: String)] = []
+        for a in agents {
+            for m in a.baseModels where seen.insert(m.id).inserted {
+                out.append((m.id, "\(a.label) · \(m.label)"))
+            }
+        }
+        if !stored.isEmpty, !seen.contains(stored) { out.append((stored, stored)) }
+        return out
+    }
+}
+
 /// The two chips under the composer: model (agent + model) and effort.
 struct ModelPicker: View {
     @EnvironmentObject var engine: Engine
     @Binding var model: String
     var onNeedsLogin: () -> Void
+    /// Only the composer's picker answers ⇧⌘I / ⇧⌘E from the Chat menu; a
+    /// second picker in a sheet would otherwise react to the same keystroke.
+    var respondsToMenu = true
     @State private var open = false
 
     private var agent: Engine.AgentInfo? {
@@ -91,7 +112,6 @@ struct ModelPicker: View {
             }
             .buttonStyle(InteractiveStyle(cornerRadius: 99, selected: open,
                                           padding: .init(top: 4, leading: 9, bottom: 4, trailing: 9)))
-            .keyboardShortcut("i", modifiers: [.command, .shift])
             .help("เลือกเอเจนต์และโมเดล (⌘⇧I)")
             .popover(isPresented: $open, arrowEdge: .top) { popover }
 
@@ -101,12 +121,16 @@ struct ModelPicker: View {
                     ChipPicker(icon: "brain", value: current.effort ?? "effort", options: efforts,
                                selected: current.effort) { model = ModelID.compose(current.base, $0) }
                         .help("ระดับการคิด (⌘⇧E สลับไประดับถัดไป)")
-                    // Popovers can't be opened from a shortcut here, so ⌘⇧E
-                    // steps through the levels instead.
-                    Button("") { cycleEffort(efforts) }
-                        .keyboardShortcut("e", modifiers: [.command, .shift])
-                        .frame(width: 0, height: 0).opacity(0).allowsHitTesting(false)
                 }
+            }
+        }
+        .onReceive(AppCommandCenter.shared.fire) { command in
+            guard respondsToMenu else { return }
+            switch command {
+            case .chooseModel: open = true
+            case .nextEffort:
+                if let a = agent { cycleEffort(a.efforts(for: current.base)) }
+            default: break
             }
         }
     }
