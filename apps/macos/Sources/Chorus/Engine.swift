@@ -234,6 +234,7 @@ final class Engine: ObservableObject {
             let h = make()
             let eventsJSON = h.map { Self.string(from: chorus_transcript_json($0)) } ?? ""
             let attachmentsJSON = h.map { Self.string(from: chorus_list_attachments($0)) } ?? ""
+            let usageJSON = h.map { Self.string(from: chorus_session_usage($0)) } ?? ""
             if let old { chorus_engine_free(old.raw) }
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -241,8 +242,11 @@ final class Engine: ObservableObject {
                 self.memoryScope = nil
                 self.live = LiveTurn()
                 self.lastThoughts = ""
-                self.contextUsed = nil
-                self.contextWindow = nil
+                // Seed the meter from the stored usage; nil only for a session
+                // that never reported any.
+                let usage = Self.decode(SessionUsageResult.self, usageJSON)?.usage
+                self.contextUsed = usage?.context_used
+                self.contextWindow = usage?.context_window
                 guard let h else {
                     self.sessionID = -1
                     self.events = []
@@ -257,6 +261,9 @@ final class Engine: ObservableObject {
             }
         }
     }
+
+    struct SessionUsage: Codable { let context_used: Int64?; let context_window: Int64? }
+    struct SessionUsageResult: Codable { let ok: Bool; let usage: SessionUsage? }
 
     func close() {
         memoryScope = nil

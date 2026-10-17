@@ -72,6 +72,29 @@ pub fn set_progress_sink(sink: Option<ProgressSink>) {
     }
 }
 
+/// Called with `(context_used, context_window)` on every `usage_update`, on
+/// the thread running the turn. Thread-local, unlike [`ProgressSink`]: the
+/// session that owns the turn installs it around its own `prompt` call to
+/// persist the numbers, and must not see another thread's turn.
+pub type UsageObserver = Box<dyn FnMut(Option<i64>, Option<i64>)>;
+
+thread_local! {
+    static USAGE: std::cell::RefCell<Option<UsageObserver>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Install (or clear) this thread's usage observer; returns the previous one.
+pub fn set_usage_observer(observer: Option<UsageObserver>) -> Option<UsageObserver> {
+    USAGE.with(|u| std::mem::replace(&mut *u.borrow_mut(), observer))
+}
+
+pub(crate) fn observe_usage(used: Option<i64>, size: Option<i64>) {
+    USAGE.with(|u| {
+        if let Some(f) = u.borrow_mut().as_mut() {
+            f(used, size);
+        }
+    });
+}
+
 pub fn emit_progress(kind: &str, text: &str) {
     if let Ok(p) = PROGRESS.lock() {
         if let Some(f) = p.as_ref() {

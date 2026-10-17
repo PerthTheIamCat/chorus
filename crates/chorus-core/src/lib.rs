@@ -52,6 +52,7 @@ pub mod swarm;
 pub mod tokens;
 pub mod trust;
 pub mod types;
+pub mod usage;
 pub mod updater;
 pub mod vector_accelerate;
 pub mod verify_loop;

@@ -253,6 +253,11 @@ char *chorus_compact(const ChorusEngine *e, int limit);
 /* goal / done / pending / constraints for this session. */
 char *chorus_task_state(const ChorusEngine *e);
 
+/* Last stored usage for this session (seeds the context meter on reopen).
+ * JSON: {"ok":true,"usage":null|{"context_used":N|null,"context_window":N|null,
+ *        "tokens_in":N,"tokens_out":N,"cost_usd":X|null,"updated_ms":N}} */
+char *chorus_session_usage(const ChorusEngine *e);
+
 /* Exactly the context a turn would hand an agent right now, assembled from
  * the ledger. Not a description of it — the thing itself. */
 char *chorus_assembled_context(const ChorusEngine *e, long long budget);

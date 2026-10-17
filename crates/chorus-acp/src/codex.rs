@@ -929,6 +929,7 @@ impl Accumulator {
                 }
                 // Live context meter: `used\tsize`, either side may be empty.
                 if self.context_used.is_some() || self.context_window.is_some() {
+                    crate::observe_usage(self.context_used, self.context_window);
                     let fmt = |v: Option<i64>| v.map(|n| n.to_string()).unwrap_or_default();
                     crate::emit_progress(
                         "usage",

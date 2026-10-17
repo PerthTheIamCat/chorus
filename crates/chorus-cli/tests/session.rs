@@ -115,6 +115,31 @@ fn one_turn_persists_user_and_every_agent_event_to_the_ledger() {
 }
 
 #[test]
+fn a_reopened_session_remembers_its_last_usage_outside_the_ledger() {
+    let tmp = std::env::temp_dir().join(format!("chorus-usage-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let db = tmp.join("store.db");
+    let _ = std::fs::remove_file(&db);
+
+    let id = {
+        let mut s = Session::create(&db, &tmp, "usage").unwrap().with_bridge(mock_bridge());
+        assert!(s.usage().unwrap().is_none());
+        s.run_turn("codex", "openai", "look at the readme", Policy::AllowAll)
+            .expect("turn runs");
+        s.session_id()
+    };
+
+    // The mock reports 12k mid-turn and 14.5k + $0.0125 at the end.
+    let s = Session::open(&db, id).unwrap();
+    let u = s.usage().unwrap().expect("usage row written");
+    assert_eq!(u.context_used, Some(14_500));
+    assert_eq!(u.context_window, Some(200_000));
+    assert_eq!(u.cost_usd, Some(0.0125));
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
 fn a_second_turn_reconstructs_history_from_the_ledger() {
     let tmp = std::env::temp_dir().join(format!("chorus-multi-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();

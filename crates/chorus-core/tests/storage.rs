@@ -408,3 +408,115 @@ fn session_cost_sums_reported_cost() {
     let total = ledger::session_cost_usd(conn, sess).unwrap();
     assert!((total - 0.75).abs() < 1e-9, "got {total}");
 }
+
+#[test]
+fn a_v6_database_gains_usage_review_base_and_subagent_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v6.sqlite3");
+
+    // Hand-build a v6 database: the v6 subagent table, no v7 columns/tables.
+    let sess;
+    {
+        let store = Store::open(&path).unwrap();
+        let c = store.conn();
+        sess = ledger::new_session(c, "old", "/tmp").unwrap();
+        c.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             DROP TABLE session_usage;
+             ALTER TABLE session DROP COLUMN review_base;
+             DROP TABLE subagent;
+             CREATE TABLE subagent (
+                id INTEGER PRIMARY KEY, parent_sess INTEGER REFERENCES session(id),
+                child_sess INTEGER REFERENCES session(id), role TEXT NOT NULL, task TEXT NOT NULL,
+                worktree TEXT,
+                status TEXT NOT NULL CHECK(status IN ('running','completed','failed','cancelled')),
+                summary TEXT, diff_stat TEXT, files_touched TEXT,
+                created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL);
+             PRAGMA foreign_keys = ON;
+             PRAGMA user_version = 6;",
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO subagent(parent_sess, role, task, status, created_ms, updated_ms)
+             VALUES (?1, 'reviewer', 't', 'running', 1, 1)",
+            [sess],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO subagent_message(subagent_id, direction, content, created_ms)
+             VALUES (1, 'in', 'hi', 1)",
+            [],
+        )
+        .unwrap();
+    }
+
+    for _ in 0..2 {
+        let store = Store::open(&path).unwrap();
+        let c = store.conn();
+        let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, schema::SCHEMA_VERSION);
+        // Old rows survive the rebuild, including the cascade-linked message.
+        let kind: String = c.query_row("SELECT kind FROM subagent WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(kind, "chorus");
+        let msgs: i64 = c.query_row("SELECT COUNT(*) FROM subagent_message", [], |r| r.get(0)).unwrap();
+        assert_eq!(msgs, 1);
+        schema::migrate(c).unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    let c = store.conn();
+    c.execute("UPDATE subagent SET status = 'waiting', kind = 'provider' WHERE id = 1", []).unwrap();
+    c.execute("UPDATE session SET review_base = 'abc' WHERE id = ?1", [sess]).unwrap();
+    c.execute(
+        "INSERT INTO session_usage(sess, context_used, context_window, updated_ms) VALUES (?1, 10, 200, 1)",
+        [sess],
+    )
+    .unwrap();
+    assert!(c.execute("UPDATE subagent SET kind = 'bogus' WHERE id = 1", []).is_err());
+}
+
+#[test]
+fn a_fresh_database_has_the_v7_schema() {
+    let store = setup();
+    let c = store.conn();
+    let sess = ledger::new_session(c, "new", "/tmp").unwrap();
+    c.execute("UPDATE session SET review_base = 'abc' WHERE id = ?1", [sess]).unwrap();
+    c.execute(
+        "INSERT INTO subagent(parent_sess, kind, role, task, status, created_ms, updated_ms)
+         VALUES (?1, 'provider', 'r', 't', 'waiting', 1, 1)",
+        [sess],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO session_usage(sess, cost_usd, updated_ms) VALUES (?1, NULL, 1)",
+        [sess],
+    )
+    .unwrap();
+}
+
+#[test]
+fn session_usage_keeps_last_context_and_sums_cost() {
+    use chorus_core::usage;
+    let store = setup();
+    let c = store.conn();
+    let sess = ledger::new_session(c, "u", "/tmp").unwrap();
+    assert!(usage::get(c, sess).unwrap().is_none());
+
+    usage::record_context(c, sess, Some(1200), Some(200_000)).unwrap();
+    usage::record_turn(c, sess, Some(1500), None, 0, 0, Some(0.25)).unwrap();
+    usage::record_context(c, sess, None, None).unwrap();
+    usage::record_turn(c, sess, Some(1800), Some(200_000), 0, 0, Some(0.5)).unwrap();
+    usage::record_turn(c, sess, None, None, 0, 0, None).unwrap();
+
+    let u = usage::get(c, sess).unwrap().unwrap();
+    assert_eq!(u.context_used, Some(1800));
+    assert_eq!(u.context_window, Some(200_000));
+    assert_eq!(u.cost_usd, Some(0.75));
+
+    // Usage is metadata: the ledger has no events for it.
+    assert!(ledger::history(c, sess, 100).unwrap().is_empty());
+
+    assert_eq!(usage::review_base(c, sess).unwrap(), None);
+    usage::set_review_base(c, sess, Some("abc123")).unwrap();
+    assert_eq!(usage::review_base(c, sess).unwrap().as_deref(), Some("abc123"));
+}

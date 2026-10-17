@@ -22,6 +22,8 @@ fn now_ms() -> i64 {
 #[serde(rename_all = "snake_case")]
 pub enum SubagentStatus {
     Running,
+    /// Paused at a cap or waiting for permission.
+    Waiting,
     Completed,
     Failed,
     Cancelled,
@@ -31,6 +33,7 @@ impl SubagentStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Running => "running",
+            Self::Waiting => "waiting",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
@@ -41,6 +44,7 @@ impl SubagentStatus {
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "running" => Some(Self::Running),
+            "waiting" => Some(Self::Waiting),
             "completed" => Some(Self::Completed),
             "failed" => Some(Self::Failed),
             "cancelled" => Some(Self::Cancelled),
@@ -333,7 +337,8 @@ pub fn wait_agent(
         statuses.insert(a.id, a.status.as_str().to_string());
         match a.status {
             SubagentStatus::Completed => completed.push(a.id),
-            SubagentStatus::Running => running.push(a.id),
+            // Waiting is paused, not finished: it keeps `all_done` false.
+            SubagentStatus::Running | SubagentStatus::Waiting => running.push(a.id),
             SubagentStatus::Cancelled => cancelled.push(a.id),
             SubagentStatus::Failed => failed.push(a.id),
         }

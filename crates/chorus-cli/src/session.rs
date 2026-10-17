@@ -23,7 +23,7 @@ use chorus_core::integration_catalog;
 use chorus_core::skills;
 use chorus_core::render::ContextItem;
 use chorus_core::tokens::{CachedCounter, HeuristicCounter};
-use chorus_core::{actor, ledger, memory, Event, EventKind, NewEvent, Store};
+use chorus_core::{actor, ledger, memory, usage, Event, EventKind, NewEvent, Store};
 use std::path::{Path, PathBuf};
 
 /// How to answer the agent's permission requests for a whole run. The
@@ -950,6 +950,12 @@ impl Session {
         Ok(None)
     }
 
+    /// The last usage this session reported (`session_usage`), so a reopened
+    /// session's context meter starts where it left off instead of empty.
+    pub fn usage(&self) -> Result<Option<usage::SessionUsage>> {
+        Ok(usage::get(self.store.conn(), self.sess)?)
+    }
+
     /// Rebuild the hot context from the ledger, sized to `budget` tokens.
     /// This is the "session is the app's" invariant in practice: history for
     /// the next turn comes from here, never from a provider's session state.
@@ -1462,7 +1468,21 @@ impl Session {
                 anyhow::bail!("attachment {} ({mime}) is not readable by this agent", meta.name);
             }
         }
-        agent.prompt_blocks(blocks, decide).context("agent turn")
+        // Persist every `usage_update` as it lands, so a second (read-only)
+        // handle sees the meter move mid-turn. A separate connection: this
+        // one is not ours to borrow from inside the agent's callback.
+        let observer = self.store.conn().path().filter(|p| !p.is_empty()).and_then(|path| {
+            let store = Store::open(Path::new(path)).ok()?;
+            let _ = store.conn().busy_timeout(std::time::Duration::from_millis(200));
+            let sess = self.sess;
+            Some(Box::new(move |used, window| {
+                let _ = usage::record_context(store.conn(), sess, used, window);
+            }) as chorus_acp::UsageObserver)
+        });
+        let previous = chorus_acp::set_usage_observer(observer);
+        let out = agent.prompt_blocks(blocks, decide).context("agent turn");
+        chorus_acp::set_usage_observer(previous);
+        out
     }
 
     /// Like [`run_turn`], but each permission request is put to `decide`
@@ -1691,6 +1711,17 @@ impl Session {
             }
             seqs.push(ledger::append(c, &ne)?);
         }
+        // Bridges report context pressure, not an in/out split, so the token
+        // columns stay at what is known (nothing yet); cost adds to the total.
+        usage::record_turn(
+            c,
+            self.sess,
+            outcome.context_used,
+            outcome.context_window,
+            0,
+            0,
+            outcome.cost_usd,
+        )?;
         Ok(seqs)
     }
 

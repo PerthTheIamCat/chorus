@@ -1412,6 +1412,25 @@ pub unsafe extern "C" fn chorus_task_state(e: *const ChorusEngine) -> *mut c_cha
     }
 }
 
+/// The last usage stored for this session, to seed the context meter on
+/// reopen. JSON: {"ok":true,"usage":null | {"context_used":N|null,
+/// "context_window":N|null,"tokens_in":N,"tokens_out":N,"cost_usd":X|null,
+/// "updated_ms":N}}
+///
+/// # Safety
+/// `e` must be a live handle from `chorus_engine_open`/`_reopen`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_session_usage(e: *const ChorusEngine) -> *mut c_char {
+    let Some(engine) = e.as_ref() else {
+        return err("null engine");
+    };
+    match catch_unwind(AssertUnwindSafe(|| engine.session.usage())) {
+        Ok(Ok(u)) => out(serde_json::json!({ "ok": true, "usage": u }).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in session_usage"),
+    }
+}
+
 /// The context Chorus would hand an agent right now, assembled from the
 /// ledger exactly as a real turn would.
 ///
