@@ -61,8 +61,8 @@ pub mod worktree_cow;
 pub mod worktrees;
 
 pub use agent_control::{
-    ChecklistItem, FileJump, ReviewRequest, Subagent, SubagentBrief, SubagentResultsBrief,
-    SubagentStatus,
+    ChecklistItem, FileJump, ReviewRequest, Subagent, SubagentBrief, SubagentKind,
+    SubagentResultsBrief, SubagentStatus,
 };
 pub use checkpoint_dag::{CheckpointDag, RewindMode, RewindSummary, TurnCheckpointRecord};
 pub use darwin_qos::DarwinQoS;
