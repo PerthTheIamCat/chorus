@@ -2633,6 +2633,91 @@ pub unsafe extern "C" fn chorus_synthesize_role(
     out(serde_json::json!({"ok": true, "role": role}).to_string())
 }
 
+/// List subagents for a session (or all subagents in DB if parent_sess <= 0).
+#[no_mangle]
+pub unsafe extern "C" fn chorus_list_subagents(
+    db_path: *const c_char,
+    parent_sess: i64,
+) -> *mut c_char {
+    let Some(db_path) = borrow(db_path) else {
+        return err("db_path must be valid UTF-8");
+    };
+    let db = PathBuf::from(db_path);
+    let r = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
+        let store = chorus_core::store::Store::open(&db).map_err(|e| e.to_string())?;
+        let parent = if parent_sess > 0 {
+            Some(parent_sess)
+        } else {
+            None
+        };
+        let subs = chorus_core::agent_control::list_subagents(store.conn(), parent)
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({ "ok": true, "subagents": subs }))
+    }));
+    match r {
+        Ok(Ok(val)) => out(val.to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in list_subagents"),
+    }
+}
+
+/// Cancel a subagent session.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_cancel_subagent(
+    db_path: *const c_char,
+    subagent_id: i64,
+) -> *mut c_char {
+    let Some(db_path) = borrow(db_path) else {
+        return err("db_path must be valid UTF-8");
+    };
+    let db = PathBuf::from(db_path);
+    let r = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
+        let store = chorus_core::store::Store::open(&db).map_err(|e| e.to_string())?;
+        let sub = chorus_core::agent_control::cancel_agent(
+            store.conn(),
+            subagent_id,
+            Some("Cancelled by user"),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({ "ok": true, "subagent": sub }))
+    }));
+    match r {
+        Ok(Ok(val)) => out(val.to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in cancel_subagent"),
+    }
+}
+
+/// Send a message to a child subagent.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_message_subagent(
+    db_path: *const c_char,
+    subagent_id: i64,
+    message: *const c_char,
+) -> *mut c_char {
+    let Some(db_path) = borrow(db_path) else {
+        return err("db_path must be valid UTF-8");
+    };
+    let Some(message) = borrow(message) else {
+        return err("message must be valid UTF-8");
+    };
+    let db = PathBuf::from(db_path);
+    let r = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
+        let store = chorus_core::store::Store::open(&db).map_err(|e| e.to_string())?;
+        let actor =
+            chorus_core::actor::intern(store.conn(), "user", "user").map_err(|e| e.to_string())?;
+        let msg =
+            chorus_core::agent_control::send_message(store.conn(), subagent_id, actor, message)
+                .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({ "ok": true, "message": msg }))
+    }));
+    match r {
+        Ok(Ok(val)) => out(val.to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in message_subagent"),
+    }
+}
+
 /// List all turn checkpoints for a session.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_checkpoint_list_json(
@@ -3303,6 +3388,57 @@ mod tests {
             v["qr_payload"],
             "chorus://pair?token=tok&endpoint=http://100.64.0.7:51234"
         );
+    }
+
+    #[test]
+    fn ffi_subagents_list_cancel_message() {
+        let dir = std::env::temp_dir().join(format!("chorus-ffi-sub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let db_path = dir.join("chorus.db");
+        let store = chorus_core::store::Store::open(&db_path).unwrap();
+        let c = store.conn();
+        let parent = chorus_core::ledger::new_session(c, "parent", "/tmp").unwrap();
+        let sub = chorus_core::agent_control::spawn_agent(
+            c,
+            Some(parent),
+            "reviewer",
+            "verify auth logic",
+            false,
+            "/tmp",
+        )
+        .unwrap();
+        drop(store);
+
+        let db_c = CString::new(db_path.to_str().unwrap()).unwrap();
+
+        // 1. list_subagents
+        let list_ptr = unsafe { chorus_list_subagents(db_c.as_ptr(), parent) };
+        let list_str = unsafe { CStr::from_ptr(list_ptr).to_str().unwrap() };
+        let list_val: serde_json::Value = serde_json::from_str(list_str).unwrap();
+        assert!(list_val["ok"].as_bool().unwrap());
+        let subs = list_val["subagents"].as_array().unwrap();
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0]["role"], "reviewer");
+        assert_eq!(subs[0]["task"], "verify auth logic");
+        unsafe { chorus_string_free(list_ptr) };
+
+        // 2. message_subagent
+        let msg_c = CString::new("check session expiry").unwrap();
+        let msg_ptr = unsafe { chorus_message_subagent(db_c.as_ptr(), sub.id, msg_c.as_ptr()) };
+        let msg_str = unsafe { CStr::from_ptr(msg_ptr).to_str().unwrap() };
+        let msg_val: serde_json::Value = serde_json::from_str(msg_str).unwrap();
+        assert!(msg_val["ok"].as_bool().unwrap());
+        assert_eq!(msg_val["message"]["content"], "check session expiry");
+        unsafe { chorus_string_free(msg_ptr) };
+
+        // 3. cancel_subagent
+        let cancel_ptr = unsafe { chorus_cancel_subagent(db_c.as_ptr(), sub.id) };
+        let cancel_str = unsafe { CStr::from_ptr(cancel_ptr).to_str().unwrap() };
+        let cancel_val: serde_json::Value = serde_json::from_str(cancel_str).unwrap();
+        assert!(cancel_val["ok"].as_bool().unwrap());
+        assert_eq!(cancel_val["subagent"]["status"], "cancelled");
+        unsafe { chorus_string_free(cancel_ptr) };
     }
 }
 

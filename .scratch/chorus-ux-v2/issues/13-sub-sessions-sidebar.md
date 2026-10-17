@@ -1,6 +1,6 @@
 # Sub sessions in the sidebar
 
-Status: ready-for-agent
+Status: resolved
 Blocked by: 04, 11, 12
 Parent: ../spec.md
 Decided in: [Sub sessions](../../chorus-ux-overhaul/issues/11-sub-sessions.md)

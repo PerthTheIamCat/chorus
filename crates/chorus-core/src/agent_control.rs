@@ -136,6 +136,8 @@ pub struct Subagent {
     pub files_touched: Vec<String>,
     pub created_ms: i64,
     pub updated_ms: i64,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// A steering message sent to or from a child agent.
@@ -235,6 +237,7 @@ fn row_to_subagent(r: &Row) -> rusqlite::Result<Subagent> {
         files_touched,
         created_ms: r.get("created_ms")?,
         updated_ms: r.get("updated_ms")?,
+        model: None,
     })
 }
 
@@ -410,16 +413,32 @@ pub fn record_provider_subagent(
     get_subagent(conn, conn.last_insert_rowid())
 }
 
+fn attach_model(conn: &Connection, sub: &mut Subagent) {
+    if let Some(child) = sub.child_sess {
+        let model: rusqlite::Result<String> = conn.query_row(
+            "SELECT a.name FROM event e JOIN actor a ON e.actor = a.id WHERE e.sess = ?1 AND a.name != 'user' ORDER BY e.seq ASC LIMIT 1",
+            [child],
+            |r| r.get(0),
+        );
+        if let Ok(m) = model {
+            sub.model = Some(m);
+        }
+    }
+}
+
 /// Fetch a single subagent by ID.
 pub fn get_subagent(conn: &Connection, id: i64) -> Result<Subagent> {
-    conn.query_row(
-        "SELECT id, parent_sess, child_sess, kind, role, task, worktree, status, \
-         summary, diff_stat, files_touched, created_ms, updated_ms \
-         FROM subagent WHERE id = ?1",
-        [id],
-        row_to_subagent,
-    )
-    .map_err(|e| ChorusError::Invalid(format!("subagent #{id} not found: {e}")))
+    let mut sub = conn
+        .query_row(
+            "SELECT id, parent_sess, child_sess, kind, role, task, worktree, status, \
+             summary, diff_stat, files_touched, created_ms, updated_ms \
+             FROM subagent WHERE id = ?1",
+            [id],
+            row_to_subagent,
+        )
+        .map_err(|e| ChorusError::Invalid(format!("subagent #{id} not found: {e}")))?;
+    attach_model(conn, &mut sub);
+    Ok(sub)
 }
 
 /// List all subagents, optionally filtered by parent session.
@@ -446,7 +465,9 @@ pub fn list_subagents(conn: &Connection, parent_sess: Option<i64>) -> Result<Vec
 
     let mut out = Vec::new();
     for r in rows {
-        out.push(r?);
+        let mut sub = r?;
+        attach_model(conn, &mut sub);
+        out.push(sub);
     }
     Ok(out)
 }

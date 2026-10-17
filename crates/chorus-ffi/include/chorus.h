@@ -420,4 +420,9 @@ char *chorus_pairing_initiate_json(void);
 char *chorus_pairing_devices_json(void);
 char *chorus_pairing_revoke_json(const char *device_id);
 
+/* Subagents & Multi-Agent Sessions */
+char *chorus_list_subagents(const char *db_path, int64_t parent_sess);
+char *chorus_cancel_subagent(const char *db_path, int64_t subagent_id);
+char *chorus_message_subagent(const char *db_path, int64_t subagent_id, const char *message);
+
 #endif /* CHORUS_H */

@@ -12,17 +12,6 @@ private struct SubagentLedgerPayload: Decodable {
     let message: String?
 }
 
-private struct SubagentEntry: Identifiable {
-    let id: String
-    let parentSessionId: String
-    var name: String
-    var task: String
-    let actor: String
-    let seq: Int64
-    var state: String?
-    var message: String
-}
-
 /// Mirrors `Policy::from_level` in chorus-cli/session.rs — the FFI takes
 /// this as a plain int, not a bool, since read-only sits between deny
 /// and allow (auto-approves reads, still denies writes/commands/network).
@@ -148,6 +137,10 @@ struct ContentView: View {
         }
     }
     @State private var expanded: Set<String> = []
+    @State private var expandedSubParents: Set<Int64> = []
+    @State private var notifiedSubagents: Set<String> = []
+    @State private var messagingSubagent: Engine.SubagentInfo?
+    @State private var subagentMessageText = ""
     @StateObject private var projects = ProjectStore()
     @StateObject private var fileIndex = FileIndex()
     @State private var editing: ChorusProject?
@@ -580,8 +573,64 @@ struct ContentView: View {
     }
 
     @ViewBuilder
+    private var breadcrumbHeader: some View {
+        let currentSub = engine.subagentsByDB[dbPath(for: workspace)]?.first { $0.child_sess == engine.sessionID }
+        let currentSess = (engine.sessionsByDB[dbPath(for: workspace)] ?? []).first { $0.id == engine.sessionID }
+        let parentId = currentSub?.parent_sess ?? currentSess?.forked_from
+        if let parentId, let parent = (engine.sessionsByDB[dbPath(for: workspace)] ?? []).first(where: { $0.id == parentId }) {
+            HStack(spacing: 6) {
+                Button {
+                    workspace = parent.cwd.isEmpty ? workspace : parent.cwd
+                    engine.reopen(db: dbPath(for: workspace), sessionID: parent.id)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 10, weight: .bold))
+                        Text(displayTitle(parent))
+                            .lineLimit(1)
+                    }
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.tertiary)
+
+                Text(currentSub.map { "\($0.role) · \($0.task)" } ?? displayTitle(currentSess ?? parent))
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                Spacer()
+
+                if let sub = currentSub {
+                    if sub.kind == "provider" {
+                        Text("Provider Subagent (อ่านอย่างเดียว)")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(Color.primary.opacity(0.06), in: Capsule())
+                    } else if sub.status == "waiting" {
+                        Text("รอคำยืนยัน")
+                            .font(.system(size: 9.5, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(Color.orange, in: Capsule())
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+            .background(Color.primary.opacity(0.03))
+            Divider().opacity(0.3)
+        }
+    }
+
+    @ViewBuilder
     private var centerStageView: some View {
         VStack(spacing: 0) {
+            breadcrumbHeader
             switch centerStageMode {
             case .thread:
                 thread
@@ -1042,6 +1091,40 @@ struct ContentView: View {
                               loadSessions(of: saved)
                           },
                           onDelete: editingIsNew ? nil : { projects.remove(p) })
+        }
+        .sheet(item: $messagingSubagent) { sub in
+            VStack(alignment: .leading, spacing: 14) {
+                Text("ส่งข้อความถึงงานย่อย (\(sub.role))").font(.headline)
+                Text(sub.task).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                TextEditor(text: $subagentMessageText)
+                    .font(.callout)
+                    .frame(height: 100)
+                    .padding(6)
+                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.12)))
+                HStack {
+                    Button("ยกเลิก") {
+                        messagingSubagent = nil
+                        subagentMessageText = ""
+                    }
+                    Spacer()
+                    Button("ส่งข้อความ") {
+                        let text = subagentMessageText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !text.isEmpty {
+                            engine.messageSubagent(db: dbPath(for: workspace), id: sub.id, message: text)
+                        }
+                        messagingSubagent = nil
+                        subagentMessageText = ""
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(subagentMessageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .padding(20)
+            .frame(width: 400)
+        }
+        .onChange(of: engine.subagentsByDB) { _, dbSubs in
+            checkSubagentNotifications(in: dbSubs)
         }
         .onReceive(AppCommandCenter.shared.fire) { run($0) }
         .onAppear { syncCommandState() }
@@ -1800,9 +1883,40 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
+    @ViewBuilder
     private var composer: some View {
-        VStack(spacing: 6) {
-            if !queued.isEmpty {
+        let currentSub = engine.subagentsByDB[dbPath(for: workspace)]?.first { $0.child_sess == engine.sessionID }
+        if currentSub?.kind == "provider" {
+            HStack(spacing: 12) {
+                Image(systemName: "eye.fill")
+                    .foregroundStyle(.secondary)
+                    .font(.system(size: 14))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Provider subagent (อ่านอย่างเดียว)")
+                        .font(.caption.weight(.semibold))
+                    Text("การสนทนาของ subagent ฝั่ง Provider บันทึกเพื่อให้อ่านย้อนหลัง ไม่สามารถส่งข้อความโดยตรงได้")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if engine.busy {
+                    Button(role: .destructive) {
+                        engine.cancel()
+                        queued.removeAll()
+                    } label: {
+                        Label("หยุดเทิร์นของ agent หลัก", systemImage: "stop.circle.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+            }
+            .padding(12)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color.primary.opacity(0.1), lineWidth: 1))
+            .shadow(color: .black.opacity(0.06), radius: 8, y: 3)
+        } else {
+            VStack(spacing: 6) {
+                if !queued.isEmpty {
                 VStack(alignment: .leading, spacing: 3) {
                     ForEach(Array(queued.enumerated()), id: \.offset) { i, q in
                         HStack(spacing: 6) {
@@ -1875,6 +1989,7 @@ struct ContentView: View {
         }
         .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 10)
         .floatingPanel(cornerRadius: 22)
+        }
     }
 
     /// `@codex fix this` → ("codex's default model", "fix this"). Matches agent
@@ -2495,8 +2610,35 @@ struct ContentView: View {
     }
 
     private func sessions(of p: ChorusProject) -> [(folder: String, s: Engine.SessionSummary, key: String)] {
-        p.folders.flatMap { f in (engine.sessionsByDB[dbPath(for: f)] ?? []).map { (f, $0, "\(f)#\($0.id)") } }
-            .sorted { ($0.s.started_ms + $0.s.last_ms) > ($1.s.started_ms + $1.s.last_ms) }
+        var result: [(folder: String, s: Engine.SessionSummary, key: String)] = []
+        for f in p.folders {
+            let all: [Engine.SessionSummary] = engine.sessionsByDB[dbPath(for: f)] ?? []
+            let allIDs: Set<Int64> = Set(all.map(\.id))
+            for s in all {
+                if let forked = s.forked_from, allIDs.contains(forked) { continue }
+                result.append((folder: f, s: s, key: "\(f)#\(s.id)"))
+            }
+        }
+        return result.sorted { ($0.s.started_ms + $0.s.last_ms) > ($1.s.started_ms + $1.s.last_ms) }
+    }
+
+    private func checkSubagentNotifications(in dbSubs: [String: [Engine.SubagentInfo]]) {
+        guard !NSApp.isActive else { return }
+        for subs in dbSubs.values {
+            for sub in subs {
+                if sub.status == "waiting" || sub.status == "failed" {
+                    let key = "\(sub.id)-\(sub.status)"
+                    if !notifiedSubagents.contains(key) {
+                        notifiedSubagents.insert(key)
+                        let notification = NSUserNotification()
+                        notification.title = sub.status == "waiting" ? "Chorus: งานย่อยรอคำยืนยัน" : "Chorus: งานย่อยล้มเหลว"
+                        notification.informativeText = "\(sub.role): \(sub.task)"
+                        notification.soundName = NSUserNotificationDefaultSoundName
+                        NSUserNotificationCenter.default.deliver(notification)
+                    }
+                }
+            }
+        }
     }
 
     private func loadSessions(of p: ChorusProject) {
@@ -2652,189 +2794,172 @@ struct ContentView: View {
         let isRenamingThis = engine.renamingSessionIDs.contains(s.id)
         let dbSessions = engine.sessionsByDB[dbPath(for: folder)] ?? []
         let childSessions = dbSessions.filter { $0.forked_from == s.id }
+        let subs = engine.subagentsByParent[s.id] ?? (engine.subagentsByDB[dbPath(for: folder)] ?? []).filter { $0.parent_sess == s.id }
+
+        let runningSubs = subs.filter { $0.status == "running" }
+        let waitingSubs = subs.filter { $0.status == "waiting" }
+        let failedSubs = subs.filter { $0.status == "failed" }
+        let hasActive = !runningSubs.isEmpty || !waitingSubs.isEmpty
+        let isExpanded = hasActive || expandedSubParents.contains(s.id)
+
         let totalCost: Double? = {
             let selfCost = s.cost_usd
             let childCosts = childSessions.compactMap { $0.cost_usd }
             if selfCost == nil && childCosts.isEmpty { return nil }
             return (selfCost ?? 0.0) + childCosts.reduce(0.0, +)
         }()
-        return Button {
-            guard !selected, !engine.busy, !engine.switching else { return }
-            workspace = folder
-            engine.reopen(db: dbPath(for: folder), sessionID: s.id)
-        } label: {
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 5) {
-                    Text(displayTitle(s)).lineLimit(1)
-                        .fontWeight(selected ? .semibold : .regular)
-                    if isRenamingThis {
-                        ProgressView()
-                            .controlSize(.mini)
-                    }
-                    Spacer(minLength: 4)
-                    if let cost = totalCost {
-                        let costText: String = {
-                            if let rate = Double(thbRate.trimmingCharacters(in: .whitespaces)), rate > 0 {
-                                return String(format: "฿%.1f", cost * rate)
-                            }
-                            return String(format: "$%.3f", cost)
-                        }()
-                        Text(costText)
-                            .font(.system(size: 9.5, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 3))
-                            .help(!childSessions.isEmpty ? "มูลค่ารวม parent + \(childSessions.count) งานย่อย" : "มูลค่าเทียบ API")
-                    }
-                }
-                if !meta.isEmpty {
-                    Text(meta).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .buttonStyle(InteractiveStyle(cornerRadius: 8, selected: selected,
-                                      padding: .init(top: 5, leading: 10, bottom: 5, trailing: 8)))
-        .disabled(engine.busy && !selected)
-        .padding(.leading, 18)
-        .contextMenu {
+
+        return VStack(alignment: .leading, spacing: 1) {
             Button {
-                engine.renameSessionWithAI(db: dbPath(for: folder), id: s.id, sampleText: displayTitle(s))
+                guard !selected, !engine.busy, !engine.switching else { return }
+                workspace = folder
+                engine.reopen(db: dbPath(for: folder), sessionID: s.id)
             } label: {
-                Label(isRenamingThis ? "กำลังตั้งชื่อด้วย AI…" : "ตั้งชื่อด้วย AI ✨", systemImage: isRenamingThis ? "hourglass" : "sparkles")
-            }
-            .disabled(isRenamingThis)
-            Button("เปลี่ยนชื่อ…") { renaming = (folder, s); renameText = displayTitle(s) }
-            Button("เปิดโฟลเดอร์ใน Finder") {
-                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: folder)])
-            }
-            Divider()
-            Button("ลบ session…", role: .destructive) { deleting = (folder, s) }
-        }
-    }
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 5) {
+                        if !subs.isEmpty {
+                            Button {
+                                withAnimation(.easeOut(duration: 0.16)) {
+                                    if expandedSubParents.contains(s.id) {
+                                        expandedSubParents.remove(s.id)
+                                    } else {
+                                        expandedSubParents.insert(s.id)
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundStyle(.secondary)
+                                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                                    .frame(width: 12, height: 12)
+                            }
+                            .buttonStyle(.plain)
+                        }
 
-    /// Delegated work, read back from the ledger: every tool call that looks
-    /// like a spawned subagent (Task / Agent / delegate), the result that
-    /// followed it, and who ran it. This is the ledger's view — it fills in
-    /// when a turn ends, not while it streams.
-    private var subagentsPane: some View {
-        let evs = engine.events
-        let children = subagentEntries
-        let calls: [(call: LedgerEvent, result: LedgerEvent?)] = evs.enumerated().compactMap { i, e in
-            guard e.kind == "tool_call", Self.isSubagentCall(e.body) else { return nil }
-            let r = evs[(i + 1)...].first { $0.kind == "tool_result" }
-            return (e, r)
-        }
-        return VStack(spacing: 0) {
-          PaneHeader(title: "งานย่อย", subtitle: children.isEmpty && calls.isEmpty ? nil : "\(children.isEmpty ? calls.count : children.count) งานที่ agent แตกออกไป") { EmptyView() }
-          if children.isEmpty && calls.isEmpty {
-            EmptyPane(icon: "point.3.connected.trianglepath.dotted", title: "ยังไม่มีงานย่อย",
-                      hint: "เมื่อ agent แตกงานให้ subagent (Task/Agent) จะขึ้นที่นี่พร้อมผลลัพธ์")
-          } else {
-          ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                if !children.isEmpty {
-                    ForEach(children) { child in
-                        VStack(alignment: .leading, spacing: 5) {
-                            HStack(spacing: 6) {
-                                Image(systemName: child.state == nil ? "hourglass" : child.state == "completed" ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                                    .foregroundStyle(child.state == nil ? Color.orange : child.state == "completed" ? Color.green : Color.secondary)
-                                Text(child.name).font(.caption.bold())
-                                Spacer()
-                                Text(child.state.map(Self.subagentStateLabel) ?? "กำลังทำ")
-                                    .font(.caption2).foregroundStyle(.secondary)
-                            }
-                            if let parent = children.first(where: { $0.id == child.parentSessionId }) {
-                                Text("แตกงานจาก \(parent.name)").font(.caption2).foregroundStyle(.secondary)
-                            } else if !child.parentSessionId.isEmpty {
-                                Text("แตกงานจาก agent หลัก").font(.caption2).foregroundStyle(.secondary)
-                            }
-                            if !child.task.isEmpty { Text(child.task).font(.caption) }
-                            if !child.message.isEmpty {
-                                DisclosureGroup("ผลลัพธ์") {
-                                    Text(child.message).font(.caption2.monospaced()).textSelection(.enabled)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                }.font(.caption2)
+                        Text(displayTitle(s)).lineLimit(1)
+                            .fontWeight(selected ? .semibold : .regular)
+
+                        if isRenamingThis {
+                            ProgressView()
+                                .controlSize(.mini)
+                        }
+
+                        // Attention badges
+                        if !failedSubs.isEmpty {
+                            Image(systemName: "exclamationmark.circle.fill")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.red)
+                                .help("มีงานย่อยล้มเหลว")
+                        } else if !waitingSubs.isEmpty {
+                            Image(systemName: "pause.circle.fill")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.orange)
+                                .help("มีงานย่อยรอคำยืนยัน")
+                        }
+
+                        Spacer(minLength: 4)
+
+                        // Subagents count indicator on parent row
+                        if !subs.isEmpty {
+                            if hasActive {
+                                if !waitingSubs.isEmpty {
+                                    Text("\(waitingSubs.count) รอ")
+                                        .font(.system(size: 9, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 1)
+                                        .background(Color.orange, in: Capsule())
+                                } else {
+                                    Text("\(runningSubs.count) กำลังทำ")
+                                        .font(.system(size: 9, weight: .medium))
+                                        .foregroundStyle(Color.accentColor)
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 1)
+                                        .background(Color.accentColor.opacity(0.12), in: Capsule())
+                                }
+                            } else {
+                                Text("เสร็จแล้ว \(subs.count)")
+                                    .font(.system(size: 9, weight: .regular))
+                                    .foregroundStyle(.secondary)
                             }
                         }
-                        .padding(10)
-                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .hoverHighlight(cornerRadius: 10)
+
+                        if let cost = totalCost {
+                            let costText: String = {
+                                if let rate = Double(thbRate.trimmingCharacters(in: .whitespaces)), rate > 0 {
+                                    return String(format: "฿%.1f", cost * rate)
+                                }
+                                return String(format: "$%.3f", cost)
+                            }()
+                            Text(costText)
+                                .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 3))
+                                .help(!childSessions.isEmpty ? "มูลค่ารวม parent + \(childSessions.count) งานย่อย" : "มูลค่าเทียบ API")
+                        }
                     }
-                } else {
-                ForEach(calls, id: \.call.seq) { c in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 6) {
-                            Image(systemName: c.result == nil ? "hourglass" : "checkmark.circle.fill")
-                                .foregroundStyle(c.result == nil ? Color.orange : Color.green)
-                            Text(c.call.actor).font(.caption.bold())
-                            Spacer()
-                            Text("#\(c.call.seq)").font(.caption2).foregroundStyle(.tertiary)
-                        }
-                        Text(c.call.body).font(.caption).lineLimit(3)
-                        if let r = c.result {
-                            DisclosureGroup("ผลลัพธ์") {
-                                Text(r.body).font(.caption2.monospaced()).textSelection(.enabled)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }.font(.caption2)
-                        }
+                    if !meta.isEmpty {
+                        Text(meta).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                     }
-                    .padding(10)
-                    .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .hoverHighlight(cornerRadius: 10)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(InteractiveStyle(cornerRadius: 8, selected: selected,
+                                          padding: .init(top: 5, leading: 10, bottom: 5, trailing: 8)))
+            .disabled(engine.busy && !selected)
+            .padding(.leading, 18)
+            .contextMenu {
+                Button {
+                    engine.renameSessionWithAI(db: dbPath(for: folder), id: s.id, sampleText: displayTitle(s))
+                } label: {
+                    Label(isRenamingThis ? "กำลังตั้งชื่อด้วย AI…" : "ตั้งชื่อด้วย AI ✨", systemImage: isRenamingThis ? "hourglass" : "sparkles")
+                }
+                .disabled(isRenamingThis)
+                Button("เปลี่ยนชื่อ…") { renaming = (folder, s); renameText = displayTitle(s) }
+                Button("เปิดโฟลเดอร์ใน Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: folder)])
+                }
+                Divider()
+                Button("ลบ session…", role: .destructive) { deleting = (folder, s) }
+            }
+
+            // Render sub-sessions tree if expanded
+            if isExpanded && !subs.isEmpty {
+                VStack(alignment: .leading, spacing: 1) {
+                    ForEach(subs) { sub in
+                        SubagentTreeRow(
+                            sub: sub,
+                            siblings: subs,
+                            level: 1,
+                            folder: folder,
+                            currentWorkspace: workspace,
+                            selectedSessionID: engine.sessionID,
+                            subagentsByParent: engine.subagentsByParent,
+                            onSelect: { childId in
+                                guard !engine.busy, !engine.switching else { return }
+                                workspace = folder
+                                engine.reopen(db: dbPath(for: folder), sessionID: childId)
+                            },
+                            onMessage: { s in
+                                messagingSubagent = s
+                                subagentMessageText = ""
+                            },
+                            onCancel: { subId in
+                                engine.cancelSubagent(db: dbPath(for: folder), id: subId)
+                            },
+                            onCancelParent: {
+                                if engine.busy {
+                                    engine.cancel()
+                                    queued.removeAll()
+                                }
+                            }
+                        )
+                    }
                 }
             }
-            .padding(12)
-          }
-          }
         }
-        .frame(maxHeight: .infinity, alignment: .top)
-    }
-
-    private static func isSubagentCall(_ body: String) -> Bool {
-        let t = body.lowercased()
-        return ["task:", "agent:", "subagent", "delegate", "spawn"].contains { t.contains($0) }
-    }
-
-    private static func subagentStateLabel(_ state: String) -> String {
-        switch state {
-        case "completed": "เสร็จแล้ว"
-        case "failed": "ล้มเหลว"
-        case "cancelled": "ยกเลิกแล้ว"
-        case "disconnected": "ขาดการเชื่อมต่อ"
-        default: state
-        }
-    }
-
-    private var subagentEntries: [SubagentEntry] {
-        var entries: [SubagentEntry] = []
-        var indexByID: [String: Int] = [:]
-        for event in engine.events where event.kind == "tool_call" || event.kind == "tool_result" {
-            guard let data = event.body.data(using: .utf8),
-                  let payload = try? JSONDecoder().decode(SubagentLedgerPayload.self, from: data) else { continue }
-            if payload.event == "subagent_spawned" {
-                if let index = indexByID[payload.sessionId] {
-                    entries[index].name = payload.name ?? entries[index].name
-                    entries[index].task = payload.task ?? entries[index].task
-                } else {
-                    indexByID[payload.sessionId] = entries.count
-                    entries.append(SubagentEntry(id: payload.sessionId,
-                                                 parentSessionId: payload.parentSessionId ?? "",
-                                                 name: payload.name ?? "Agent",
-                                                 task: payload.task ?? "",
-                                                 actor: event.actor,
-                                                 seq: event.seq,
-                                                 state: nil,
-                                                 message: ""))
-                }
-            } else if payload.event == "subagent_state_update", let index = indexByID[payload.sessionId] {
-                entries[index].state = payload.state
-                if let message = payload.message, !message.isEmpty { entries[index].message = message }
-            }
-        }
-        return entries
     }
 
     private var dbPath: String {
@@ -4242,3 +4367,144 @@ private struct OpenAtBottom: ViewModifier {
         }
     }
 }
+
+struct SubagentTreeRow: View {
+    let sub: Engine.SubagentInfo
+    let siblings: [Engine.SubagentInfo]
+    let level: Int
+    let folder: String
+    let currentWorkspace: String
+    let selectedSessionID: Int64?
+    let subagentsByParent: [Int64: [Engine.SubagentInfo]]
+    let onSelect: (Int64) -> Void
+    let onMessage: (Engine.SubagentInfo) -> Void
+    let onCancel: (Int64) -> Void
+    let onCancelParent: () -> Void
+
+    var body: some View {
+        let isSelected = folder == currentWorkspace && sub.child_sess != nil && sub.child_sess == selectedSessionID
+        let roleSiblings = siblings.filter { $0.role == sub.role }.sorted { $0.created_ms < $1.created_ms }
+        let repeatIndex = roleSiblings.firstIndex(where: { $0.id == sub.id }).map { $0 + 1 } ?? 1
+        let roleTitle = roleSiblings.count > 1 ? "\(sub.role) \(repeatIndex)" : sub.role
+        let displayName = sub.kind == "provider" ? (sub.task.isEmpty ? sub.role : sub.task) : "\(roleTitle) · \(sub.task)"
+        let nestedSubs = sub.child_sess.flatMap { subagentsByParent[$0] } ?? []
+
+        VStack(alignment: .leading, spacing: 1) {
+            Button {
+                guard let childId = sub.child_sess, !isSelected else { return }
+                onSelect(childId)
+            } label: {
+                HStack(spacing: 5) {
+                    // Tree branch indicator
+                    Image(systemName: "arrow.turn.down.right")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.tertiary)
+
+                    // Status dot
+                    switch sub.status {
+                    case "running":
+                        ProgressView().controlSize(.mini)
+                            .help("กำลังทำ")
+                    case "waiting":
+                        Text("รอ")
+                            .font(.system(size: 8.5, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.orange, in: Capsule())
+                            .help("รอดำเนินการหรือติด Cap")
+                    case "completed":
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.green)
+                            .help("เสร็จแล้ว")
+                    case "failed":
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.red)
+                            .help("ล้มเหลว: \(sub.summary ?? "")")
+                    case "cancelled":
+                        Image(systemName: "nosign")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .help("ยกเลิก")
+                    default:
+                        Circle().fill(.secondary).frame(width: 5, height: 5)
+                    }
+
+                    Text(displayName)
+                        .font(.caption2)
+                        .fontWeight(isSelected ? .semibold : .regular)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 4)
+
+                    // Model chip
+                    if let m = sub.model, !m.isEmpty {
+                        Text(ModelID(m).base)
+                            .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, 0.5)
+                            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 3))
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(InteractiveStyle(cornerRadius: 6, selected: isSelected,
+                                          padding: .init(top: 3, leading: 6, bottom: 3, trailing: 6)))
+            .padding(.leading, CGFloat(24 + level * 10))
+            .help(displayName)
+            .contextMenu {
+                if sub.kind == "chorus" {
+                    if sub.status == "running" || sub.status == "waiting" {
+                        Button("ส่งข้อความถึงงานย่อย…") {
+                            onMessage(sub)
+                        }
+                        Button("หยุดงานย่อยนี้", role: .destructive) {
+                            onCancel(sub.id)
+                        }
+                    }
+                    if let wt = sub.worktree, !wt.isEmpty {
+                        Button("เปิด Git Worktree ใน Finder") {
+                            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: wt)])
+                        }
+                    }
+                } else {
+                    Text("Provider subagent (อ่านอย่างเดียว)").font(.caption).foregroundStyle(.secondary)
+                    Button("หยุดเทิร์นของ agent หลัก", role: .destructive) {
+                        onCancelParent()
+                    }
+                }
+            }
+
+            // Nesting up to 2 levels; deeper levels shown as …+N
+            if !nestedSubs.isEmpty {
+                if level < 2 {
+                    ForEach(nestedSubs) { nested in
+                        SubagentTreeRow(
+                            sub: nested,
+                            siblings: nestedSubs,
+                            level: level + 1,
+                            folder: folder,
+                            currentWorkspace: currentWorkspace,
+                            selectedSessionID: selectedSessionID,
+                            subagentsByParent: subagentsByParent,
+                            onSelect: onSelect,
+                            onMessage: onMessage,
+                            onCancel: onCancel,
+                            onCancelParent: onCancelParent
+                        )
+                    }
+                } else {
+                    Text("…+\(nestedSubs.count)")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                        .padding(.leading, CGFloat(24 + (level + 1) * 10))
+                        .help("มีงานย่อยระดับลึกอีก \(nestedSubs.count) งาน")
+                }
+            }
+        }
+    }
+}
+

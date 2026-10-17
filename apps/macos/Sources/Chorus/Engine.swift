@@ -1630,8 +1630,26 @@ final class Engine: ObservableObject {
 
     private struct AgentsResult: Codable { let ok: Bool?; let agents: [AgentInfo]? }
     private struct SessionsResult: Codable { let ok: Bool?; let sessions: [SessionSummary]? }
+    private struct SubagentsResult: Codable { let ok: Bool?; let subagents: [SubagentInfo]? }
     private struct HandoffAutoResult: Codable {
         let ok: Bool?; let to: String?; let goal: String?; let echo_back: String?; let error: String?
+    }
+
+    struct SubagentInfo: Codable, Identifiable, Hashable {
+        let id: Int64
+        let parent_sess: Int64?
+        let child_sess: Int64?
+        let kind: String
+        let role: String
+        let task: String
+        let worktree: String?
+        let status: String
+        let summary: String?
+        let diff_stat: String?
+        let files_touched: [String]
+        let created_ms: Int64
+        let updated_ms: Int64
+        let model: String?
     }
 
     @Published var agents: [AgentInfo] = []
@@ -1639,6 +1657,9 @@ final class Engine: ObservableObject {
     /// Sessions per project database, so the sidebar can list several
     /// projects at once instead of only the open one.
     @Published var sessionsByDB: [String: [SessionSummary]] = [:]
+    /// Subagents per project database and per parent session.
+    @Published var subagentsByDB: [String: [SubagentInfo]] = [:]
+    @Published var subagentsByParent: [Int64: [SubagentInfo]] = [:]
 
     /// Pin the model an agent runs. Must be called for the picker to mean
     /// anything: the engine defaults to whatever the agent's own CLI is
@@ -1787,6 +1808,7 @@ final class Engine: ObservableObject {
 
     /// Every past session in this project's store, newest activity first.
     func loadSessions(db: String) {
+        loadSubagents(db: db)
         ioQueue.async { [weak self] in
             let json = db.withCString { Self.string(from: chorus_list_sessions($0)) }
             let r = Self.decode(SessionsResult.self, json)
@@ -1797,6 +1819,54 @@ final class Engine: ObservableObject {
                 for s in list {
                     SpotlightIndexer.shared.indexSession(id: s.id, title: s.title, goal: s.goal, cwd: s.cwd)
                 }
+            }
+        }
+    }
+
+    /// Load subagents for a project or parent session.
+    func loadSubagents(db: String, parentSess: Int64 = 0) {
+        ioQueue.async { [weak self] in
+            let json = db.withCString { Self.string(from: chorus_list_subagents($0, parentSess)) }
+            let r = Self.decode(SubagentsResult.self, json)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let list = r?.subagents ?? []
+                self.subagentsByDB[db] = list
+                for sub in list {
+                    if let p = sub.parent_sess {
+                        var existing = self.subagentsByParent[p] ?? []
+                        if let idx = existing.firstIndex(where: { $0.id == sub.id }) {
+                            existing[idx] = sub
+                        } else {
+                            existing.append(sub)
+                        }
+                        self.subagentsByParent[p] = existing
+                    }
+                }
+            }
+        }
+    }
+
+    /// Cancel a running or waiting subagent.
+    func cancelSubagent(db: String, id: Int64) {
+        ioQueue.async { [weak self] in
+            _ = db.withCString { Self.string(from: chorus_cancel_subagent($0, id)) }
+            DispatchQueue.main.async {
+                self?.loadSubagents(db: db)
+            }
+        }
+    }
+
+    /// Send a steering message to a subagent.
+    func messageSubagent(db: String, id: Int64, message: String) {
+        ioQueue.async { [weak self] in
+            db.withCString { dbPtr in
+                message.withCString { msgPtr in
+                    _ = Self.string(from: chorus_message_subagent(dbPtr, id, msgPtr))
+                }
+            }
+            DispatchQueue.main.async {
+                self?.loadSubagents(db: db)
             }
         }
     }

@@ -214,6 +214,22 @@ pub fn rename_session(c: &Connection, sess: i64, title: &str) -> Result<()> {
 /// events and reads its history through the parent, so deleting the parent
 /// would silently empty the fork.
 pub fn delete_session(c: &Connection, sess: i64) -> Result<()> {
+    // Subagent child sessions go with the parent on delete
+    let subagent_children: Vec<i64> = {
+        let mut stmt = c.prepare(
+            "SELECT child_sess FROM subagent WHERE parent_sess = ?1 AND child_sess IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([sess], |r| r.get(0))?;
+        let mut ids = Vec::new();
+        for id in rows {
+            ids.push(id?);
+        }
+        ids
+    };
+    for child in subagent_children {
+        delete_session(c, child)?;
+    }
+
     let forks: i64 = c.query_row(
         "SELECT COUNT(*) FROM session WHERE forked_from = ?1",
         [sess],
@@ -226,6 +242,18 @@ pub fn delete_session(c: &Connection, sess: i64) -> Result<()> {
     }
     c.execute_batch("BEGIN")?;
     let r = (|| -> Result<()> {
+        // Clean up subagents and messages linked to this session
+        c.execute(
+            "DELETE FROM subagent_message WHERE subagent_id IN (SELECT id FROM subagent WHERE parent_sess = ?1 OR child_sess = ?1)",
+            [sess],
+        )?;
+        c.execute(
+            "DELETE FROM subagent WHERE parent_sess = ?1 OR child_sess = ?1",
+            [sess],
+        )?;
+        c.execute("DELETE FROM task_checklist WHERE sess = ?1", [sess])?;
+        c.execute("DELETE FROM session_usage WHERE sess = ?1", [sess])?;
+
         // Attachment links reference events, so clear this session's links
         // and metadata before deleting the event rows they point at.
         c.execute(

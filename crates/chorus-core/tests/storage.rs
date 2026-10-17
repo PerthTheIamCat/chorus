@@ -638,3 +638,54 @@ fn session_usage_keeps_last_context_and_sums_cost() {
         Some("abc123")
     );
 }
+
+#[test]
+fn deleting_parent_session_cascades_subagents_and_children() {
+    let store = setup();
+    let c = store.conn();
+    let parent = ledger::new_session(c, "parent", "/tmp").unwrap();
+    let sub = chorus_core::agent_control::spawn_agent(
+        c,
+        Some(parent),
+        "reviewer",
+        "review task",
+        false,
+        "/tmp",
+    )
+    .unwrap();
+    let child_sess = sub.child_sess.unwrap();
+
+    // Verify subagent and child session exist
+    let subs = chorus_core::agent_control::list_subagents(c, Some(parent)).unwrap();
+    assert_eq!(subs.len(), 1);
+    let child_exists: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM session WHERE id = ?1",
+            [child_sess],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(child_exists, 1);
+
+    // Deleting parent session should delete parent, child session, and subagent record
+    ledger::delete_session(c, parent).unwrap();
+
+    let parent_exists: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM session WHERE id = ?1",
+            [parent],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(parent_exists, 0);
+    let child_exists2: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM session WHERE id = ?1",
+            [child_sess],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(child_exists2, 0);
+    let subs2 = chorus_core::agent_control::list_subagents(c, Some(parent)).unwrap();
+    assert_eq!(subs2.len(), 0);
+}

@@ -19,56 +19,6 @@ struct OrchestratorView: View {
     @State private var startWithAIMode = false
     @State private var roleToDelete: Engine.AgentRole? = nil
 
-    private struct SubagentLedgerPayload: Decodable {
-        let event: String
-        let sessionId: String
-        let parentSessionId: String?
-        let name: String?
-        let task: String?
-        let state: String?
-        let message: String?
-    }
-
-    private struct SubagentItem: Identifiable {
-        let id: String
-        let parentSessionId: String
-        var name: String
-        var task: String
-        let actor: String
-        let seq: Int64
-        var state: String?
-        var message: String
-    }
-
-    private var subagentItems: [SubagentItem] {
-        var items: [String: SubagentItem] = [:]
-        for ev in engine.events where ev.kind == "subagent" || ev.kind == "tool_call" || ev.kind == "tool_result" {
-            guard let data = ev.body.data(using: .utf8),
-                  let payload = try? JSONDecoder().decode(SubagentLedgerPayload.self, from: data) else {
-                continue
-            }
-            if var existing = items[payload.sessionId] {
-                if let name = payload.name { existing.name = name }
-                if let task = payload.task { existing.task = task }
-                if let state = payload.state { existing.state = state }
-                if let msg = payload.message { existing.message = msg }
-                items[payload.sessionId] = existing
-            } else {
-                items[payload.sessionId] = SubagentItem(
-                    id: payload.sessionId,
-                    parentSessionId: payload.parentSessionId ?? "",
-                    name: payload.name ?? payload.sessionId,
-                    task: payload.task ?? "",
-                    actor: ev.actor,
-                    seq: ev.seq,
-                    state: payload.state,
-                    message: payload.message ?? ""
-                )
-            }
-        }
-        return items.values.sorted { $0.seq < $1.seq }
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -116,9 +66,6 @@ struct OrchestratorView: View {
 
                     // Parallel Worktrees Section
                     worktreesSection
-
-                    // Subagents Hierarchy Section
-                    subagentsHierarchySection
 
                     // Available Roles Section
                     agentRolesSection
@@ -299,114 +246,6 @@ struct OrchestratorView: View {
                         .cornerRadius(6)
                     }
                     .buttonStyle(.plain)
-                }
-            }
-        }
-    }
-
-    // MARK: - Subagents Hierarchy Section
-    private var subagentsHierarchySection: some View {
-        let items = subagentItems
-        let calls: [(call: LedgerEvent, result: LedgerEvent?)] = engine.events.enumerated().compactMap { i, e in
-            guard e.kind == "tool_call", isSubagentCall(e.body) else { return nil }
-            let r = engine.events[(i + 1)...].first { $0.kind == "tool_result" }
-            return (e, r)
-        }
-
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: "network")
-                    .foregroundColor(.accentColor)
-                    .font(.system(size: 11))
-                Text("SUBAGENT HIERARCHY")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.secondary)
-                Spacer()
-                Text("\(items.isEmpty ? calls.count : items.count) NODES")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundColor(.secondary)
-            }
-
-            if items.isEmpty && calls.isEmpty {
-                VStack(spacing: 6) {
-                    Image(systemName: "point.3.connected.trianglepath.dotted")
-                        .foregroundColor(.secondary)
-                        .font(.system(size: 20))
-                    Text("ยังไม่มีการเรียกงานย่อยในเทิร์นปัจจุบัน")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                    Text("เมื่อ agent เรียกใช้ Task หรือ subagent ผลลัพธ์และการประสานงานจะปรากฏที่นี่")
-                        .font(.system(size: 9.5))
-                        .foregroundColor(.secondary.opacity(0.8))
-                        .multilineTextAlignment(.center)
-                }
-                .padding(14)
-                .frame(maxWidth: .infinity)
-                .background(Color.primary.opacity(0.02))
-                .cornerRadius(6)
-            } else if !items.isEmpty {
-                ForEach(items) { item in
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 6) {
-                            Image(systemName: item.state == "completed" ? "checkmark.circle.fill" : item.state == "failed" ? "xmark.circle.fill" : "hourglass")
-                                .foregroundColor(item.state == "completed" ? .green : item.state == "failed" ? .red : .orange)
-                                .font(.system(size: 11))
-
-                            Text(item.name)
-                                .font(.system(size: 11, weight: .bold))
-
-                            Spacer()
-
-                            Text(item.state ?? "กำลังทำงาน")
-                                .font(.system(size: 9, weight: .semibold))
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(Color.primary.opacity(0.08))
-                                .cornerRadius(3)
-                        }
-
-                        if !item.task.isEmpty {
-                            Text(item.task)
-                                .font(.system(size: 10.5))
-                                .foregroundColor(.secondary)
-                        }
-
-                        if !item.message.isEmpty {
-                            DisclosureGroup("ดูผลลัพธ์และ Brief สรุป") {
-                                Text(item.message)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundColor(.primary)
-                                    .textSelection(.enabled)
-                                    .padding(.top, 4)
-                            }
-                            .font(.system(size: 10))
-                        }
-                    }
-                    .padding(8)
-                    .background(Color.primary.opacity(0.04))
-                    .cornerRadius(6)
-                }
-            } else {
-                ForEach(calls, id: \.call.seq) { c in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 6) {
-                            Image(systemName: c.result == nil ? "hourglass" : "checkmark.circle.fill")
-                                .foregroundColor(c.result == nil ? .orange : .green)
-                                .font(.system(size: 11))
-                            Text(c.call.actor)
-                                .font(.system(size: 11, weight: .bold))
-                            Spacer()
-                            Text("#\(c.call.seq)")
-                                .font(.system(size: 9, design: .monospaced))
-                                .foregroundColor(.secondary)
-                        }
-                        Text(c.call.body)
-                            .font(.system(size: 10))
-                            .lineLimit(2)
-                    }
-                    .padding(8)
-                    .background(Color.primary.opacity(0.04))
-                    .cornerRadius(6)
                 }
             }
         }
@@ -707,10 +546,6 @@ struct OrchestratorView: View {
         let url = URL(fileURLWithPath: path)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         NSWorkspace.shared.open(url)
-    }
-
-    private func isSubagentCall(_ body: String) -> Bool {
-        body.contains("\"subagent\"") || body.contains("\"Task\"") || body.contains("chorus_spawn_agent")
     }
 }
 
