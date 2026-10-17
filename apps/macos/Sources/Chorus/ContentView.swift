@@ -3520,6 +3520,26 @@ struct DiffHunk: Identifiable {
     }
 
     var patch: String { preamble + header + "\n" + lines.joined(separator: "\n") + "\n" }
+
+    /// Compute line number within the file for a given line index in the hunk (1-based).
+    func fileLineNumber(for lineIndex: Int) -> Int {
+        let parts = header.components(separatedBy: "@@")
+        guard parts.count >= 2 else { return lineIndex + 1 }
+        let spec = parts[1].trimmingCharacters(in: .whitespaces)
+        guard let plusRange = spec.range(of: "+") else { return lineIndex + 1 }
+        let afterPlus = spec[plusRange.upperBound...]
+        let countPart = afterPlus.split(separator: " ").first?.split(separator: ",").first
+        guard let startLine = countPart.flatMap({ Int($0) }) else { return lineIndex + 1 }
+
+        var currentNewLine = startLine
+        for i in 0..<min(lineIndex, lines.count) {
+            let l = lines[i]
+            if !l.hasPrefix("-") {
+                currentNewLine += 1
+            }
+        }
+        return currentNewLine
+    }
 }
 
 func parseHunks(_ diff: String) -> [DiffHunk] {

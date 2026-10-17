@@ -549,19 +549,67 @@ final class Engine: ObservableObject {
         if let top = fresh.last?.seq { lastSeq = max(lastSeq, top) }
     }
 
+    @Published var diffScope: String = "session" {
+        didSet { scheduleLiveDiff() }
+    }
+    @Published var showChorusWrittenFiles: Bool = false {
+        didSet { scheduleLiveDiff() }
+    }
+
+    private struct MarkReviewedResult: Codable {
+        let ok: Bool?
+        let base: String?
+    }
+
+    private struct CheckUserCommitResult: Codable {
+        let ok: Bool?
+        let moved: Bool?
+    }
+
+    func markReviewed(completion: @escaping (String?) -> Void = { _ in }) {
+        guard let h = handle else { completion(nil); return }
+        queue.async { [weak self] in
+            let json = Self.string(from: chorus_mark_reviewed(h.raw))
+            let r = Self.decode(MarkReviewedResult.self, json)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.scheduleLiveDiff()
+                completion(r?.base)
+            }
+        }
+    }
+
+    func checkUserCommit() {
+        guard let h = handle else { return }
+        queue.async { [weak self] in
+            let json = Self.string(from: chorus_check_user_commit(h.raw))
+            let r = Self.decode(CheckUserCommitResult.self, json)
+            if r?.moved == true {
+                DispatchQueue.main.async {
+                    self?.scheduleLiveDiff()
+                }
+            }
+        }
+    }
+
     private var liveDiffPending = false
     private var liveDiffAt = Date.distantPast
     /// Recompute the diff on the read-only handle, at most once a second
     /// (it shells out to git). Feeds the Changes pane and the tree badges.
-    private func scheduleLiveDiff() {
+    func scheduleLiveDiff() {
         guard !liveDiffPending, reader != nil else { return }
         liveDiffPending = true
         let wait = max(0, 1 - Date().timeIntervalSince(liveDiffAt))
         DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
             guard let self, let r = self.reader else { self?.liveDiffPending = false; return }
             let sid = self.sessionID
+            let scope = self.diffScope
+            let incProjected = self.showChorusWrittenFiles ? 1 : 0
             self.readQueue.async { [weak self] in
-                let diff = Self.decode(DiffResult.self, Self.string(from: chorus_reader_working_diff(r.raw)))?.diff
+                let json = scope.withCString { cScope in
+                    Self.string(from: chorus_reader_working_diff_scoped(r.raw, cScope, Int32(incProjected)))
+                }
+                let diff = Self.decode(DiffResult.self, json)?.diff
                 let hunks = diff.map(parseHunks)
                 DispatchQueue.main.async {
                     guard let self else { return }

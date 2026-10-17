@@ -1,6 +1,6 @@
 # Review baseline and diff rewrite
 
-Status: ready-for-agent
+Status: resolved
 Blocked by: 02, 03
 Parent: ../spec.md
 Decided in: [Review baseline](../../chorus-ux-overhaul/issues/13-review-baseline.md)

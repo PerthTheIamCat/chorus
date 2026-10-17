@@ -186,6 +186,22 @@ char *chorus_reader_usage(const ChorusReader *r);
 /* Same JSON as chorus_working_diff, staged in a private index. */
 char *chorus_reader_working_diff(const ChorusReader *r);
 
+/* Mark reviewed: snapshot shadow repo as new baseline. JSON: {"ok":true,"base":"..."} */
+char *chorus_mark_reviewed(ChorusEngine *e);
+
+/* Check if user committed between turns; advances baseline. JSON: {"ok":true,"moved":bool} */
+char *chorus_check_user_commit(ChorusEngine *e);
+
+/* Scoped working diff: scope = session|latest_turn|current_agent, include_projected (0/1). */
+char *chorus_working_diff_scoped(const ChorusEngine *e, const char *scope, int include_projected);
+char *chorus_reader_working_diff_scoped(const ChorusReader *r, const char *scope, int include_projected);
+
+/* File diff stats report: fast numstat path. JSON: {"ok":true,"report":{...}} */
+char *chorus_reader_diff_stats(const ChorusReader *r, const char *scope, int include_projected);
+
+/* Single file diff. JSON: {"ok":true,"diff":"..."} */
+char *chorus_reader_file_diff(const ChorusReader *r, const char *scope, const char *path);
+
 char *chorus_snapshot(const ChorusEngine *e, const char *message);
 
 /* Roll the workspace back to `sha` (NULL/"" = the session base).

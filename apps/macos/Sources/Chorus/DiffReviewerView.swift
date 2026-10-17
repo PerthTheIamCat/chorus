@@ -12,9 +12,10 @@ struct DiffReviewerView: View {
     var onSendSteeringPrompt: (String) -> Void
 
     @State private var viewMode: ViewMode = .unified
-    @State private var scope: DiffScope = .session
     @State private var selectedFile: String = ""
     @State private var pendingComments: [Engine.ReviewComment] = []
+    @State private var rejectedHunkIDs: Set<String> = []
+    @State private var showAllDiff: Bool = false
     /// (hunk index in `shown`, 1-based line in that hunk).
     @State private var commentingAt: RowKey? = nil
     /// What the list draws: the selected file's hunks, flattened into one
@@ -36,8 +37,27 @@ struct DiffReviewerView: View {
 
     enum DiffScope: String, CaseIterable {
         case latestTurn = "Latest Turn"
-        case currentAgent = "Current Agent"
+        case currentAgent = "This Agent"
         case session = "Full Session"
+        case childWorktree = "Child Worktree"
+
+        var scopeKey: String {
+            switch self {
+            case .latestTurn: return "latest_turn"
+            case .currentAgent: return "current_agent"
+            case .session: return "session"
+            case .childWorktree: return "worktree"
+            }
+        }
+
+        init(scopeKey: String) {
+            switch scopeKey {
+            case "latest_turn": self = .latestTurn
+            case "current_agent": self = .currentAgent
+            case "worktree": self = .childWorktree
+            default: self = .session
+            }
+        }
     }
 
     struct RowKey: Hashable {
@@ -92,7 +112,10 @@ struct DiffReviewerView: View {
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 160)
 
-                    Picker("", selection: $scope) {
+                    Picker("", selection: Binding(
+                        get: { DiffScope(scopeKey: engine.diffScope) },
+                        set: { engine.diffScope = $0.scopeKey }
+                    )) {
                         ForEach(DiffScope.allCases, id: \.self) { sc in
                             Text(sc.rawValue).tag(sc)
                         }
@@ -107,7 +130,7 @@ struct DiffReviewerView: View {
                     }
                 }
 
-                // Row 2: Diff Stats Badge + AST Analysis + Verification Loop
+                // Row 2: Diff Stats Badge + Mark Reviewed + Chorus Files + AST Analysis + Verification Loop
                 HStack(spacing: 8) {
                     let totalAdd = allHunks.reduce(0) { $0 + $1.addCount }
                     let totalDel = allHunks.reduce(0) { $0 + $1.delCount }
@@ -123,6 +146,28 @@ struct DiffReviewerView: View {
                     .padding(.vertical, 2)
                     .background(Color.primary.opacity(0.04))
                     .cornerRadius(4)
+
+                    Button {
+                        engine.markReviewed()
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "checkmark.seal")
+                                .font(.system(size: 10))
+                            Text("ตรวจแล้ว")
+                                .font(.system(size: 9.5))
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .help("บันทึกสถานะปัจจุบันเป็น baseline ใหม่สำหรับการรีวิว (ไม่แตะ git ของคุณ)")
+
+                    Toggle(isOn: $engine.showChorusWrittenFiles) {
+                        Image(systemName: "doc.badge.gearshape")
+                            .font(.system(size: 10))
+                    }
+                    .toggleStyle(.button)
+                    .controlSize(.mini)
+                    .help(engine.showChorusWrittenFiles ? "ซ่อนไฟล์ Chorus (CLAUDE.md, AGENTS.md ฯลฯ)" : "แสดงไฟล์ Chorus (CLAUDE.md, AGENTS.md ฯลฯ)")
 
                     Spacer()
 
@@ -204,17 +249,40 @@ struct DiffReviewerView: View {
 
             // Diff Content Area
             if !rows.isEmpty {
-                ScrollView([.vertical, .horizontal]) {
-                    // One lazy row per header/line: a hunk with thousands of
-                    // lines no longer builds every line to show the first few.
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(rows) { row in
-                            rowView(row)
+                if !showAllDiff && (filesWithDiffs.count > 300 || rows.count > 5000) {
+                    VStack(spacing: 12) {
+                        Spacer()
+                        Image(systemName: "doc.text.magnifyingglass")
+                            .font(.system(size: 28))
+                            .foregroundColor(.secondary)
+                        Text("Diff มีขนาดใหญ่มาก (\(filesWithDiffs.count) ไฟล์, \(rows.count) บรรทัด)")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("เพื่อความลื่นไหล จึงย่อการแสดงผลไว้ คุณสามารถเลือกดูทีละไฟล์จากเมนูด้านบน หรือกดแสดงทั้งหมด")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 360)
+                        Button("แสดงทั้งหมด (\(rows.count) บรรทัด)") {
+                            showAllDiff = true
                         }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        Spacer()
                     }
-                    .padding(8)
+                    .padding(20)
+                } else {
+                    ScrollView([.vertical, .horizontal]) {
+                        // One lazy row per header/line: a hunk with thousands of
+                        // lines no longer builds every line to show the first few.
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(rows) { row in
+                                rowView(row)
+                            }
+                        }
+                        .padding(8)
+                    }
+                    .chorusScrollIndicators()
                 }
-                .chorusScrollIndicators()
             } else {
                 VStack(spacing: 8) {
                     Spacer()
@@ -229,38 +297,70 @@ struct DiffReviewerView: View {
             }
 
             // Floating Review Action Bar (Bottom)
-            if !pendingComments.isEmpty {
+            if !pendingComments.isEmpty || !rejectedHunkIDs.isEmpty {
                 Divider()
                 HStack(spacing: 10) {
-                    Image(systemName: "bubble.left.and.exclamationmark.bubble.right.fill")
-                        .foregroundColor(.orange)
-                        .font(.system(size: 12))
-
-                    Text("\(pendingComments.count) คอมเมนต์รีวิวที่ค้างอยู่")
-                        .font(.system(size: 11, weight: .medium))
-
-                    Spacer()
-
-                    Button("ล้าง") {
-                        engine.clearReviewComments()
-                        refreshComments()
-                    }
-                    .font(.system(size: 11))
-
-                    Button(action: sendToAgent) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "paperplane.fill")
-                                .font(.system(size: 10))
-                            Text("Send to Agent (⇧⌘↩)")
-                                .font(.system(size: 11, weight: .bold))
+                    if !rejectedHunkIDs.isEmpty {
+                        Button(action: {
+                            let patches = allHunks.filter { rejectedHunkIDs.contains($0.id) }.map { $0.patch }.joined()
+                            if !patches.isEmpty {
+                                engine.rejectHunks(patches)
+                                rejectedHunkIDs.removeAll()
+                            }
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.uturn.backward")
+                                    .font(.system(size: 10))
+                                Text("ตีกลับ \(rejectedHunkIDs.count) ก้อนที่เลือก")
+                                    .font(.system(size: 11, weight: .semibold))
+                            }
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Color.red)
+                            .cornerRadius(5)
                         }
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(Color.blue)
-                        .cornerRadius(5)
+                        .buttonStyle(.plain)
+
+                        Button("ยกเลิก") {
+                            rejectedHunkIDs.removeAll()
+                        }
+                        .font(.system(size: 11))
                     }
-                    .buttonStyle(.plain)
+
+                    if !pendingComments.isEmpty {
+                        Image(systemName: "bubble.left.and.exclamationmark.bubble.right.fill")
+                            .foregroundColor(.orange)
+                            .font(.system(size: 12))
+
+                        Text("\(pendingComments.count) คอมเมนต์รีวิวที่ค้างอยู่")
+                            .font(.system(size: 11, weight: .medium))
+
+                        Spacer()
+
+                        Button("ล้าง") {
+                            engine.clearReviewComments()
+                            refreshComments()
+                        }
+                        .font(.system(size: 11))
+
+                        Button(action: sendToAgent) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "paperplane.fill")
+                                    .font(.system(size: 10))
+                                Text("Send to Agent (⇧⌘↩)")
+                                    .font(.system(size: 11, weight: .bold))
+                            }
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Color.blue)
+                            .cornerRadius(5)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        Spacer()
+                    }
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
@@ -268,6 +368,7 @@ struct DiffReviewerView: View {
             }
         }
         .onAppear {
+            engine.checkUserCommit()
             refreshComments()
             if let first = filesWithDiffs.first {
                 selectedFile = first
@@ -285,13 +386,14 @@ struct DiffReviewerView: View {
     private func rowView(_ row: Row) -> some View {
         let hunk = shown[row.hunk]
         if let li = row.line {
-            let key = RowKey(hunk: row.hunk, line: li + 1)
+            let fileLine = hunk.fileLineNumber(for: li)
+            let key = RowKey(hunk: row.hunk, line: fileLine)
             Group {
                 if viewMode == .unified {
-                    UnifiedLineRow(line: hunk.lines[li], lineNum: li + 1,
+                    UnifiedLineRow(line: hunk.lines[li], lineNum: fileLine,
                                    onAddComment: { _ in commentingAt = key })
                 } else {
-                    SplitLineRow(line: hunk.lines[li], lineNum: li + 1,
+                    SplitLineRow(line: hunk.lines[li], lineNum: fileLine,
                                  onAddComment: { _ in commentingAt = key })
                 }
             }
@@ -316,6 +418,29 @@ struct DiffReviewerView: View {
                     .font(.system(size: 9.5, design: .monospaced))
                     .foregroundColor(.secondary)
                 Spacer()
+
+                let isRejected = rejectedHunkIDs.contains(hunk.id)
+                Button(action: {
+                    if isRejected {
+                        rejectedHunkIDs.remove(hunk.id)
+                    } else {
+                        rejectedHunkIDs.insert(hunk.id)
+                    }
+                }) {
+                    HStack(spacing: 3) {
+                        Image(systemName: isRejected ? "arrow.uturn.backward.circle.fill" : "hand.thumbsdown")
+                            .font(.system(size: 10))
+                        Text(isRejected ? "จะตีกลับ" : "ตีกลับ")
+                            .font(.system(size: 10))
+                    }
+                    .foregroundColor(isRejected ? .red : .secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(isRejected ? Color.red.opacity(0.12) : Color.clear)
+                    .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .help("เลือกก้อนนี้เพื่อตีกลับ (Reverse apply)")
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 4)

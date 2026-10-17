@@ -12,8 +12,65 @@
 //! methods return an error (not a panic) when `git` is missing.
 
 use crate::{ChorusError, Result};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Excludes for Chorus-projected files (hidden by default unless toggle is on).
+pub const PROJECTED_EXCLUDES: &[&str] = &[
+    ":(exclude,top)CLAUDE.md",
+    ":(exclude,top)AGENTS.md",
+    ":(exclude,top)GEMINI.md",
+    ":(exclude,top).claude/skills",
+    ":(exclude,top).claude/skills/**",
+];
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileDiffStat {
+    pub path: String,
+    pub additions: usize,
+    pub deletions: usize,
+    pub is_binary: bool,
+    pub is_lockfile: bool,
+    pub is_projected: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiffSummaryReport {
+    pub files: Vec<FileDiffStat>,
+    pub total_additions: usize,
+    pub total_deletions: usize,
+    pub total_files: usize,
+    pub is_collapsed: bool,
+}
+
+pub fn is_lockfile(path: &str) -> bool {
+    let filename = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path);
+    matches!(
+        filename,
+        "Cargo.lock"
+            | "package-lock.json"
+            | "pnpm-lock.yaml"
+            | "yarn.lock"
+            | "bun.lockb"
+            | "Package.resolved"
+            | "poetry.lock"
+            | "composer.lock"
+            | "Gemfile.lock"
+    )
+}
+
+pub fn is_projected_file(path: &str) -> bool {
+    let p = path.trim_start_matches("./");
+    p == "CLAUDE.md"
+        || p == "AGENTS.md"
+        || p == "GEMINI.md"
+        || p.starts_with(".claude/skills/")
+        || p == ".claude/skills"
+}
 
 /// Patterns the shadow repo always ignores, on top of the user's
 /// `.gitignore`. Covers our own state and the usual build/cache noise so a
@@ -132,39 +189,36 @@ impl Checkpoint {
         self.git(&["diff", "--staged", &base, "--"])
     }
 
-    /// [`diff_since`] minus the agent files Chorus writes itself
-    /// (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`). What a person reviews, and
-    /// what a handoff brief carries: the agents' work, not our projection.
+    /// [`diff_since`] minus projected files unless `include_projected` is true.
     pub fn diff_since_user(&self, since: &str) -> Result<String> {
+        self.diff_since_user_opts(since, false)
+    }
+
+    pub fn diff_since_user_opts(&self, since: &str, include_projected: bool) -> Result<String> {
         self.git(&["add", "-A"])?;
         let base = if since.trim().is_empty() {
             "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
         } else {
             since.trim().to_string()
         };
-        self.git(&[
-            "diff",
-            "--staged",
-            &base,
-            "--",
-            ".",
-            ":(exclude,top)CLAUDE.md",
-            ":(exclude,top)AGENTS.md",
-            ":(exclude,top)GEMINI.md",
-        ])
+        let mut args = vec!["diff", "--staged", &base, "--", "."];
+        if !include_projected {
+            args.extend_from_slice(PROJECTED_EXCLUDES);
+        }
+        self.git(&args)
     }
 
-    /// [`diff_since_user`] without writing the shared index: stages into a
-    /// private index file seeded from the real one (so it stays stat-only).
-    ///
-    /// The live diff pane runs this while a turn is still going. The turn
-    /// takes snapshots through the shared index, and two `git add -A` on one
-    /// index race for `index.lock` — the loser fails, and if the loser is the
-    /// turn's snapshot, the read-only revert has nothing to restore to.
+    /// [`diff_since_user`] without writing the shared index.
     pub fn peek_diff_since_user(&self, since: &str) -> Result<String> {
+        self.peek_diff_since_user_opts(since, false)
+    }
+
+    pub fn peek_diff_since_user_opts(
+        &self,
+        since: &str,
+        include_projected: bool,
+    ) -> Result<String> {
         let private = self.git_dir.join("index.peek");
-        // Atomic renames on the writer side mean a copy is the old index or
-        // the new one, never a torn one. Missing is fine: git builds one.
         let _ = std::fs::copy(self.git_dir.join("index"), &private);
         let index = Some(private.as_path());
         self.git_with(&["add", "-A"], index)?;
@@ -173,19 +227,132 @@ impl Checkpoint {
         } else {
             since.trim().to_string()
         };
-        self.git_with(
-            &[
-                "diff",
-                "--staged",
-                &base,
-                "--",
-                ".",
-                ":(exclude,top)CLAUDE.md",
-                ":(exclude,top)AGENTS.md",
-                ":(exclude,top)GEMINI.md",
-            ],
-            index,
-        )
+        let mut args = vec!["diff", "--staged", &base, "--", "."];
+        if !include_projected {
+            args.extend_from_slice(PROJECTED_EXCLUDES);
+        }
+        self.git_with(&args, index)
+    }
+
+    /// Single-file diff against `since`.
+    pub fn file_diff(&self, since: &str, path: &str) -> Result<String> {
+        self.git(&["add", "-A"])?;
+        let base = if since.trim().is_empty() {
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
+        } else {
+            since.trim().to_string()
+        };
+        self.git(&["diff", "--staged", &base, "--", path])
+    }
+
+    pub fn peek_file_diff(&self, since: &str, path: &str) -> Result<String> {
+        let private = self.git_dir.join("index.peek");
+        let _ = std::fs::copy(self.git_dir.join("index"), &private);
+        let index = Some(private.as_path());
+        self.git_with(&["add", "-A"], index)?;
+        let base = if since.trim().is_empty() {
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
+        } else {
+            since.trim().to_string()
+        };
+        self.git_with(&["diff", "--staged", &base, "--", path], index)
+    }
+
+    /// Compute file-level stats via `git diff --numstat` fast path.
+    pub fn diff_file_stats(
+        &self,
+        since: &str,
+        include_projected: bool,
+    ) -> Result<DiffSummaryReport> {
+        self.git(&["add", "-A"])?;
+        let base = if since.trim().is_empty() {
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
+        } else {
+            since.trim().to_string()
+        };
+        let mut args = vec!["diff", "--numstat", "--staged", &base, "--", "."];
+        if !include_projected {
+            args.extend_from_slice(PROJECTED_EXCLUDES);
+        }
+        let out = self.git(&args)?;
+        Ok(Self::parse_numstat(&out))
+    }
+
+    pub fn peek_diff_file_stats(
+        &self,
+        since: &str,
+        include_projected: bool,
+    ) -> Result<DiffSummaryReport> {
+        let private = self.git_dir.join("index.peek");
+        let _ = std::fs::copy(self.git_dir.join("index"), &private);
+        let index = Some(private.as_path());
+        self.git_with(&["add", "-A"], index)?;
+        let base = if since.trim().is_empty() {
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
+        } else {
+            since.trim().to_string()
+        };
+        let mut args = vec!["diff", "--numstat", "--staged", &base, "--", "."];
+        if !include_projected {
+            args.extend_from_slice(PROJECTED_EXCLUDES);
+        }
+        let out = self.git_with(&args, index)?;
+        Ok(Self::parse_numstat(&out))
+    }
+
+    fn parse_numstat(numstat_output: &str) -> DiffSummaryReport {
+        let mut files = Vec::new();
+        let mut total_additions = 0;
+        let mut total_deletions = 0;
+
+        for line in numstat_output.lines() {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let add_str = parts[0];
+            let del_str = parts[1];
+            let path = parts[2].trim().to_string();
+
+            let is_binary = add_str == "-" || del_str == "-";
+            let additions = if is_binary {
+                0
+            } else {
+                add_str.parse::<usize>().unwrap_or(0)
+            };
+            let deletions = if is_binary {
+                0
+            } else {
+                del_str.parse::<usize>().unwrap_or(0)
+            };
+
+            total_additions += additions;
+            total_deletions += deletions;
+
+            let lock = is_lockfile(&path);
+            let proj = is_projected_file(&path);
+
+            files.push(FileDiffStat {
+                path,
+                additions,
+                deletions,
+                is_binary,
+                is_lockfile: lock,
+                is_projected: proj,
+            });
+        }
+
+        let total_files = files.len();
+        let total_lines = total_additions + total_deletions;
+        let is_collapsed = total_files > 300 || total_lines > 5000;
+
+        DiffSummaryReport {
+            files,
+            total_additions,
+            total_deletions,
+            total_files,
+            is_collapsed,
+        }
     }
 
     /// Which files changed since `since`, without staging anything.

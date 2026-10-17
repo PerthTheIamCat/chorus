@@ -31,11 +31,15 @@ mod composer;
 /// `project` must point to a valid NUL-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_catalog_list_json(project: *const c_char) -> *mut c_char {
-    let Some(project) = borrow(project) else { return err("project must be valid UTF-8") };
+    let Some(project) = borrow(project) else {
+        return err("project must be valid UTF-8");
+    };
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
         let state = integration_catalog::load_state().map_err(|e| e.to_string())?;
-        let enabled = integration_catalog::enabled_for(Path::new(project)).map_err(|e| e.to_string())?;
-        let enabled: std::collections::BTreeSet<&str> = enabled.iter().map(|entry| entry.id).collect();
+        let enabled =
+            integration_catalog::enabled_for(Path::new(project)).map_err(|e| e.to_string())?;
+        let enabled: std::collections::BTreeSet<&str> =
+            enabled.iter().map(|entry| entry.id).collect();
         let entries: Vec<_> = integration_catalog::catalog().iter().map(|entry| {
             let installed = integration_catalog::current_record(entry, &state);
             let installed = installed.as_ref();
@@ -69,9 +73,12 @@ pub unsafe extern "C" fn chorus_catalog_list_json(project: *const c_char) -> *mu
 /// All pointers must point to valid NUL-terminated UTF-8 strings.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_catalog_action_json(
-    project: *const c_char, id: *const c_char, action: *const c_char,
+    project: *const c_char,
+    id: *const c_char,
+    action: *const c_char,
 ) -> *mut c_char {
-    let (Some(project), Some(id), Some(action)) = (borrow(project), borrow(id), borrow(action)) else {
+    let (Some(project), Some(id), Some(action)) = (borrow(project), borrow(id), borrow(action))
+    else {
         return err("catalog action arguments must be valid UTF-8");
     };
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
@@ -91,12 +98,17 @@ pub unsafe extern "C" fn chorus_catalog_action_json(
 /// All pointers must point to valid NUL-terminated UTF-8 strings.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_catalog_plan_json(
-    project: *const c_char, id: *const c_char, action: *const c_char,
+    project: *const c_char,
+    id: *const c_char,
+    action: *const c_char,
 ) -> *mut c_char {
-    let (Some(project), Some(id), Some(action)) = (borrow(project), borrow(id), borrow(action)) else {
+    let (Some(project), Some(id), Some(action)) = (borrow(project), borrow(id), borrow(action))
+    else {
         return err("catalog plan arguments must be valid UTF-8");
     };
-    match catch_unwind(AssertUnwindSafe(|| integration_catalog::plan(id, action, Path::new(project)))) {
+    match catch_unwind(AssertUnwindSafe(|| {
+        integration_catalog::plan(id, action, Path::new(project))
+    })) {
         Ok(Ok(plan)) => out(serde_json::json!({"ok":true,"plan":plan}).to_string()),
         Ok(Err(error)) => err(error),
         Err(_) => err("panic in catalog plan"),
@@ -108,11 +120,16 @@ pub unsafe extern "C" fn chorus_catalog_plan_json(
 /// # Safety
 /// All pointers must point to valid NUL-terminated UTF-8 strings.
 #[no_mangle]
-pub unsafe extern "C" fn chorus_catalog_dashboard_json(project: *const c_char, id: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn chorus_catalog_dashboard_json(
+    project: *const c_char,
+    id: *const c_char,
+) -> *mut c_char {
     let (Some(project), Some(id)) = (borrow(project), borrow(id)) else {
         return err("dashboard arguments must be valid UTF-8");
     };
-    match catch_unwind(AssertUnwindSafe(|| integration_catalog::dashboard(id, Path::new(project)))) {
+    match catch_unwind(AssertUnwindSafe(|| {
+        integration_catalog::dashboard(id, Path::new(project))
+    })) {
         Ok(Ok(d)) => out(serde_json::json!({"ok":true,"dashboard":d}).to_string()),
         Ok(Err(error)) => err(error),
         Err(_) => err("panic in catalog dashboard"),
@@ -125,11 +142,17 @@ pub unsafe extern "C" fn chorus_catalog_dashboard_json(project: *const c_char, i
 /// # Safety
 /// All pointers must point to valid NUL-terminated UTF-8 strings.
 #[no_mangle]
-pub unsafe extern "C" fn chorus_catalog_run_json(project: *const c_char, id: *const c_char, key: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn chorus_catalog_run_json(
+    project: *const c_char,
+    id: *const c_char,
+    key: *const c_char,
+) -> *mut c_char {
     let (Some(project), Some(id), Some(key)) = (borrow(project), borrow(id), borrow(key)) else {
         return err("run arguments must be valid UTF-8");
     };
-    match catch_unwind(AssertUnwindSafe(|| integration_catalog::run_action(id, key, Path::new(project)))) {
+    match catch_unwind(AssertUnwindSafe(|| {
+        integration_catalog::run_action(id, key, Path::new(project))
+    })) {
         Ok(Ok(result)) => out(serde_json::json!({"ok":true,"result":result}).to_string()),
         Ok(Err(error)) => err(error),
         Err(_) => err("panic in catalog run"),
@@ -314,13 +337,18 @@ pub unsafe extern "C" fn chorus_model_manager_finalize_json(
     };
     match catch_unwind(AssertUnwindSafe(|| {
         let mgr = chorus_core::model_manager::ModelManager::new();
-        let spec = chorus_core::model_manager::ModelManager::find_spec(model_id)
-            .ok_or_else(|| chorus_core::error::ChorusError::Invalid(format!("unknown model id: {model_id}")))?;
+        let spec =
+            chorus_core::model_manager::ModelManager::find_spec(model_id).ok_or_else(|| {
+                chorus_core::error::ChorusError::Invalid(format!("unknown model id: {model_id}"))
+            })?;
         let path = mgr.finalize_download(std::path::Path::new(temp_path), &spec)?;
-        Ok::<_, chorus_core::error::ChorusError>(serde_json::json!({
-            "ok": true,
-            "path": path.to_string_lossy().to_string()
-        }).to_string())
+        Ok::<_, chorus_core::error::ChorusError>(
+            serde_json::json!({
+                "ok": true,
+                "path": path.to_string_lossy().to_string()
+            })
+            .to_string(),
+        )
     })) {
         Ok(Ok(json)) => out(json),
         Ok(Err(e)) => err(e.to_string()),
@@ -333,21 +361,24 @@ pub unsafe extern "C" fn chorus_model_manager_finalize_json(
 /// # Safety
 /// `model_id` must point to a valid UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn chorus_model_manager_delete_json(
-    model_id: *const c_char,
-) -> *mut c_char {
+pub unsafe extern "C" fn chorus_model_manager_delete_json(model_id: *const c_char) -> *mut c_char {
     let Some(model_id) = borrow(model_id) else {
         return err("model_id must be valid UTF-8");
     };
     match catch_unwind(AssertUnwindSafe(|| {
         let mgr = chorus_core::model_manager::ModelManager::new();
-        let spec = chorus_core::model_manager::ModelManager::find_spec(model_id)
-            .ok_or_else(|| chorus_core::error::ChorusError::Invalid(format!("unknown model id: {model_id}")))?;
+        let spec =
+            chorus_core::model_manager::ModelManager::find_spec(model_id).ok_or_else(|| {
+                chorus_core::error::ChorusError::Invalid(format!("unknown model id: {model_id}"))
+            })?;
         let deleted = mgr.delete_model(&spec)?;
-        Ok::<_, chorus_core::error::ChorusError>(serde_json::json!({
-            "ok": true,
-            "deleted": deleted
-        }).to_string())
+        Ok::<_, chorus_core::error::ChorusError>(
+            serde_json::json!({
+                "ok": true,
+                "deleted": deleted
+            })
+            .to_string(),
+        )
     })) {
         Ok(Ok(json)) => out(json),
         Ok(Err(e)) => err(e.to_string()),
@@ -846,7 +877,13 @@ struct EventJson {
 
 fn events_json(rows: Vec<chorus_cli::session::LabeledEvent>) -> Vec<EventJson> {
     rows.into_iter()
-        .map(|(seq, kind, actor, body, model_id)| EventJson { seq, kind, actor, body, model_id })
+        .map(|(seq, kind, actor, body, model_id)| EventJson {
+            seq,
+            kind,
+            actor,
+            body,
+            model_id,
+        })
         .collect()
 }
 
@@ -1084,7 +1121,10 @@ fn specs_from_csv(csv: &str) -> Vec<chorus_cli::session::AgentSpec> {
         .map(|name| {
             let provider = if name.contains("claude") {
                 "anthropic"
-            } else if name.contains("gemini") || name.contains("antigravity") || name.contains("agy") {
+            } else if name.contains("gemini")
+                || name.contains("antigravity")
+                || name.contains("agy")
+            {
                 "google"
             } else {
                 "openai"
@@ -1304,13 +1344,20 @@ pub extern "C" fn chorus_shutdown() {
 /// # Safety
 /// `e` must be NULL or a live engine; `request` a valid UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn chorus_monitor_json(e: *const ChorusEngine, request: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn chorus_monitor_json(
+    e: *const ChorusEngine,
+    request: *const c_char,
+) -> *mut c_char {
     let Some(request) = borrow(request) else {
         return err("request must be valid UTF-8");
     };
-    let protect: Vec<String> = e.as_ref().map(|e| vec![e.session.checkpoint_base().to_string()]).unwrap_or_default();
+    let protect: Vec<String> = e
+        .as_ref()
+        .map(|e| vec![e.session.checkpoint_base().to_string()])
+        .unwrap_or_default();
     match catch_unwind(AssertUnwindSafe(|| {
-        let req: chorus_daemon::monitor::Request = serde_json::from_str(request).map_err(|e| e.to_string())?;
+        let req: chorus_daemon::monitor::Request =
+            serde_json::from_str(request).map_err(|e| e.to_string())?;
         chorus_daemon::monitor::handle(req, &protect)
     })) {
         Ok(Ok(v)) => out(serde_json::json!({ "ok": true, "result": v }).to_string()),
@@ -1432,7 +1479,10 @@ pub unsafe extern "C" fn chorus_reader_free(r: *mut ChorusReader) {
 /// # Safety
 /// `r` must be a live reader.
 #[no_mangle]
-pub unsafe extern "C" fn chorus_reader_events_since(r: *const ChorusReader, after: i64) -> *mut c_char {
+pub unsafe extern "C" fn chorus_reader_events_since(
+    r: *const ChorusReader,
+    after: i64,
+) -> *mut c_char {
     let Some(r) = r.as_ref() else {
         return err("null reader");
     };
@@ -1471,6 +1521,113 @@ pub unsafe extern "C" fn chorus_reader_working_diff(r: *const ChorusReader) -> *
     };
     let diff = catch_unwind(AssertUnwindSafe(|| r.reader.working_diff())).unwrap_or_default();
     out(serde_json::json!({ "ok": true, "diff": diff }).to_string())
+}
+
+/// Mark reviewed: snapshot shadow repo as new baseline. JSON: {"ok":true,"base":"..."}
+#[no_mangle]
+pub unsafe extern "C" fn chorus_mark_reviewed(e: *mut ChorusEngine) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    match catch_unwind(AssertUnwindSafe(|| engine.session.mark_reviewed())) {
+        Ok(Ok(base)) => out(serde_json::json!({ "ok": true, "base": base }).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in mark_reviewed"),
+    }
+}
+
+/// Check if user committed between turns; advances baseline. JSON: {"ok":true,"moved":bool}
+#[no_mangle]
+pub unsafe extern "C" fn chorus_check_user_commit(e: *mut ChorusEngine) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    match catch_unwind(AssertUnwindSafe(|| engine.session.check_user_commit())) {
+        Ok(Ok(moved)) => out(serde_json::json!({ "ok": true, "moved": moved }).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in check_user_commit"),
+    }
+}
+
+/// Scoped working diff on engine handle.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_working_diff_scoped(
+    e: *const ChorusEngine,
+    scope: *const c_char,
+    include_projected: c_int,
+) -> *mut c_char {
+    let Some(engine) = e.as_ref() else {
+        return err("null engine");
+    };
+    let scope_str = borrow(scope).unwrap_or("session");
+    let inc = include_projected != 0;
+    let diff = catch_unwind(AssertUnwindSafe(|| {
+        engine.session.working_diff_scoped(scope_str, inc)
+    }))
+    .unwrap_or_default();
+    out(serde_json::json!({ "ok": true, "diff": diff }).to_string())
+}
+
+/// Scoped working diff on reader handle.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_reader_working_diff_scoped(
+    r: *const ChorusReader,
+    scope: *const c_char,
+    include_projected: c_int,
+) -> *mut c_char {
+    let Some(r) = r.as_ref() else {
+        return err("null reader");
+    };
+    let scope_str = borrow(scope).unwrap_or("session");
+    let inc = include_projected != 0;
+    let diff = catch_unwind(AssertUnwindSafe(|| {
+        r.reader.working_diff_scoped(scope_str, inc)
+    }))
+    .unwrap_or_default();
+    out(serde_json::json!({ "ok": true, "diff": diff }).to_string())
+}
+
+/// File diff stats report: fast numstat path on reader.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_reader_diff_stats(
+    r: *const ChorusReader,
+    scope: *const c_char,
+    include_projected: c_int,
+) -> *mut c_char {
+    let Some(r) = r.as_ref() else {
+        return err("null reader");
+    };
+    let scope_str = borrow(scope).unwrap_or("session");
+    let inc = include_projected != 0;
+    match catch_unwind(AssertUnwindSafe(|| r.reader.diff_stats(scope_str, inc))) {
+        Ok(Ok(report)) => out(serde_json::to_string(
+            &serde_json::json!({ "ok": true, "report": report }),
+        )
+        .unwrap()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in reader_diff_stats"),
+    }
+}
+
+/// Single file diff on reader.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_reader_file_diff(
+    r: *const ChorusReader,
+    scope: *const c_char,
+    path: *const c_char,
+) -> *mut c_char {
+    let Some(r) = r.as_ref() else {
+        return err("null reader");
+    };
+    let scope_str = borrow(scope).unwrap_or("session");
+    let Some(path_str) = borrow(path) else {
+        return err("null path");
+    };
+    match catch_unwind(AssertUnwindSafe(|| r.reader.file_diff(scope_str, path_str))) {
+        Ok(Ok(diff)) => out(serde_json::json!({ "ok": true, "diff": diff }).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in reader_file_diff"),
+    }
 }
 
 /// How many events still have no stored summary rungs. The shell polls this
@@ -2041,16 +2198,23 @@ pub unsafe extern "C" fn chorus_file_tree_json(
     focus_file: *const c_char,
     max_depth: c_int,
 ) -> *mut c_char {
-    let Some(cwd) = borrow(cwd) else { return err("cwd must be valid UTF-8"); };
+    let Some(cwd) = borrow(cwd) else {
+        return err("cwd must be valid UTF-8");
+    };
     let focus = borrow(focus_file);
-    let depth = if max_depth <= 0 { 6 } else { max_depth as usize };
+    let depth = if max_depth <= 0 {
+        6
+    } else {
+        max_depth as usize
+    };
 
     let r = catch_unwind(AssertUnwindSafe(|| {
         let tree = chorus_core::file_tree::build_file_tree(Path::new(cwd), focus, depth);
         serde_json::to_string(&serde_json::json!({
             "ok": true,
             "tree": tree
-        })).unwrap()
+        }))
+        .unwrap()
     }));
 
     match r {
@@ -2075,7 +2239,8 @@ pub unsafe extern "C" fn chorus_aligned_diff_json(
         serde_json::to_string(&serde_json::json!({
             "ok": true,
             "diff": diff
-        })).unwrap()
+        }))
+        .unwrap()
     }));
 
     match r {
@@ -2093,9 +2258,15 @@ pub unsafe extern "C" fn chorus_add_review_comment(
     comment: *const c_char,
     snippet: *const c_char,
 ) -> *mut c_char {
-    let Some(engine) = e.as_mut() else { return err("null engine"); };
-    let Some(path) = borrow(path) else { return err("path must be valid UTF-8"); };
-    let Some(comment) = borrow(comment) else { return err("comment must be valid UTF-8"); };
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let Some(path) = borrow(path) else {
+        return err("path must be valid UTF-8");
+    };
+    let Some(comment) = borrow(comment) else {
+        return err("comment must be valid UTF-8");
+    };
     let snippet = borrow(snippet);
 
     let session_id = engine.session.session_id();
@@ -2117,7 +2288,9 @@ pub unsafe extern "C" fn chorus_add_review_comment(
 /// List pending inline review comments for the current session.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_pending_review_comments(e: *mut ChorusEngine) -> *mut c_char {
-    let Some(engine) = e.as_mut() else { return err("null engine"); };
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
     let session_id = engine.session.session_id();
     let conn = engine.session.store().conn();
 
@@ -2130,7 +2303,9 @@ pub unsafe extern "C" fn chorus_pending_review_comments(e: *mut ChorusEngine) ->
 /// Clear pending review comments for the current session.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_clear_review_comments(e: *mut ChorusEngine) -> *mut c_char {
-    let Some(engine) = e.as_mut() else { return err("null engine"); };
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
     let session_id = engine.session.session_id();
     let conn = engine.session.store().conn();
 
@@ -2143,7 +2318,9 @@ pub unsafe extern "C" fn chorus_clear_review_comments(e: *mut ChorusEngine) -> *
 /// Generate agent steering prompt from pending review comments.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_review_steering_prompt(e: *mut ChorusEngine) -> *mut c_char {
-    let Some(engine) = e.as_mut() else { return err("null engine"); };
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
     let session_id = engine.session.session_id();
     let conn = engine.session.store().conn();
 
@@ -2162,7 +2339,9 @@ pub unsafe extern "C" fn chorus_create_worktree(
     cwd: *const c_char,
     role: *const c_char,
 ) -> *mut c_char {
-    let Some(cwd) = borrow(cwd) else { return err("cwd must be valid UTF-8"); };
+    let Some(cwd) = borrow(cwd) else {
+        return err("cwd must be valid UTF-8");
+    };
     let role = borrow(role).unwrap_or("agent");
 
     match chorus_core::worktrees::create_worktree(Path::new(cwd), role) {
@@ -2174,7 +2353,9 @@ pub unsafe extern "C" fn chorus_create_worktree(
 /// List active git worktrees.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_list_worktrees(cwd: *const c_char) -> *mut c_char {
-    let Some(cwd) = borrow(cwd) else { return err("cwd must be valid UTF-8"); };
+    let Some(cwd) = borrow(cwd) else {
+        return err("cwd must be valid UTF-8");
+    };
 
     match chorus_core::worktrees::list_active_worktrees(Path::new(cwd)) {
         Ok(worktrees) => out(serde_json::json!({"ok": true, "worktrees": worktrees}).to_string()),
@@ -2188,8 +2369,12 @@ pub unsafe extern "C" fn chorus_merge_worktree(
     cwd: *const c_char,
     branch: *const c_char,
 ) -> *mut c_char {
-    let Some(cwd) = borrow(cwd) else { return err("cwd must be valid UTF-8"); };
-    let Some(branch) = borrow(branch) else { return err("branch must be valid UTF-8"); };
+    let Some(cwd) = borrow(cwd) else {
+        return err("cwd must be valid UTF-8");
+    };
+    let Some(branch) = borrow(branch) else {
+        return err("branch must be valid UTF-8");
+    };
 
     match chorus_core::worktrees::merge_worktree(Path::new(cwd), branch) {
         Ok(outcome) => out(serde_json::json!({"ok": true, "outcome": outcome}).to_string()),
@@ -2203,8 +2388,12 @@ pub unsafe extern "C" fn chorus_remove_worktree(
     cwd: *const c_char,
     branch: *const c_char,
 ) -> *mut c_char {
-    let Some(cwd) = borrow(cwd) else { return err("cwd must be valid UTF-8"); };
-    let Some(branch) = borrow(branch) else { return err("branch must be valid UTF-8"); };
+    let Some(cwd) = borrow(cwd) else {
+        return err("cwd must be valid UTF-8");
+    };
+    let Some(branch) = borrow(branch) else {
+        return err("branch must be valid UTF-8");
+    };
 
     match chorus_core::worktrees::discard_worktree_by_branch(Path::new(cwd), branch) {
         Ok(()) => out(serde_json::json!({"ok": true}).to_string()),
@@ -2214,12 +2403,13 @@ pub unsafe extern "C" fn chorus_remove_worktree(
 
 /// The total monetary cost of a session in USD.
 #[no_mangle]
-pub unsafe extern "C" fn chorus_session_cost_usd(
-    db_path: *const c_char,
-    session_id: i64,
-) -> f64 {
-    let Some(db) = borrow(db_path) else { return 0.0; };
-    let Ok(store) = chorus_core::Store::open(Path::new(db)) else { return 0.0; };
+pub unsafe extern "C" fn chorus_session_cost_usd(db_path: *const c_char, session_id: i64) -> f64 {
+    let Some(db) = borrow(db_path) else {
+        return 0.0;
+    };
+    let Ok(store) = chorus_core::Store::open(Path::new(db)) else {
+        return 0.0;
+    };
     chorus_core::ledger::session_cost_usd(store.conn(), session_id).unwrap_or(0.0)
 }
 
@@ -2324,7 +2514,9 @@ pub unsafe extern "C" fn chorus_search_sessions_json(
     db_path: *const c_char,
     query: *const c_char,
 ) -> *mut c_char {
-    let Some(db_path) = borrow(db_path) else { return err("db_path must be valid UTF-8"); };
+    let Some(db_path) = borrow(db_path) else {
+        return err("db_path must be valid UTF-8");
+    };
     let q = borrow(query).unwrap_or("");
 
     let store = match chorus_core::Store::open(Path::new(db_path)) {
@@ -2344,7 +2536,9 @@ pub unsafe extern "C" fn chorus_export_session_md(
     db_path: *const c_char,
     session_id: i64,
 ) -> *mut c_char {
-    let Some(db_path) = borrow(db_path) else { return err("db_path must be valid UTF-8"); };
+    let Some(db_path) = borrow(db_path) else {
+        return err("db_path must be valid UTF-8");
+    };
 
     let store = match chorus_core::Store::open(Path::new(db_path)) {
         Ok(s) => s,
@@ -2360,7 +2554,9 @@ pub unsafe extern "C" fn chorus_export_session_md(
 /// List available agent roles (built-in + .chorus/agents/*.md).
 #[no_mangle]
 pub unsafe extern "C" fn chorus_list_roles(cwd: *const c_char) -> *mut c_char {
-    let Some(cwd) = borrow(cwd) else { return err("cwd must be valid UTF-8"); };
+    let Some(cwd) = borrow(cwd) else {
+        return err("cwd must be valid UTF-8");
+    };
     let roles = chorus_core::roles::load_roles(Path::new(cwd));
     out(serde_json::json!({"ok": true, "roles": roles}).to_string())
 }
@@ -2371,8 +2567,12 @@ pub unsafe extern "C" fn chorus_save_role(
     cwd: *const c_char,
     role_json: *const c_char,
 ) -> *mut c_char {
-    let Some(cwd) = borrow(cwd) else { return err("cwd must be valid UTF-8"); };
-    let Some(rj) = borrow(role_json) else { return err("role_json must be valid UTF-8"); };
+    let Some(cwd) = borrow(cwd) else {
+        return err("cwd must be valid UTF-8");
+    };
+    let Some(rj) = borrow(role_json) else {
+        return err("role_json must be valid UTF-8");
+    };
 
     let role: chorus_core::roles::AgentRole = match serde_json::from_str(rj) {
         Ok(r) => r,
@@ -2384,7 +2584,8 @@ pub unsafe extern "C" fn chorus_save_role(
             "ok": true,
             "path": path.to_string_lossy(),
             "name": role.name
-        }).to_string()),
+        })
+        .to_string()),
         Err(e) => err(format!("failed to save role: {e}")),
     }
 }
@@ -2395,8 +2596,12 @@ pub unsafe extern "C" fn chorus_delete_role(
     cwd: *const c_char,
     name: *const c_char,
 ) -> *mut c_char {
-    let Some(cwd) = borrow(cwd) else { return err("cwd must be valid UTF-8"); };
-    let Some(name) = borrow(name) else { return err("name must be valid UTF-8"); };
+    let Some(cwd) = borrow(cwd) else {
+        return err("cwd must be valid UTF-8");
+    };
+    let Some(name) = borrow(name) else {
+        return err("name must be valid UTF-8");
+    };
 
     match chorus_core::roles::delete_role(Path::new(cwd), name) {
         Ok(_) => out(serde_json::json!({"ok": true}).to_string()),
@@ -2411,7 +2616,9 @@ pub unsafe extern "C" fn chorus_synthesize_role(
     write_mode: bool,
     name_hint: *const c_char,
 ) -> *mut c_char {
-    let Some(task) = borrow(task) else { return err("task must be valid UTF-8"); };
+    let Some(task) = borrow(task) else {
+        return err("task must be valid UTF-8");
+    };
     let hint = borrow(name_hint).filter(|s| !s.is_empty());
 
     let role = chorus_core::roles::synthesize_role(task, write_mode, hint);
@@ -2424,11 +2631,14 @@ pub unsafe extern "C" fn chorus_checkpoint_list_json(
     db: *const c_char,
     session_id: i64,
 ) -> *mut c_char {
-    let Some(db_path) = borrow(db) else { return err("db must be valid UTF-8"); };
+    let Some(db_path) = borrow(db) else {
+        return err("db must be valid UTF-8");
+    };
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
         let store = chorus_core::Store::open(Path::new(db_path)).map_err(|e| e.to_string())?;
-        let records = chorus_core::checkpoint_dag::CheckpointDag::list_turn_checkpoints(&store, session_id)
-            .map_err(|e| e.to_string())?;
+        let records =
+            chorus_core::checkpoint_dag::CheckpointDag::list_turn_checkpoints(&store, session_id)
+                .map_err(|e| e.to_string())?;
         Ok(serde_json::to_value(records).map_err(|e| e.to_string())?)
     }));
 
@@ -2448,8 +2658,12 @@ pub unsafe extern "C" fn chorus_checkpoint_rewind_json(
     target_seq: i64,
     mode: *const c_char,
 ) -> *mut c_char {
-    let Some(db_path) = borrow(db) else { return err("db must be valid UTF-8"); };
-    let Some(ws_path) = borrow(ws) else { return err("ws must be valid UTF-8"); };
+    let Some(db_path) = borrow(db) else {
+        return err("db must be valid UTF-8");
+    };
+    let Some(ws_path) = borrow(ws) else {
+        return err("ws must be valid UTF-8");
+    };
     let mode_str = borrow(mode).unwrap_or("code_and_ledger");
 
     let rewind_mode = match mode_str {
@@ -2460,14 +2674,16 @@ pub unsafe extern "C" fn chorus_checkpoint_rewind_json(
 
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
         let store = chorus_core::Store::open(Path::new(db_path)).map_err(|e| e.to_string())?;
-        let ckpt = chorus_core::checkpoint::Checkpoint::open(Path::new(ws_path)).map_err(|e| e.to_string())?;
+        let ckpt = chorus_core::checkpoint::Checkpoint::open(Path::new(ws_path))
+            .map_err(|e| e.to_string())?;
         let summary = chorus_core::checkpoint_dag::CheckpointDag::rewind_to_seq(
             &store,
             &ckpt,
             session_id,
             target_seq,
             rewind_mode,
-        ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
         Ok(serde_json::to_value(summary).map_err(|e| e.to_string())?)
     }));
 
@@ -2484,7 +2700,9 @@ pub unsafe extern "C" fn chorus_repo_map_generate_json(
     ws: *const c_char,
     max_tokens: u32,
 ) -> *mut c_char {
-    let Some(ws_path) = borrow(ws) else { return err("ws must be valid UTF-8"); };
+    let Some(ws_path) = borrow(ws) else {
+        return err("ws must be valid UTF-8");
+    };
     let path = Path::new(ws_path);
 
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
@@ -2502,9 +2720,15 @@ pub unsafe extern "C" fn chorus_repo_map_generate_json(
             }
         }
 
-        let graph = chorus_core::repo_map::RepoMapEngine::build_graph(path, &files).map_err(|e| e.to_string())?;
+        let graph = chorus_core::repo_map::RepoMapEngine::build_graph(path, &files)
+            .map_err(|e| e.to_string())?;
         let ranks = chorus_core::repo_map::RepoMapEngine::compute_ppr(&graph, &[], 0.85, 25);
-        let map_str = chorus_core::repo_map::RepoMapEngine::render_repo_map(&graph, &ranks, path, max_tokens as usize);
+        let map_str = chorus_core::repo_map::RepoMapEngine::render_repo_map(
+            &graph,
+            &ranks,
+            path,
+            max_tokens as usize,
+        );
 
         Ok(serde_json::json!({
             "ok": true,
@@ -2530,8 +2754,11 @@ fn verify_workspace_with(
     store: &chorus_core::trust::TrustStore,
     ws: &Path,
 ) -> Result<serde_json::Value, String> {
-    let consent = store.consent(ws, &confine_like_turn).map_err(|e| e.to_string())?;
-    let res = chorus_core::verify_loop::VerifyLoop::verify_workspace(&consent).map_err(|e| e.to_string())?;
+    let consent = store
+        .consent(ws, &confine_like_turn)
+        .map_err(|e| e.to_string())?;
+    let res = chorus_core::verify_loop::VerifyLoop::verify_workspace(&consent)
+        .map_err(|e| e.to_string())?;
     serde_json::to_value(res).map_err(|e| e.to_string())
 }
 
@@ -2542,7 +2769,9 @@ fn verify_workspace_with(
 /// `ws` must be null or a valid NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_project_trusted_json(ws: *const c_char) -> *mut c_char {
-    let Some(ws) = borrow(ws) else { return err("ws must be valid UTF-8"); };
+    let Some(ws) = borrow(ws) else {
+        return err("ws must be valid UTF-8");
+    };
     let trusted = chorus_core::trust::TrustStore::default_location().is_trusted(Path::new(ws));
     out(serde_json::json!({"ok": true, "trusted": trusted}).to_string())
 }
@@ -2553,8 +2782,13 @@ pub unsafe extern "C" fn chorus_project_trusted_json(ws: *const c_char) -> *mut 
 /// # Safety
 /// `ws` must be null or a valid NUL-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn chorus_set_project_trusted(ws: *const c_char, trusted: bool) -> *mut c_char {
-    let Some(ws) = borrow(ws) else { return err("ws must be valid UTF-8"); };
+pub unsafe extern "C" fn chorus_set_project_trusted(
+    ws: *const c_char,
+    trusted: bool,
+) -> *mut c_char {
+    let Some(ws) = borrow(ws) else {
+        return err("ws must be valid UTF-8");
+    };
     match chorus_core::trust::TrustStore::default_location().set_trusted(Path::new(ws), trusted) {
         Ok(()) => out(serde_json::json!({"ok": true, "trusted": trusted}).to_string()),
         Err(e) => err(e.to_string()),
@@ -2565,9 +2799,14 @@ pub unsafe extern "C" fn chorus_set_project_trusted(ws: *const c_char, trusted: 
 /// the user trusted, and only inside the turn's Seatbelt profile.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_verify_workspace_json(ws: *const c_char) -> *mut c_char {
-    let Some(ws_path) = borrow(ws) else { return err("ws must be valid UTF-8"); };
+    let Some(ws_path) = borrow(ws) else {
+        return err("ws must be valid UTF-8");
+    };
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
-        verify_workspace_with(&chorus_core::trust::TrustStore::default_location(), Path::new(ws_path))
+        verify_workspace_with(
+            &chorus_core::trust::TrustStore::default_location(),
+            Path::new(ws_path),
+        )
     }));
 
     match result {
@@ -2609,8 +2848,8 @@ fn pairing_initiate_at(sock: &Path) -> Result<serde_json::Value, String> {
     let raw = daemon_for_pairing(sock)?
         .initiate_pairing()
         .map_err(|e| format!("daemon pairing request failed: {e}"))?;
-    let session: chorus_daemon::pairing::PairingSession =
-        serde_json::from_value(raw).map_err(|e| format!("daemon returned a bad pairing session: {e}"))?;
+    let session: chorus_daemon::pairing::PairingSession = serde_json::from_value(raw)
+        .map_err(|e| format!("daemon returned a bad pairing session: {e}"))?;
     Ok(serde_json::json!({
         "ok": true,
         "endpoint": session.advertised_endpoint(),
@@ -2637,7 +2876,10 @@ fn pairing_revoke_at(sock: &Path, id: &str) -> Result<serde_json::Value, String>
     }
 }
 
-fn pairing_result(r: std::thread::Result<Result<serde_json::Value, String>>, what: &str) -> *mut c_char {
+fn pairing_result(
+    r: std::thread::Result<Result<serde_json::Value, String>>,
+    what: &str,
+) -> *mut c_char {
     match r {
         Ok(Ok(val)) => out(val.to_string()),
         Ok(Err(e)) => err(e),
@@ -2649,13 +2891,19 @@ fn pairing_result(r: std::thread::Result<Result<serde_json::Value, String>>, wha
 /// `endpoint`/`qr_payload` built from the port the daemon actually bound.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_pairing_initiate_json() -> *mut c_char {
-    pairing_result(catch_unwind(|| pairing_initiate_at(&daemon_socket())), "initiate")
+    pairing_result(
+        catch_unwind(|| pairing_initiate_at(&daemon_socket())),
+        "initiate",
+    )
 }
 
 /// List paired devices from the daemon. Any failure is an error, never `[]`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_pairing_devices_json() -> *mut c_char {
-    pairing_result(catch_unwind(|| pairing_devices_at(&daemon_socket())), "devices")
+    pairing_result(
+        catch_unwind(|| pairing_devices_at(&daemon_socket())),
+        "devices",
+    )
 }
 
 /// Revoke a paired device on the daemon. `ok:true` only when the daemon confirmed.
@@ -2664,7 +2912,10 @@ pub unsafe extern "C" fn chorus_pairing_revoke_json(device_id: *const c_char) ->
     let Some(id) = borrow(device_id) else {
         return err("device_id must be valid UTF-8");
     };
-    pairing_result(catch_unwind(|| pairing_revoke_at(&daemon_socket(), id)), "revoke")
+    pairing_result(
+        catch_unwind(|| pairing_revoke_at(&daemon_socket(), id)),
+        "revoke",
+    )
 }
 
 #[cfg(test)]
@@ -2717,7 +2968,9 @@ mod tests {
         let list_json: serde_json::Value = serde_json::from_str(list_str).unwrap();
         assert!(list_json["ok"].as_bool().unwrap());
         let roles = list_json["roles"].as_array().unwrap();
-        assert!(roles.iter().any(|r| r["name"].as_str() == Some("db-optimizer")));
+        assert!(roles
+            .iter()
+            .any(|r| r["name"].as_str() == Some("db-optimizer")));
         unsafe { chorus_string_free(list_ptr) };
 
         // 4. Delete role
@@ -2732,7 +2985,9 @@ mod tests {
         let list_str2 = unsafe { CStr::from_ptr(list_ptr2).to_str().unwrap() };
         let list_json2: serde_json::Value = serde_json::from_str(list_str2).unwrap();
         let roles2 = list_json2["roles"].as_array().unwrap();
-        assert!(!roles2.iter().any(|r| r["name"].as_str() == Some("db-optimizer")));
+        assert!(!roles2
+            .iter()
+            .any(|r| r["name"].as_str() == Some("db-optimizer")));
         unsafe { chorus_string_free(list_ptr2) };
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -2745,7 +3000,10 @@ mod tests {
         let victim = temp.join("victim.md");
         std::fs::write(&victim, "keep").unwrap();
         let cwd = CString::new(ws.to_str().unwrap()).unwrap();
-        for name in ["../../../../victim", victim.with_extension("").to_str().unwrap()] {
+        for name in [
+            "../../../../victim",
+            victim.with_extension("").to_str().unwrap(),
+        ] {
             let n = CString::new(name).unwrap();
             let ptr = unsafe { chorus_delete_role(cwd.as_ptr(), n.as_ptr()) };
             let v: serde_json::Value =
@@ -2794,7 +3052,10 @@ mod tests {
         if cfg!(target_os = "macos") && chorus_core::trust::which("cargo").is_some() {
             let _ = verify_workspace_with(&store, &ws);
             assert!(ws.join("ran").exists(), "build.rs should run once trusted");
-            assert!(!escaped.exists(), "write outside workspace must be denied by Seatbelt");
+            assert!(
+                !escaped.exists(),
+                "write outside workspace must be denied by Seatbelt"
+            );
         }
         let _ = std::fs::remove_file(&escaped);
         let _ = std::fs::remove_dir_all(&base);
@@ -2891,7 +3152,8 @@ mod tests {
 
     #[test]
     fn ffi_router_learning_lifecycle() {
-        let temp_dir = std::env::temp_dir().join(format!("chorus-router-test-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("chorus-router-test-{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let db_path = temp_dir.join("store.db");
         let db_c = CString::new(db_path.to_str().unwrap()).unwrap();
@@ -2926,7 +3188,10 @@ mod tests {
         assert!(list_json["ok"].as_bool().unwrap());
         let routes = list_json["routes"].as_array().unwrap();
         assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0]["chosen_model"].as_str().unwrap(), "claude-sonnet-4-6");
+        assert_eq!(
+            routes[0]["chosen_model"].as_str().unwrap(),
+            "claude-sonnet-4-6"
+        );
         assert_eq!(routes[0]["preset"].as_str().unwrap(), "max");
         unsafe { chorus_string_free(list_ptr) };
 
@@ -2958,7 +3223,9 @@ mod tests {
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         std::thread::spawn(move || {
             for _ in 0..conns {
-                let Ok((mut s, _)) = listener.accept() else { return };
+                let Ok((mut s, _)) = listener.accept() else {
+                    return;
+                };
                 let mut buf = [0u8; 4096];
                 let _ = s.read(&mut buf);
                 let _ = s.write_all(resp.as_bytes());
@@ -2977,15 +3244,36 @@ mod tests {
         assert!(pairing_revoke_at(&missing, "dev").is_err());
         assert!(pairing_initiate_at(&missing).is_err());
 
-        let sock = fake_daemon("500", "HTTP/1.1 500 Internal\r\nContent-Length: 0\r\n\r\n", 3);
-        assert!(pairing_devices_at(&sock).is_err(), "devices must not report []");
-        assert!(pairing_revoke_at(&sock, "dev").is_err(), "revoke must not look done");
+        let sock = fake_daemon(
+            "500",
+            "HTTP/1.1 500 Internal\r\nContent-Length: 0\r\n\r\n",
+            3,
+        );
+        assert!(
+            pairing_devices_at(&sock).is_err(),
+            "devices must not report []"
+        );
+        assert!(
+            pairing_revoke_at(&sock, "dev").is_err(),
+            "revoke must not look done"
+        );
         assert!(pairing_initiate_at(&sock).is_err());
 
-        let sock = fake_daemon("nf", "HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n{\"ok\":false}", 1);
-        assert!(pairing_revoke_at(&sock, "dev").is_err(), "unconfirmed revoke is not success");
+        let sock = fake_daemon(
+            "nf",
+            "HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n{\"ok\":false}",
+            1,
+        );
+        assert!(
+            pairing_revoke_at(&sock, "dev").is_err(),
+            "unconfirmed revoke is not success"
+        );
 
-        let sock = fake_daemon("ok", "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"ok\":true}", 1);
+        let sock = fake_daemon(
+            "ok",
+            "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"ok\":true}",
+            1,
+        );
         assert_eq!(pairing_revoke_at(&sock, "dev").unwrap()["ok"], true);
     }
 
@@ -2994,16 +3282,21 @@ mod tests {
     fn ffi_pairing_qr_uses_daemon_bound_port() {
         let body = r#"{"daemon_id":"d","machine_name":"m","pairing_token":"tok","endpoint_url":"http://0.0.0.0:51234","tailscale_ip":"100.64.0.7","created_at":0,"expires_at":300}"#;
         let resp: &'static str = Box::leak(
-            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len()).into_boxed_str(),
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .into_boxed_str(),
         );
         let sock = fake_daemon("qr", resp, 1);
         let v = pairing_initiate_at(&sock).unwrap();
         assert_eq!(v["endpoint"], "http://100.64.0.7:51234");
-        assert_eq!(v["qr_payload"], "chorus://pair?token=tok&endpoint=http://100.64.0.7:51234");
+        assert_eq!(
+            v["qr_payload"],
+            "chorus://pair?token=tok&endpoint=http://100.64.0.7:51234"
+        );
     }
 }
-
-
 
 /// Syntax spans for the code viewer. `path` only picks the language (by
 /// extension); `text` is the file's content as the shell will show it.

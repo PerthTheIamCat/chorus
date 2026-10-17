@@ -10,18 +10,18 @@
 use anyhow::{Context, Result};
 use chorus_acp::codex::{AgentEvent, CodexAgent, CodexConfig, TurnOutcome};
 pub use chorus_acp::codex::{Permission, PermissionAsk};
-use chorus_core::checkpoint::Checkpoint;
+use chorus_acp::sandbox;
 use chorus_core::attachments::{self, Attachment};
+use chorus_core::checkpoint::Checkpoint;
 use chorus_core::compaction;
 use chorus_core::context::{AssembleInput, Assembler, Budget, TurnItem};
 use chorus_core::handoff::{Brief, BriefInput, HandoffMeta, HandoffReason};
-use chorus_core::mcp::McpServer;
-use chorus_core::projector::{self, AgentFile, Drift, Projection};
-use chorus_acp::sandbox;
-use chorus_core::mcp_config;
 use chorus_core::integration_catalog;
-use chorus_core::skills;
+use chorus_core::mcp::McpServer;
+use chorus_core::mcp_config;
+use chorus_core::projector::{self, AgentFile, Drift, Projection};
 use chorus_core::render::ContextItem;
+use chorus_core::skills;
 use chorus_core::tokens::{CachedCounter, HeuristicCounter};
 use chorus_core::{actor, ledger, memory, usage, Event, EventKind, NewEvent, Store};
 use std::path::{Path, PathBuf};
@@ -313,8 +313,14 @@ pub struct Session {
     /// in the ledger: it is a dispatch setting, not something anyone said.
     route_preset: chorus_core::router::RoutePreset,
     /// Sha the handoff brief's diff is measured from — the shadow repo's
-    /// HEAD when the session opened. Immutable for the life of the `Session`.
+    /// HEAD when the session opened, or the last review baseline.
     base_ckpt: String,
+    /// Git HEAD at turn end. If this changes between turns, user made a commit.
+    turn_end_git_head: Option<String>,
+    /// Guard sha before the latest turn started (for Latest turn scope).
+    last_turn_guard: Option<String>,
+    /// Guard sha when the current agent took over (for Current agent scope).
+    agent_turn_start_guard: Option<String>,
     /// The in-process MCP server handed to every agent (exposes
     /// `memory.propose`). `None` when it couldn't bind a port.
     mcp: Option<McpServer>,
@@ -322,6 +328,21 @@ pub struct Session {
     /// project: one store shared by every folder in it. `None` = the
     /// session's own store, as before projects existed.
     memory: Option<Store>,
+}
+
+pub fn real_git_head(cwd: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if out.status.success() {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    None
 }
 
 /// Open the shadow repo and pick the base sha a handoff diff is measured
@@ -354,7 +375,10 @@ impl Session {
         let store = Store::open(db).context("open store")?;
         let user = actor::intern(store.conn(), "user", "human")?;
         let sess = ledger::new_session(store.conn(), title, &cwd.to_string_lossy())?;
-        let (checkpoint, base_ckpt) = open_checkpoint(&cwd);
+        let (checkpoint, default_base) = open_checkpoint(&cwd);
+        let _ = usage::set_review_base(store.conn(), sess, Some(&default_base));
+        let base_ckpt = default_base;
+        let turn_end_git_head = real_git_head(&cwd);
         let mcp = McpServer::start_for_session(&db.to_string_lossy(), sess).ok();
         Ok(Self {
             store,
@@ -367,6 +391,9 @@ impl Session {
             models: std::collections::HashMap::new(),
             route_preset: Default::default(),
             base_ckpt,
+            turn_end_git_head,
+            last_turn_guard: None,
+            agent_turn_start_guard: None,
             mcp,
             memory: None,
         })
@@ -387,7 +414,15 @@ impl Session {
         anyhow::ensure!(exists, "no session {session_id} in {}", db.display());
         let user = actor::intern(store.conn(), "user", "human")?;
         let cwd = PathBuf::from(cwd);
-        let (checkpoint, base_ckpt) = open_checkpoint(&cwd);
+        let (checkpoint, default_base) = open_checkpoint(&cwd);
+        let stored_base = usage::review_base(store.conn(), session_id).ok().flatten();
+        let base_ckpt = if let Some(stored) = stored_base {
+            stored
+        } else {
+            let _ = usage::set_review_base(store.conn(), session_id, Some(&default_base));
+            default_base
+        };
+        let turn_end_git_head = real_git_head(&cwd);
         let mcp = McpServer::start_for_session(&db.to_string_lossy(), session_id).ok();
         Ok(Self {
             store,
@@ -400,6 +435,9 @@ impl Session {
             models: std::collections::HashMap::new(),
             route_preset: Default::default(),
             base_ckpt,
+            turn_end_git_head,
+            last_turn_guard: None,
+            agent_turn_start_guard: None,
             mcp,
             memory: None,
         })
@@ -464,13 +502,90 @@ impl Session {
         &self.base_ckpt
     }
 
-    /// The workspace diff since the session's base checkpoint — what the
-    /// agents have changed. Empty when there's no shadow repo or no change.
+    pub fn review_base(&self) -> String {
+        usage::review_base(self.store.conn(), self.sess)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| self.base_ckpt.clone())
+    }
+
+    pub fn set_review_base(&mut self, sha: Option<&str>) -> Result<()> {
+        usage::set_review_base(self.store.conn(), self.sess, sha)?;
+        if let Some(s) = sha {
+            self.base_ckpt = s.to_string();
+        }
+        Ok(())
+    }
+
+    /// Mark reviewed: snapshots the shadow repo as the new baseline.
+    /// Available in git and non-git projects, never touches user's git.
+    pub fn mark_reviewed(&mut self) -> Result<String> {
+        let ck = self.checkpoint.as_ref().context("no shadow repo")?;
+        let new_base = ck.snapshot("mark reviewed")?;
+        self.set_review_base(Some(&new_base))?;
+        self.turn_end_git_head = real_git_head(&self.cwd);
+        Ok(new_base)
+    }
+
+    /// Check if user made a commit between turns; if so, advance baseline.
+    pub fn check_user_commit(&mut self) -> Result<bool> {
+        let Some(last_head) = &self.turn_end_git_head else {
+            self.turn_end_git_head = real_git_head(&self.cwd);
+            return Ok(false);
+        };
+        let current_head = real_git_head(&self.cwd);
+        if let (Some(cur), true) = (&current_head, current_head.as_ref() != Some(last_head)) {
+            if let Some(ck) = &self.checkpoint {
+                let new_base = ck.snapshot("baseline moved by user commit")?;
+                self.set_review_base(Some(&new_base))?;
+                self.turn_end_git_head = Some(cur.clone());
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub fn resolve_scope_base(&self, scope: &str) -> String {
+        match scope.trim().to_lowercase().as_str() {
+            "latest_turn" | "latest-turn" | "turn" | "latestturn" => self
+                .last_turn_guard
+                .clone()
+                .unwrap_or_else(|| self.review_base()),
+            "current_agent" | "current-agent" | "agent" | "currentagent" => self
+                .agent_turn_start_guard
+                .clone()
+                .unwrap_or_else(|| self.review_base()),
+            _ => self.review_base(),
+        }
+    }
+
+    /// The workspace diff since the session's review baseline or scope.
     pub fn working_diff(&self) -> String {
+        self.working_diff_scoped("session", false)
+    }
+
+    pub fn working_diff_scoped(&self, scope: &str, include_projected: bool) -> String {
+        let base = self.resolve_scope_base(scope);
         self.checkpoint
             .as_ref()
-            .and_then(|ck| ck.diff_since_user(&self.base_ckpt).ok())
+            .and_then(|ck| ck.diff_since_user_opts(&base, include_projected).ok())
             .unwrap_or_default()
+    }
+
+    pub fn diff_stats(
+        &self,
+        scope: &str,
+        include_projected: bool,
+    ) -> Result<chorus_core::checkpoint::DiffSummaryReport> {
+        let base = self.resolve_scope_base(scope);
+        let ck = self.checkpoint.as_ref().context("no shadow repo")?;
+        Ok(ck.diff_file_stats(&base, include_projected)?)
+    }
+
+    pub fn file_diff(&self, scope: &str, path: &str) -> Result<String> {
+        let base = self.resolve_scope_base(scope);
+        let ck = self.checkpoint.as_ref().context("no shadow repo")?;
+        Ok(ck.file_diff(&base, path)?)
     }
 
     /// Undo anything the agent changed in the workspace during a restrictive
@@ -613,6 +728,13 @@ impl Session {
         policy: Policy,
         attachment_ids: &[i64],
     ) -> Result<TurnReport> {
+        self.check_user_commit().ok();
+        let guard = self.snapshot("turn guard").ok();
+        self.last_turn_guard = guard.clone();
+        if self.agent_turn_start_guard.is_none() {
+            self.agent_turn_start_guard = guard;
+        }
+
         let agent_actor = actor::intern(self.store.conn(), agent_name, provider)?;
         let has_history = !ledger::history(self.store.conn(), self.sess, 1)?.is_empty();
 
@@ -638,6 +760,7 @@ impl Session {
         let bridge = self.resolve_bridge(agent_name, &[]);
         let outcome = self.one_turn(agent_name, &bridge, &prompt, policy, attachment_ids)?;
         let agent_seqs = self.persist_outcome(&outcome, agent_actor, user_seq)?;
+        self.turn_end_git_head = real_git_head(&self.cwd);
 
         Ok(TurnReport {
             user_seq,
@@ -791,26 +914,63 @@ impl Session {
 
         let mut handoffs = Vec::new();
 
-        let result: Result<RelayReport> =
-            match self.run_turn_with_attachments(
-                &first.name,
-                &first.provider,
-                user_text,
-                policy,
-                attachment_ids,
-            ) {
-                Ok(turn) if !is_transient_stop(&turn.stop_reason) => {
-                    crate::limits::clear(&first.name);
-                    Ok(RelayReport {
+        let result: Result<RelayReport> = match self.run_turn_with_attachments(
+            &first.name,
+            &first.provider,
+            user_text,
+            policy,
+            attachment_ids,
+        ) {
+            Ok(turn) if !is_transient_stop(&turn.stop_reason) => {
+                crate::limits::clear(&first.name);
+                Ok(RelayReport {
+                    answered_by: first.name.clone(),
+                    turn,
+                    handoffs,
+                })
+            }
+            Ok(turn) => {
+                // Answered but stopped short — relay from here.
+                let reason = HandoffReason::ContextExhausted;
+                match self.relay_rest(
+                    &chain[1..],
+                    &saved_bridge,
+                    user_text,
+                    policy,
+                    &first.name,
+                    reason,
+                    &mut handoffs,
+                ) {
+                    Ok(Some(r)) => Ok(r),
+                    Ok(None) => Ok(RelayReport {
                         answered_by: first.name.clone(),
                         turn,
                         handoffs,
-                    })
+                    }),
+                    Err(e) => Err(e),
                 }
-                Ok(turn) => {
-                    // Answered but stopped short — relay from here.
-                    let reason = HandoffReason::ContextExhausted;
-                    match self.relay_rest(
+            }
+            Err(_) if chorus_acp::was_cancelled() => {
+                // The user pressed Stop. Not a provider failure — failing
+                // over would just start the same turn on another agent.
+                Err(anyhow::anyhow!("หยุดโดยผู้ใช้"))
+            }
+            Err(e) => {
+                // `{e:#}` flattens anyhow's context chain so the classifier
+                // sees the underlying "…rate limit…" message.
+                let msg = format!("{e:#}");
+                if matches!(
+                    HandoffReason::from_failure(&msg),
+                    Some(HandoffReason::RateLimit | HandoffReason::QuotaExhausted)
+                ) {
+                    crate::limits::record_hit(&first.name, &msg);
+                }
+                if crate::limits::is_auth_failure(&msg) {
+                    crate::limits::record_auth_failure(&first.name);
+                }
+                match HandoffReason::from_failure(&msg) {
+                    None => Err(e).with_context(|| first.name.clone()),
+                    Some(reason) => match self.relay_rest(
                         &chain[1..],
                         &saved_bridge,
                         user_text,
@@ -820,50 +980,12 @@ impl Session {
                         &mut handoffs,
                     ) {
                         Ok(Some(r)) => Ok(r),
-                        Ok(None) => Ok(RelayReport {
-                            answered_by: first.name.clone(),
-                            turn,
-                            handoffs,
-                        }),
-                        Err(e) => Err(e),
-                    }
+                        Ok(None) => Err(e).context("relay chain exhausted"),
+                        Err(e2) => Err(e2),
+                    },
                 }
-                Err(_) if chorus_acp::was_cancelled() => {
-                    // The user pressed Stop. Not a provider failure — failing
-                    // over would just start the same turn on another agent.
-                    Err(anyhow::anyhow!("หยุดโดยผู้ใช้"))
-                }
-                Err(e) => {
-                    // `{e:#}` flattens anyhow's context chain so the classifier
-                    // sees the underlying "…rate limit…" message.
-                    let msg = format!("{e:#}");
-                    if matches!(
-                        HandoffReason::from_failure(&msg),
-                        Some(HandoffReason::RateLimit | HandoffReason::QuotaExhausted)
-                    ) {
-                        crate::limits::record_hit(&first.name, &msg);
-                    }
-                    if crate::limits::is_auth_failure(&msg) {
-                        crate::limits::record_auth_failure(&first.name);
-                    }
-                    match HandoffReason::from_failure(&msg) {
-                        None => Err(e).with_context(|| first.name.clone()),
-                        Some(reason) => match self.relay_rest(
-                            &chain[1..],
-                            &saved_bridge,
-                            user_text,
-                            policy,
-                            &first.name,
-                            reason,
-                            &mut handoffs,
-                        ) {
-                            Ok(Some(r)) => Ok(r),
-                            Ok(None) => Err(e).context("relay chain exhausted"),
-                            Err(e2) => Err(e2),
-                        },
-                    }
-                }
-            };
+            }
+        };
 
         self.forced_bridge = saved_bridge;
         result
@@ -950,7 +1072,10 @@ impl Session {
                 Err(e) => {
                     let msg = format!("{e:#}");
                     reason = HandoffReason::from_failure(&msg).unwrap_or(HandoffReason::Failover);
-                    if matches!(reason, HandoffReason::RateLimit | HandoffReason::QuotaExhausted) {
+                    if matches!(
+                        reason,
+                        HandoffReason::RateLimit | HandoffReason::QuotaExhausted
+                    ) {
                         crate::limits::record_hit(&spec.name, &msg);
                     }
                     if crate::limits::is_auth_failure(&msg) {
@@ -1034,7 +1159,11 @@ impl Session {
             let shown: Vec<&str> = touched.iter().take(6).map(String::as_str).collect();
             let more = touched.len().saturating_sub(shown.len());
             let line = if more > 0 {
-                format!("edited {}: {} (+{more} more)", touched.len(), shown.join(", "))
+                format!(
+                    "edited {}: {} (+{more} more)",
+                    touched.len(),
+                    shown.join(", ")
+                )
             } else {
                 format!("edited {}: {}", touched.len(), shown.join(", "))
             };
@@ -1145,9 +1274,7 @@ impl Session {
         // Failures stay: those change what the next agent should do.
         let bodies: Vec<(Event, String)> = bodies
             .into_iter()
-            .filter(|(e, body)| {
-                e.kind != EventKind::ToolResult || !is_bare_success(body)
-            })
+            .filter(|(e, body)| e.kind != EventKind::ToolResult || !is_bare_success(body))
             .collect();
 
         let n = bodies.len();
@@ -1271,7 +1398,8 @@ impl Session {
         if model_id.trim().is_empty() {
             self.models.remove(agent_name);
         } else {
-            self.models.insert(agent_name.to_string(), model_id.to_string());
+            self.models
+                .insert(agent_name.to_string(), model_id.to_string());
         }
     }
 
@@ -1319,7 +1447,8 @@ impl Session {
         let head = self.head_seq();
         let _scope = chorus_acp::push_scope(self.sess, head);
         chorus_acp::push(self.sess, head, "status", "running");
-        let out = self.one_turn_decide_inner(agent_name, bridge, text, mode, attachment_ids, decide);
+        let out =
+            self.one_turn_decide_inner(agent_name, bridge, text, mode, attachment_ids, decide);
         let status = if out.is_ok() { "idle" } else { "failed" };
         chorus_acp::push(self.sess, head, "status", status);
         out
@@ -1348,7 +1477,8 @@ impl Session {
             "catalog MCP server name conflicts with project configuration: {}",
             composed.collisions.join(", ")
         );
-        let mut servers: Vec<serde_json::Value> = composed.servers.into_iter().map(|s| s.entry).collect();
+        let mut servers: Vec<serde_json::Value> =
+            composed.servers.into_iter().map(|s| s.entry).collect();
         if let Some(m) = &self.mcp {
             // Per-agent bearer secret: scopes the caller to this session and
             // attributes its control-surface writes to this agent.
@@ -1367,7 +1497,10 @@ impl Session {
         let command = match sandbox::wrap(bridge, &self.cwd, profile) {
             Ok(c) => c,
             Err(why) => {
-                anyhow::ensure!(mode != "read-only", "Cannot enforce read-only sandbox: {why}");
+                anyhow::ensure!(
+                    mode != "read-only",
+                    "Cannot enforce read-only sandbox: {why}"
+                );
                 if self.log_permissions {
                     eprintln!("  ⚠  ไม่ได้เปิด sandbox ({why}) — เหลือแค่ย้อนไฟล์หลังเทิร์น");
                 }
@@ -1461,9 +1594,14 @@ impl Session {
             prompt_text.push_str("\n\nSession files available through Chorus MCP tools attachment_list and attachment_read:\n");
             for a in &available {
                 let safe_name: String = a.name.chars().filter(|c| !c.is_control()).collect();
-                prompt_text.push_str(&format!("- id {}: {} ({}, {} bytes)\n", a.id, safe_name, a.media_type, a.size));
+                prompt_text.push_str(&format!(
+                    "- id {}: {} ({}, {} bytes)\n",
+                    a.id, safe_name, a.media_type, a.size
+                ));
             }
-            prompt_text.push_str("Open older files only when needed; a listed name is not the file content.\n");
+            prompt_text.push_str(
+                "Open older files only when needed; a listed name is not the file content.\n",
+            );
         }
         let mut blocks = vec![serde_json::json!({ "type": "text", "text": prompt_text })];
         for id in attachment_ids {
@@ -1509,20 +1647,30 @@ impl Session {
                     }));
                 }
             } else {
-                anyhow::bail!("attachment {} ({mime}) is not readable by this agent", meta.name);
+                anyhow::bail!(
+                    "attachment {} ({mime}) is not readable by this agent",
+                    meta.name
+                );
             }
         }
         // Persist every `usage_update` as it lands, so a second (read-only)
         // handle sees the meter move mid-turn. A separate connection: this
         // one is not ours to borrow from inside the agent's callback.
-        let observer = self.store.conn().path().filter(|p| !p.is_empty()).and_then(|path| {
-            let store = Store::open(Path::new(path)).ok()?;
-            let _ = store.conn().busy_timeout(std::time::Duration::from_millis(200));
-            let sess = self.sess;
-            Some(Box::new(move |used, window| {
-                let _ = usage::record_context(store.conn(), sess, used, window);
-            }) as chorus_acp::UsageObserver)
-        });
+        let observer = self
+            .store
+            .conn()
+            .path()
+            .filter(|p| !p.is_empty())
+            .and_then(|path| {
+                let store = Store::open(Path::new(path)).ok()?;
+                let _ = store
+                    .conn()
+                    .busy_timeout(std::time::Duration::from_millis(200));
+                let sess = self.sess;
+                Some(Box::new(move |used, window| {
+                    let _ = usage::record_context(store.conn(), sess, used, window);
+                }) as chorus_acp::UsageObserver)
+            });
         let previous = chorus_acp::set_usage_observer(observer);
         let out = agent.prompt_blocks(blocks, decide).context("agent turn");
         chorus_acp::set_usage_observer(previous);
@@ -1550,6 +1698,7 @@ impl Session {
         attachment_ids: &[i64],
         decide: &mut dyn FnMut(&PermissionAsk) -> Permission,
     ) -> Result<TurnReport> {
+        self.check_user_commit().ok();
         let agent_actor = actor::intern(self.store.conn(), agent_name, provider)?;
         let has_history = !ledger::history(self.store.conn(), self.sess, 1)?.is_empty();
         let prompt = if has_history {
@@ -1590,6 +1739,10 @@ impl Session {
         };
         self.project_memory(agent_name);
         let guard = self.snapshot("turn guard").ok();
+        self.last_turn_guard = guard.clone();
+        if self.agent_turn_start_guard.is_none() {
+            self.agent_turn_start_guard = guard.clone();
+        }
         // An interactive caller shows the user a dialog per action, so it wants
         // the agent to ask about everything — the same mode the restrictive
         // policies use.
@@ -1615,6 +1768,7 @@ impl Session {
             }
         }
         let agent_seqs = self.persist_outcome(&outcome, agent_actor, user_seq)?;
+        self.turn_end_git_head = real_git_head(&self.cwd);
         Ok(TurnReport {
             user_seq,
             agent_seqs,
@@ -1725,7 +1879,12 @@ impl Session {
                 AgentEvent::ToolResult { title, status } => {
                     (EventKind::ToolResult, format!("{title} → {status}"))
                 }
-                AgentEvent::SubagentSpawned { session_id, parent_session_id, name, task } => (
+                AgentEvent::SubagentSpawned {
+                    session_id,
+                    parent_session_id,
+                    name,
+                    task,
+                } => (
                     EventKind::ToolCall,
                     serde_json::json!({
                         "event": "subagent_spawned",
@@ -1733,16 +1892,22 @@ impl Session {
                         "parentSessionId": parent_session_id,
                         "name": name,
                         "task": task,
-                    }).to_string(),
+                    })
+                    .to_string(),
                 ),
-                AgentEvent::SubagentState { session_id, state, message } => (
+                AgentEvent::SubagentState {
+                    session_id,
+                    state,
+                    message,
+                } => (
                     EventKind::ToolResult,
                     serde_json::json!({
                         "event": "subagent_state_update",
                         "sessionId": session_id,
                         "state": state,
                         "message": message,
-                    }).to_string(),
+                    })
+                    .to_string(),
                 ),
                 AgentEvent::Diff { path, old, new } => {
                     (EventKind::Diff, render_diff(path, old, new))
@@ -1903,7 +2068,7 @@ fn head_seq(store: &Store, sess: i64) -> i64 {
             [sess],
             |r| r.get::<_, i64>(0),
         )
-    .unwrap_or(0)
+        .unwrap_or(0)
 }
 
 /// The shell's second handle onto one session: read-only SQLite (WAL lets it
@@ -1936,12 +2101,40 @@ impl SessionReader {
         Ok(usage::get(self.store.conn(), self.sess)?)
     }
 
+    pub fn review_base(&self) -> String {
+        usage::review_base(self.store.conn(), self.sess)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| self.base_ckpt.clone())
+    }
+
     /// Same patch as [`Session::working_diff`], staged in a private index.
     pub fn working_diff(&self) -> String {
+        self.working_diff_scoped("session", false)
+    }
+
+    pub fn working_diff_scoped(&self, _scope: &str, include_projected: bool) -> String {
+        let base = self.review_base();
         self.checkpoint
             .as_ref()
-            .and_then(|ck| ck.peek_diff_since_user(&self.base_ckpt).ok())
+            .and_then(|ck| ck.peek_diff_since_user_opts(&base, include_projected).ok())
             .unwrap_or_default()
+    }
+
+    pub fn diff_stats(
+        &self,
+        _scope: &str,
+        include_projected: bool,
+    ) -> Result<chorus_core::checkpoint::DiffSummaryReport> {
+        let base = self.review_base();
+        let ck = self.checkpoint.as_ref().context("no shadow repo")?;
+        Ok(ck.peek_diff_file_stats(&base, include_projected)?)
+    }
+
+    pub fn file_diff(&self, _scope: &str, path: &str) -> Result<String> {
+        let base = self.review_base();
+        let ck = self.checkpoint.as_ref().context("no shadow repo")?;
+        Ok(ck.peek_file_diff(&base, path)?)
     }
 }
 
@@ -2120,13 +2313,37 @@ mod policy_tests {
 
     #[test]
     fn read_only_never_grants_unknown_or_mixed_permission_kinds() {
-        for kind in ["read/write", "read-write", "read_and_delete", "thread", "execute", "", "other"] {
-            let ask = PermissionAsk { tool: "fixture".into(), kind: kind.into(), detail: "synthetic request".into() };
-            assert_eq!(Policy::ReadOnly.decide(&ask), Permission::Deny, "kind: {kind}");
+        for kind in [
+            "read/write",
+            "read-write",
+            "read_and_delete",
+            "thread",
+            "execute",
+            "",
+            "other",
+        ] {
+            let ask = PermissionAsk {
+                tool: "fixture".into(),
+                kind: kind.into(),
+                detail: "synthetic request".into(),
+            };
+            assert_eq!(
+                Policy::ReadOnly.decide(&ask),
+                Permission::Deny,
+                "kind: {kind}"
+            );
         }
         for kind in ["read", "READ", "fetch", "search"] {
-            let ask = PermissionAsk { tool: "fixture".into(), kind: kind.into(), detail: "synthetic request".into() };
-            assert_eq!(Policy::ReadOnly.decide(&ask), Permission::Allow, "kind: {kind}");
+            let ask = PermissionAsk {
+                tool: "fixture".into(),
+                kind: kind.into(),
+                detail: "synthetic request".into(),
+            };
+            assert_eq!(
+                Policy::ReadOnly.decide(&ask),
+                Permission::Allow,
+                "kind: {kind}"
+            );
             assert_eq!(Policy::DenyAll.decide(&ask), Permission::Deny);
         }
     }
