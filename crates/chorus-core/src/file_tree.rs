@@ -13,6 +13,9 @@ pub struct FileNode {
     pub name: String,
     pub rel_path: String,
     pub is_dir: bool,
+    /// File-type icon key (`file_icons::icon_for`); `None` for folders and unknown files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
     pub size: u64,
     pub git_status: Option<String>,
     pub is_focus: bool,
@@ -155,6 +158,8 @@ fn walk_dir(
         let git_status = git_statuses.get(&rel_path).cloned();
         let is_focus = focus_file.map(|f| f == rel_path || rel_path.ends_with(f)).unwrap_or(false);
 
+        let icon = if is_dir { None } else { crate::file_icons::icon_for(&name).map(str::to_string) };
+
         let children = if is_dir {
             walk_dir(
                 root,
@@ -173,6 +178,7 @@ fn walk_dir(
             name,
             rel_path,
             is_dir,
+            icon,
             size,
             git_status,
             is_focus,

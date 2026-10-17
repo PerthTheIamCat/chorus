@@ -229,6 +229,7 @@ struct WorkspaceExplorerView: View {
                     name: node.name,
                     rel_path: node.rel_path,
                     is_dir: true,
+                    icon: nil,
                     size: node.size,
                     git_status: node.git_status,
                     is_focus: node.is_focus,
@@ -268,9 +269,7 @@ private struct FileTreeNodeRow: View {
                             .foregroundColor(.secondary)
                     } else {
                         Spacer().frame(width: 12)
-                        Image(systemName: fileIcon(node.name))
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary)
+                        FileTypeIcon(key: node.icon)
                     }
 
                     Text(node.name)
@@ -328,15 +327,6 @@ private struct FileTreeNodeRow: View {
         } else {
             onSelectFile(node.rel_path)
         }
-    }
-
-    private func fileIcon(_ name: String) -> String {
-        if name.hasSuffix(".rs") { return "chevron.left.forwardslash.chevron.right" }
-        if name.hasSuffix(".swift") { return "swift" }
-        if name.hasSuffix(".ts") || name.hasSuffix(".js") { return "curlybraces" }
-        if name.hasSuffix(".json") || name.hasSuffix(".toml") { return "gearshape" }
-        if name.hasSuffix(".md") { return "doc.text" }
-        return "doc"
     }
 
     private func gitColor(_ status: String) -> Color {
