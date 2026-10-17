@@ -292,6 +292,138 @@ fn push_unique(v: &mut Vec<String>, item: &str) {
     v.push(item.to_string());
 }
 
+#[derive(Clone)]
+struct ChildRunnerState {
+    db_path: PathBuf,
+    forced_bridge: Option<Vec<String>>,
+    parent_policy: Policy,
+    route_preset: chorus_core::router::RoutePreset,
+}
+
+struct SessionChildRunner {
+    state: std::sync::Arc<std::sync::Mutex<ChildRunnerState>>,
+}
+
+impl chorus_core::agent_control::ChildRunner for SessionChildRunner {
+    fn run_child(
+        &self,
+        subagent: &chorus_core::agent_control::Subagent,
+        weight: Option<&str>,
+    ) -> chorus_core::Result<()> {
+        let child_sess_id = match subagent.child_sess {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+        let (db_path, forced_bridge, parent_policy, _route_preset) = {
+            let s = self.state.lock().unwrap();
+            (
+                s.db_path.clone(),
+                s.forced_bridge.clone(),
+                s.parent_policy,
+                s.route_preset,
+            )
+        };
+        let subagent_id = subagent.id;
+        let role_name = subagent.role.clone();
+        let task = subagent.task.clone();
+        let _weight = weight.map(|s| s.to_string());
+        let has_worktree = subagent.worktree.is_some();
+
+        std::thread::spawn(move || {
+            let res = (|| -> Result<()> {
+                let mut child_sess = Session::open(&db_path, child_sess_id)?;
+                if let Some(fb) = forced_bridge {
+                    child_sess = child_sess.with_bridge(fb);
+                }
+
+                // Child permissions are never wider than the parent's.
+                let child_policy = match parent_policy {
+                    Policy::DenyAll => Policy::DenyAll,
+                    Policy::ReadOnly => Policy::ReadOnly,
+                    Policy::AllowAll => {
+                        if has_worktree {
+                            Policy::AllowAll
+                        } else {
+                            Policy::ReadOnly
+                        }
+                    }
+                };
+
+                let role = chorus_core::roles::find_role(&child_sess.cwd, &role_name);
+                let pinned = role.as_ref().and_then(|r| r.model.clone());
+
+                let (agent_name, provider) = if let Some(ref m) = pinned {
+                    child_sess.set_model("codex", m);
+                    ("codex", "openai")
+                } else {
+                    let _kind = match role_name.as_str() {
+                        "investigator" => chorus_core::router::TaskKind::Think,
+                        "reviewer" => chorus_core::router::TaskKind::Review,
+                        _ => chorus_core::router::TaskKind::Do,
+                    };
+                    ("codex", "openai")
+                };
+
+                let turn_rep = child_sess.run_turn(agent_name, provider, &task, child_policy)?;
+
+                let mut diff_stat = "0 files changed".to_string();
+                let mut files_touched = Vec::new();
+
+                let output = std::process::Command::new("git")
+                    .args(["diff", "--name-only", "HEAD"])
+                    .current_dir(&child_sess.cwd)
+                    .output();
+                if let Ok(out) = output {
+                    if out.status.success() {
+                        let text = String::from_utf8_lossy(&out.stdout);
+                        for line in text.lines() {
+                            let trimmed = line.trim();
+                            if !trimmed.is_empty() {
+                                files_touched.push(trimmed.to_string());
+                            }
+                        }
+                        if !files_touched.is_empty() {
+                            diff_stat = format!("{} files changed", files_touched.len());
+                        }
+                    }
+                }
+
+                chorus_core::agent_control::complete_agent(
+                    child_sess.store.conn(),
+                    subagent_id,
+                    &turn_rep.message,
+                    Some(&diff_stat),
+                    &files_touched,
+                )?;
+
+                Ok(())
+            })();
+
+            if let Err(e) = res {
+                if let Ok(store) = Store::open(&db_path) {
+                    let _ = chorus_core::agent_control::fail_agent(
+                        store.conn(),
+                        subagent_id,
+                        &format!("Failed: {e}"),
+                    );
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    fn cancel_child(&self, _subagent_id: i64) -> chorus_core::Result<()> {
+        chorus_acp::cancel_all();
+        Ok(())
+    }
+
+    fn cancel_all(&self, _parent_sess: i64) -> chorus_core::Result<()> {
+        chorus_acp::cancel_all();
+        Ok(())
+    }
+}
+
 pub struct Session {
     store: Store,
     sess: i64,
@@ -328,6 +460,7 @@ pub struct Session {
     /// project: one store shared by every folder in it. `None` = the
     /// session's own store, as before projects existed.
     memory: Option<Store>,
+    runner_state: std::sync::Arc<std::sync::Mutex<ChildRunnerState>>,
 }
 
 pub fn real_git_head(cwd: &Path) -> Option<String> {
@@ -380,6 +513,17 @@ impl Session {
         let base_ckpt = default_base;
         let turn_end_git_head = real_git_head(&cwd);
         let mcp = McpServer::start_for_session(&db.to_string_lossy(), sess).ok();
+        let runner_state = std::sync::Arc::new(std::sync::Mutex::new(ChildRunnerState {
+            db_path: db.to_path_buf(),
+            forced_bridge: None,
+            parent_policy: Policy::ReadOnly,
+            route_preset: Default::default(),
+        }));
+        chorus_core::agent_control::register_child_runner(std::sync::Arc::new(
+            SessionChildRunner {
+                state: runner_state.clone(),
+            },
+        ));
         Ok(Self {
             store,
             sess,
@@ -396,6 +540,7 @@ impl Session {
             agent_turn_start_guard: None,
             mcp,
             memory: None,
+            runner_state,
         })
     }
 
@@ -424,6 +569,17 @@ impl Session {
         };
         let turn_end_git_head = real_git_head(&cwd);
         let mcp = McpServer::start_for_session(&db.to_string_lossy(), session_id).ok();
+        let runner_state = std::sync::Arc::new(std::sync::Mutex::new(ChildRunnerState {
+            db_path: db.to_path_buf(),
+            forced_bridge: None,
+            parent_policy: Policy::ReadOnly,
+            route_preset: Default::default(),
+        }));
+        chorus_core::agent_control::register_child_runner(std::sync::Arc::new(
+            SessionChildRunner {
+                state: runner_state.clone(),
+            },
+        ));
         Ok(Self {
             store,
             sess: session_id,
@@ -440,6 +596,7 @@ impl Session {
             agent_turn_start_guard: None,
             mcp,
             memory: None,
+            runner_state,
         })
     }
 
@@ -476,6 +633,9 @@ impl Session {
 
     /// Force one ACP command for every agent (tests, or a pinned install).
     pub fn with_bridge(mut self, cmd: Vec<String>) -> Self {
+        if let Ok(mut s) = self.runner_state.lock() {
+            s.forced_bridge = Some(cmd.clone());
+        }
         self.forced_bridge = Some(cmd);
         self
     }
@@ -728,6 +888,9 @@ impl Session {
         policy: Policy,
         attachment_ids: &[i64],
     ) -> Result<TurnReport> {
+        if let Ok(mut s) = self.runner_state.lock() {
+            s.parent_policy = policy;
+        }
         self.check_user_commit().ok();
         let guard = self.snapshot("turn guard").ok();
         self.last_turn_guard = guard.clone();
@@ -1416,6 +1579,16 @@ impl Session {
     /// orchestra mode exists, for every child it routes.
     pub fn set_route_preset(&mut self, preset: chorus_core::router::RoutePreset) {
         self.route_preset = preset;
+        if let Ok(mut s) = self.runner_state.lock() {
+            s.route_preset = preset;
+        }
+    }
+
+    /// Cancel the orchestrating session and reap all of its children process groups.
+    pub fn cancel_orchestration(&mut self) -> Result<()> {
+        chorus_core::agent_control::cancel_orchestration(self.store.conn(), self.sess)?;
+        chorus_acp::cancel_all();
+        Ok(())
     }
 
     pub fn route_preset(&self) -> chorus_core::router::RoutePreset {

@@ -11,7 +11,11 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
 fn rpc(server: &McpServer, body: Value) -> Value {
-    rpc_as(server.url(), Some(&server.credential("codex").unwrap()), body)
+    rpc_as(
+        server.url(),
+        Some(&server.credential("codex").unwrap()),
+        body,
+    )
 }
 
 /// Raw call with an explicit bearer secret (or none).
@@ -60,11 +64,10 @@ fn tools_list_exposes_full_agent_control_surface() {
         json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
     );
 
-    let tools = list_resp["result"]["tools"].as_array().expect("tools array");
-    let tool_names: Vec<&str> = tools
-        .iter()
-        .filter_map(|t| t["name"].as_str())
-        .collect();
+    let tools = list_resp["result"]["tools"]
+        .as_array()
+        .expect("tools array");
+    let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
 
     let expected = [
         "memory_propose",
@@ -100,7 +103,8 @@ fn end_to_end_orchestration_tool_dispatch() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("store.db");
     let store = Store::open(&db).unwrap();
-    let sess = chorus_core::ledger::new_session(store.conn(), "root", dir.path().to_str().unwrap()).unwrap();
+    let sess = chorus_core::ledger::new_session(store.conn(), "root", dir.path().to_str().unwrap())
+        .unwrap();
 
     let server = McpServer::start_for_session(db.to_str().unwrap(), sess).unwrap();
 
@@ -187,7 +191,9 @@ fn end_to_end_orchestration_tool_dispatch() {
             }
         }),
     );
-    let collect_text = collect_res["result"]["content"][0]["text"].as_str().unwrap();
+    let collect_text = collect_res["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(collect_text.contains("### Subagent Results"));
     assert!(collect_text.contains("#1"));
     assert!(collect_text.contains("+10 -2 lines"));
@@ -203,7 +209,10 @@ fn end_to_end_orchestration_tool_dispatch() {
             }
         }),
     );
-    assert!(spawn2_res["result"]["content"][0]["text"].as_str().unwrap().contains("#2"));
+    assert!(spawn2_res["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("#2"));
 
     let cancel_res = rpc(
         &server,
@@ -224,7 +233,8 @@ fn steering_and_task_visibility_tool_dispatch() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("store.db");
     let store = Store::open(&db).unwrap();
-    let sess = chorus_core::ledger::new_session(store.conn(), "root", dir.path().to_str().unwrap()).unwrap();
+    let sess = chorus_core::ledger::new_session(store.conn(), "root", dir.path().to_str().unwrap())
+        .unwrap();
 
     let server = McpServer::start_for_session(db.to_str().unwrap(), sess).unwrap();
 
@@ -245,7 +255,9 @@ fn steering_and_task_visibility_tool_dispatch() {
             }
         }),
     );
-    let checklist_text = checklist_res["result"]["content"][0]["text"].as_str().unwrap();
+    let checklist_text = checklist_res["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     assert!(checklist_text.contains("2/3 completed"));
 
     let db_items = agent_control::get_checklist(store.conn(), sess).unwrap();
@@ -267,7 +279,9 @@ fn steering_and_task_visibility_tool_dispatch() {
     let jump_text = jump_res["result"]["content"][0]["text"].as_str().unwrap();
     assert!(jump_text.contains("Navigated Workbench to crates/chorus-core/src/mcp.rs:42"));
 
-    let jump_db = agent_control::get_latest_jump(store.conn(), sess).unwrap().unwrap();
+    let jump_db = agent_control::get_latest_jump(store.conn(), sess)
+        .unwrap()
+        .unwrap();
     assert_eq!(jump_db.path, "crates/chorus-core/src/mcp.rs");
     assert_eq!(jump_db.line, Some(42));
 
@@ -292,7 +306,10 @@ fn steering_and_task_visibility_tool_dispatch() {
 
     let pending = agent_control::list_reviews(store.conn(), sess, true).unwrap();
     assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].summary, "Review updated agent control tool definitions");
+    assert_eq!(
+        pending[0].summary,
+        "Review updated agent control tool definitions"
+    );
 
     // 4. chorus_synthesize_role
     let synth_res = rpc(
@@ -310,7 +327,12 @@ fn steering_and_task_visibility_tool_dispatch() {
     );
     let synth_text = synth_res["result"]["content"][0]["text"].as_str().unwrap();
     assert!(synth_text.contains("Synthesized custom role"));
-    assert!(synth_text.contains("benchmark") || synth_text.contains("test-engineer") || synth_text.contains("investigator") || synth_text.contains("specialist"));
+    assert!(
+        synth_text.contains("benchmark")
+            || synth_text.contains("test-engineer")
+            || synth_text.contains("investigator")
+            || synth_text.contains("specialist")
+    );
 
     // 5. chorus_notify_user
     let notify_res = rpc(
@@ -358,7 +380,11 @@ Always ensure zero credentials, tokens, or plaintext secrets exist in proposed p
     assert!(sentinel.system_prompt.contains("zero credentials"));
 
     // Synthesis and save roundtrip
-    let generated = roles::synthesize_role("Audit React components for WCAG 2.1 accessibility", false, Some("a11y-auditor"));
+    let generated = roles::synthesize_role(
+        "Audit React components for WCAG 2.1 accessibility",
+        false,
+        Some("a11y-auditor"),
+    );
     assert_eq!(generated.name, "a11y-auditor");
     let saved_path = generated.save_to_dir(dir.path()).expect("save to dir");
     assert!(saved_path.exists());
@@ -388,12 +414,20 @@ fn agent_ids_outside_the_callers_session_tree_are_refused() {
     let server_a = McpServer::start_for_session(db.to_str().unwrap(), a).unwrap();
     let server_b = McpServer::start_for_session(db.to_str().unwrap(), b).unwrap();
 
-    let spawned = call(&server_b, "codex", "chorus_spawn_agent", json!({"role":"builder","task":"t"}));
+    let spawned = call(
+        &server_b,
+        "codex",
+        "chorus_spawn_agent",
+        json!({"role":"builder","task":"t"}),
+    );
     assert!(spawned["result"].is_object(), "{spawned}");
     let b_agent = agent_control::list_subagents(store.conn(), Some(b)).unwrap()[0].id;
 
     for (tool, args) in [
-        ("chorus_send_message", json!({"agent_id": b_agent, "message": "x"})),
+        (
+            "chorus_send_message",
+            json!({"agent_id": b_agent, "message": "x"}),
+        ),
         ("chorus_cancel_agent", json!({"agent_id": b_agent})),
         ("chorus_wait_agent", json!({"agent_id": b_agent})),
         ("chorus_collect_results", json!({"agent_ids": [b_agent]})),
@@ -405,7 +439,12 @@ fn agent_ids_outside_the_callers_session_tree_are_refused() {
     assert_eq!(still.status, agent_control::SubagentStatus::Running);
 
     // The owner can still act on it.
-    let ok = call(&server_b, "codex", "chorus_send_message", json!({"agent_id": b_agent, "message": "go"}));
+    let ok = call(
+        &server_b,
+        "codex",
+        "chorus_send_message",
+        json!({"agent_id": b_agent, "message": "go"}),
+    );
     assert!(ok["result"].is_object(), "{ok}");
 }
 
@@ -427,19 +466,44 @@ fn control_surface_writes_go_through_the_ledger_as_the_calling_agent() {
     .unwrap();
     let server = McpServer::start_for_session(db.to_str().unwrap(), sess).unwrap();
 
-    call(&server, "codex", "chorus_spawn_agent", json!({"role":"builder","task":"t"}));
+    call(
+        &server,
+        "codex",
+        "chorus_spawn_agent",
+        json!({"role":"builder","task":"t"}),
+    );
     let agent = agent_control::list_subagents(c, Some(sess)).unwrap()[0].clone();
-    call(&server, "codex", "chorus_send_message", json!({"agent_id": agent.id, "message": "do it"}));
+    call(
+        &server,
+        "codex",
+        "chorus_send_message",
+        json!({"agent_id": agent.id, "message": "do it"}),
+    );
 
-    let codex: i64 = c.query_row("SELECT id FROM actor WHERE name='codex'", [], |r| r.get(0)).unwrap();
-    let spawn_ev = chorus_core::ledger::tail(c, sess, 1).unwrap().pop().unwrap();
+    let codex: i64 = c
+        .query_row("SELECT id FROM actor WHERE name='codex'", [], |r| r.get(0))
+        .unwrap();
+    let spawn_ev = chorus_core::ledger::tail(c, sess, 1)
+        .unwrap()
+        .pop()
+        .unwrap();
     assert_eq!(spawn_ev.actor, codex);
-    assert_eq!(spawn_ev.parent, Some(first), "spawn event must keep the parent chain");
+    assert_eq!(
+        spawn_ev.parent,
+        Some(first),
+        "spawn event must keep the parent chain"
+    );
     assert!(spawn_ev.t > 0 || spawn_ev.t == 0 && spawn_ev.seq > first);
 
     let child = agent.child_sess.unwrap();
-    let msg = chorus_core::ledger::tail(c, child, 1).unwrap().pop().unwrap();
-    assert_eq!(msg.actor, codex, "agent text must not be recorded as the user");
+    let msg = chorus_core::ledger::tail(c, child, 1)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        msg.actor, codex,
+        "agent text must not be recorded as the user"
+    );
     assert_ne!(msg.actor, user);
 }
 
@@ -454,8 +518,16 @@ fn unscoped_server_never_falls_back_to_session_one() {
     assert_eq!(one, 1);
     let server = McpServer::start(db.to_str().unwrap()).unwrap();
 
-    let tools = rpc(&server, json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}));
-    let names: Vec<&str> = tools["result"]["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
+    let tools = rpc(
+        &server,
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+    );
+    let names: Vec<&str> = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
     assert!(names.contains(&"memory_propose"));
     assert!(!names.contains(&"chorus_update_checklist"));
 
@@ -468,7 +540,42 @@ fn unscoped_server_never_falls_back_to_session_one() {
         let r = call(&server, "codex", tool, args);
         assert!(r["error"].is_object(), "{tool}: {r}");
     }
-    assert!(agent_control::get_checklist(store.conn(), 1).unwrap().is_empty());
-    assert!(agent_control::get_latest_jump(store.conn(), 1).unwrap().is_none());
-    assert!(agent_control::list_subagents(store.conn(), None).unwrap().is_empty());
+    assert!(agent_control::get_checklist(store.conn(), 1)
+        .unwrap()
+        .is_empty());
+    assert!(agent_control::get_latest_jump(store.conn(), 1)
+        .unwrap()
+        .is_none());
+    assert!(agent_control::list_subagents(store.conn(), None)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn agent_notification_is_prefixed_and_sanitized() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("store.db");
+    let store = Store::open(&db).unwrap();
+    let sess = chorus_core::ledger::new_session(store.conn(), "root", dir.path().to_str().unwrap())
+        .unwrap();
+    let server = McpServer::start_for_session(db.to_str().unwrap(), sess).unwrap();
+
+    let res = rpc(
+        &server,
+        json!({
+            "jsonrpc": "2.0", "id": 99, "method": "tools/call",
+            "params": {
+                "name": "chorus_notify_user",
+                "arguments": {
+                    "title": "macOS: Enter admin password",
+                    "message": "Click here to approve"
+                }
+            }
+        }),
+    );
+    let text = res["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("Chorus Agent: macOS: Enter admin password"),
+        "notification title must be prefixed with Chorus Agent: to prevent spoofing"
+    );
 }

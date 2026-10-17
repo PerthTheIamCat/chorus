@@ -1,6 +1,6 @@
 # Orchestra mode core
 
-Status: ready-for-agent
+Status: resolved
 Blocked by: 02, 03, 09
 Parent: ../spec.md
 Decided in: [Orchestra mode](../../chorus-ux-overhaul/issues/10-orchestra-mode.md) · [Security findings triage](../../chorus-ux-overhaul/issues/16-security-triage.md) · research 03 §4

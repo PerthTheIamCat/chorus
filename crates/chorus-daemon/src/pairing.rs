@@ -9,6 +9,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+fn default_attempts() -> u32 {
+    5
+}
+
 /// Ephemeral pairing session waiting for mobile QR scan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairingSession {
@@ -19,6 +23,8 @@ pub struct PairingSession {
     pub tailscale_ip: Option<String>,
     pub created_at: u64,
     pub expires_at: u64,
+    #[serde(default = "default_attempts")]
+    pub remaining_attempts: u32,
 }
 
 /// A securely paired mobile companion device.
@@ -123,6 +129,7 @@ impl PairingManager {
             tailscale_ip: detect_tailscale_ip(),
             created_at: now,
             expires_at: now + 300, // 5 minutes
+            remaining_attempts: 5,
         };
 
         let mut lock = self.inner.lock().unwrap();
@@ -138,18 +145,27 @@ impl PairingManager {
         // Validate session
         let session = lock
             .active_session
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| DaemonError::InvalidRequest("no active pairing session".into()))?;
-
-        if session.pairing_token != pairing_token {
-            return Err(DaemonError::InvalidRequest("invalid pairing token".into()));
-        }
 
         if now >= session.expires_at {
             lock.active_session = None;
             return Err(DaemonError::InvalidRequest(
                 "pairing token has expired".into(),
             ));
+        }
+
+        if !constant_time_eq(session.pairing_token.as_bytes(), pairing_token.as_bytes()) {
+            if session.remaining_attempts > 0 {
+                session.remaining_attempts -= 1;
+            }
+            if session.remaining_attempts == 0 {
+                lock.active_session = None;
+                return Err(DaemonError::InvalidRequest(
+                    "too many failed pairing attempts; session invalidated".into(),
+                ));
+            }
+            return Err(DaemonError::InvalidRequest("invalid pairing token".into()));
         }
 
         // Generate persistent auth bearer token
@@ -212,6 +228,17 @@ fn secure_token() -> std::io::Result<String> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -246,6 +273,7 @@ mod tests {
             tailscale_ip: ts.map(str::to_string),
             created_at: 0,
             expires_at: 0,
+            remaining_attempts: 5,
         }
     }
 
@@ -329,5 +357,29 @@ mod tests {
         let revoked = manager.revoke_device(&device.device_id);
         assert!(revoked);
         assert!(manager.verify_token(&device.auth_token).is_none());
+    }
+
+    #[test]
+    fn pairing_attempt_budget_exhaustion_invalidates_session() {
+        let manager = PairingManager::new();
+        let session = manager.initiate_session("http://127.0.0.1:4040").unwrap();
+
+        // 4 failed attempts: session still active
+        for _ in 0..4 {
+            let res = manager.complete_pairing("wrong_token", "Device");
+            assert!(res.is_err());
+            assert!(manager.inner.lock().unwrap().active_session.is_some());
+        }
+
+        // 5th failed attempt: exhausts budget and invalidates session
+        let res5 = manager.complete_pairing("wrong_token", "Device");
+        assert!(res5.is_err());
+        let err_msg = res5.unwrap_err().to_string();
+        assert!(err_msg.contains("too many failed pairing attempts"));
+        assert!(manager.inner.lock().unwrap().active_session.is_none());
+
+        // Subsequent attempt with correct token now fails because session is gone
+        let res_good = manager.complete_pairing(&session.pairing_token, "Device");
+        assert!(res_good.is_err());
     }
 }

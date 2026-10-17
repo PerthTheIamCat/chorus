@@ -155,7 +155,11 @@ impl McpServer {
     /// The agent's ledger writes through this server are attributed to it.
     pub fn credential(&self, agent: &str) -> Result<String> {
         // Never mint a credential that writes as the human.
-        let agent = if agent.trim().is_empty() || agent == "user" { "agent" } else { agent };
+        let agent = if agent.trim().is_empty() || agent == "user" {
+            "agent"
+        } else {
+            agent
+        };
         let mut list = self
             .creds
             .lock()
@@ -166,7 +170,10 @@ impl McpServer {
         let secret = random_secret()?;
         list.push(Credential {
             secret: secret.clone(),
-            caller: Caller { session: self.scope, actor: agent.to_string() },
+            caller: Caller {
+                session: self.scope,
+                actor: agent.to_string(),
+            },
         });
         Ok(secret)
     }
@@ -438,7 +445,11 @@ fn propose_tool_schema() -> Value {
 fn caller_actor(conn: &rusqlite::Connection, caller: &Caller) -> std::result::Result<i64, String> {
     use rusqlite::OptionalExtension;
     let found: Option<i64> = conn
-        .query_row("SELECT id FROM actor WHERE name = ?1", [&caller.actor], |r| r.get(0))
+        .query_row(
+            "SELECT id FROM actor WHERE name = ?1",
+            [&caller.actor],
+            |r| r.get(0),
+        )
         .optional()
         .map_err(|e| e.to_string())?;
     match found {
@@ -551,18 +562,31 @@ fn call_tool(
             .get("task")
             .and_then(Value::as_str)
             .ok_or("task is required")?;
+        let weight = args.get("weight").and_then(Value::as_str);
+        let default_worktree = role == "builder";
         let worktree = args
             .get("worktree")
             .and_then(Value::as_bool)
-            .unwrap_or(false);
+            .unwrap_or(default_worktree);
 
         let sess = require_session(caller)?;
         let cwd: String = conn
-            .query_row("SELECT cwd FROM session WHERE id = ?1", [sess], |r| r.get(0))
+            .query_row("SELECT cwd FROM session WHERE id = ?1", [sess], |r| {
+                r.get(0)
+            })
             .map_err(|e| format!("session {sess}: {e}"))?;
 
-        let agent = agent_control::spawn_agent(conn, Some(sess), role, task, worktree, &cwd)
-            .map_err(|e| e.to_string())?;
+        let agent = agent_control::spawn_agent_with_options(
+            conn,
+            Some(sess),
+            role,
+            task,
+            weight,
+            worktree,
+            &cwd,
+            None,
+        )
+        .map_err(|e| e.to_string())?;
 
         let payload = serde_json::json!({
             "event": "subagent_spawned",
@@ -574,7 +598,10 @@ fn call_tool(
         .to_string();
         let actor_id = caller_actor(conn, caller)?;
         let mut ev = NewEvent::new(sess, EventKind::ToolCall, actor_id, payload);
-        if let Some(last) = ledger::tail(conn, sess, 1).map_err(|e| e.to_string())?.last() {
+        if let Some(last) = ledger::tail(conn, sess, 1)
+            .map_err(|e| e.to_string())?
+            .last()
+        {
             ev = ev.parent(last.seq);
         }
         ledger::append(conn, &ev).map_err(|e| e.to_string())?;
@@ -599,7 +626,10 @@ fn call_tool(
     if name == "chorus_send_message" {
         let agent_id = args
             .get("agent_id")
-            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
             .ok_or("agent_id is required")?;
         let message = args
             .get("message")
@@ -611,14 +641,18 @@ fn call_tool(
         let msg = agent_control::send_message(conn, agent_id, actor_id, message)
             .map_err(|e| e.to_string())?;
 
-        let text = format!("Message delivered to child agent #{}: {:?}", msg.subagent_id, msg.content);
+        let text = format!(
+            "Message delivered to child agent #{}: {:?}",
+            msg.subagent_id, msg.content
+        );
         return Ok(json!({ "content": [{ "type": "text", "text": text }] }));
     }
 
     if name == "chorus_wait_agent" {
-        let agent_id = args
-            .get("agent_id")
-            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+        let agent_id = args.get("agent_id").and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        });
         let timeout_secs = args
             .get("timeout_secs")
             .and_then(Value::as_u64)
@@ -646,15 +680,28 @@ fn call_tool(
         let mut agent_ids = Vec::new();
         if let Some(arr) = args.get("agent_ids").and_then(Value::as_array) {
             for v in arr {
-                if let Some(id) = v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())) {
+                if let Some(id) = v
+                    .as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                {
                     agent_ids.push(id);
                 }
             }
-        } else if let Some(id) = args.get("agent_id").and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))) {
+        } else if let Some(id) = args.get("agent_id").and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        }) {
             agent_ids.push(id);
         }
-        let ids_opt = if agent_ids.is_empty() { None } else { Some(agent_ids.as_slice()) };
-        let join_mode = args.get("join_mode").and_then(Value::as_str).unwrap_or("compact");
+        let ids_opt = if agent_ids.is_empty() {
+            None
+        } else {
+            Some(agent_ids.as_slice())
+        };
+        let join_mode = args
+            .get("join_mode")
+            .and_then(Value::as_str)
+            .unwrap_or("compact");
         let sess = require_session(caller)?;
         for id in &agent_ids {
             require_owned(conn, caller, *id)?;
@@ -672,15 +719,21 @@ fn call_tool(
     if name == "chorus_cancel_agent" {
         let agent_id = args
             .get("agent_id")
-            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
             .ok_or("agent_id is required")?;
         let reason = args.get("reason").and_then(Value::as_str);
         require_owned(conn, caller, agent_id)?;
 
-        let agent = agent_control::cancel_agent(conn, agent_id, reason)
-            .map_err(|e| e.to_string())?;
+        let agent =
+            agent_control::cancel_agent(conn, agent_id, reason).map_err(|e| e.to_string())?;
 
-        let text = format!("Cancelled child agent #{} (role: '{}')", agent.id, agent.role);
+        let text = format!(
+            "Cancelled child agent #{} (role: '{}')",
+            agent.id, agent.role
+        );
         return Ok(json!({ "content": [{ "type": "text", "text": text }] }));
     }
 
@@ -696,10 +749,7 @@ fn call_tool(
                 .get("text")
                 .and_then(Value::as_str)
                 .ok_or("item text is required")?;
-            let done = item
-                .get("done")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
+            let done = item.get("done").and_then(Value::as_bool).unwrap_or(false);
             let in_progress = item
                 .get("in_progress")
                 .and_then(Value::as_bool)
@@ -712,11 +762,15 @@ fn call_tool(
         }
 
         let sess = require_session(caller)?;
-        let updated = agent_control::update_checklist(conn, sess, &items)
-            .map_err(|e| e.to_string())?;
+        let updated =
+            agent_control::update_checklist(conn, sess, &items).map_err(|e| e.to_string())?;
 
         let done_count = updated.iter().filter(|i| i.done).count();
-        let text = format!("Updated live task checklist: {}/{} completed.", done_count, updated.len());
+        let text = format!(
+            "Updated live task checklist: {}/{} completed.",
+            done_count,
+            updated.len()
+        );
         return Ok(json!({ "content": [{ "type": "text", "text": text }] }));
     }
 
@@ -725,14 +779,11 @@ fn call_tool(
             .get("path")
             .and_then(Value::as_str)
             .ok_or("path is required")?;
-        let line = args
-            .get("line")
-            .and_then(Value::as_u64)
-            .map(|v| v as u32);
+        let line = args.get("line").and_then(Value::as_u64).map(|v| v as u32);
 
         let sess = require_session(caller)?;
-        let jump = agent_control::jump_to_file(conn, sess, path, line)
-            .map_err(|e| e.to_string())?;
+        let jump =
+            agent_control::jump_to_file(conn, sess, path, line).map_err(|e| e.to_string())?;
 
         let line_str = jump.line.map(|l| format!(":{l}")).unwrap_or_default();
         let text = format!("Navigated Workbench to {}{}", jump.path, line_str);
@@ -750,7 +801,10 @@ fn call_tool(
         let req = agent_control::request_review(conn, sess, summary, &hunks)
             .map_err(|e| e.to_string())?;
 
-        let text = format!("Created interactive review request #{}: {:?}. Status: pending.", req.id, req.summary);
+        let text = format!(
+            "Created interactive review request #{}: {:?}. Status: pending.",
+            req.id, req.summary
+        );
         return Ok(json!({ "content": [{ "type": "text", "text": text }] }));
     }
 
@@ -760,10 +814,17 @@ fn call_tool(
             .and_then(Value::as_str)
             .ok_or("task is required")?;
         let name_arg = args.get("name").and_then(Value::as_str);
-        let write_mode = args.get("write_mode").and_then(Value::as_bool).unwrap_or(false);
+        let write_mode = args
+            .get("write_mode")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
 
         let role = roles::synthesize_role(task, write_mode, name_arg);
-        let text = format!("Synthesized custom role '{}':\n\n{}", role.name, role.to_markdown());
+        let text = format!(
+            "Synthesized custom role '{}':\n\n{}",
+            role.name,
+            role.to_markdown()
+        );
         return Ok(json!({
             "content": [{ "type": "text", "text": text }],
             "role": role
@@ -779,12 +840,16 @@ fn call_tool(
             .get("message")
             .and_then(Value::as_str)
             .ok_or("message is required")?;
-        let _urgency = args.get("urgency").and_then(Value::as_str).unwrap_or("normal");
+        let _urgency = args
+            .get("urgency")
+            .and_then(Value::as_str)
+            .unwrap_or("normal");
 
-        let opts = notify::NotificationOptions::new(title, message);
+        let safe_title = format!("Chorus Agent: {}", title.trim());
+        let opts = notify::NotificationOptions::new(&safe_title, message);
         let _ = notify::send_notification(&opts);
 
-        let text = format!("User notification triggered: {title} - {message}");
+        let text = format!("User notification triggered: {safe_title} - {message}");
         return Ok(json!({ "content": [{ "type": "text", "text": text }] }));
     }
 
@@ -802,7 +867,7 @@ fn attachment_read_schema() -> Value {
 fn spawn_agent_schema() -> Value {
     json!({
         "name": "chorus_spawn_agent",
-        "description": "Spawn a child agent session with a specialized role, task prompt, and optional isolated git worktree.",
+        "description": "Spawn a child agent session with a specialized role, task prompt, weight, and optional isolated git worktree.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -814,10 +879,14 @@ fn spawn_agent_schema() -> Value {
                     "type": "string",
                     "description": "The specific task or instruction for the child agent"
                 },
+                "weight": {
+                    "type": "string",
+                    "description": "Task weight/difficulty: 'light', 'normal', or 'heavy'",
+                    "enum": ["light", "normal", "heavy"]
+                },
                 "worktree": {
                     "type": "boolean",
-                    "description": "If true, allocates an isolated git worktree for write operations to prevent file conflicts",
-                    "default": false
+                    "description": "If true, allocates an isolated git worktree for write operations. Defaults to true for builder role."
                 },
                 "model": {
                     "type": "string",

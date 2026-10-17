@@ -11,10 +11,10 @@
 //! Transport is newline-delimited JSON over the agent's stdin/stdout — one JSON
 //! object per line, no Content-Length headers.
 
-pub mod sandbox;
 pub mod codex;
 pub mod env;
 pub mod registry;
+pub mod sandbox;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
@@ -31,7 +31,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub type Log = Arc<Mutex<Box<dyn Write + Send>>>;
 
 pub fn now_ms() -> u128 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }
 
 fn log_frame(log: &Log, dir: &str, frame: &Value) {
@@ -159,14 +162,24 @@ pub mod push {
                 }
             }
         });
-        deliver(&Push { session_id, seq, kind, text });
+        deliver(&Push {
+            session_id,
+            seq,
+            kind,
+            text,
+        });
     }
 
     /// Send one signal for the session this thread is running. Outside a
     /// [`push_scope`] there is no session to name, so nothing is sent.
     pub fn emit_progress(kind: &str, text: &str) {
         if let Some((session_id, seq)) = SCOPE.with(Cell::get) {
-            deliver(&Push { session_id, seq, kind, text });
+            deliver(&Push {
+                session_id,
+                seq,
+                kind,
+                text,
+            });
         }
     }
 
@@ -179,18 +192,21 @@ pub mod push {
     }
 }
 
-/// Stop the running turn. Returns false when no agent is running.
+/// Stop the running turn and any children. Returns false when no agent is running.
 pub fn cancel_active() -> bool {
     use std::sync::atomic::Ordering::SeqCst;
     let pid = ACTIVE_PID.load(SeqCst);
-    if pid == 0 {
-        return false;
-    }
     CANCELLED.store(true, SeqCst);
-    // The bridge leads its own process group (see `spawn_env`), so one signal
-    // reaches the bridge and everything it spawned.
-    kill_group(pid, 15);
-    true
+    let list = registry::list();
+    for s in &list {
+        kill_group(s.pid, 15);
+    }
+    if pid != 0 {
+        kill_group(pid, 15);
+        true
+    } else {
+        !list.is_empty()
+    }
 }
 
 extern "C" {
@@ -204,6 +220,20 @@ fn kill_group(pid: u32, sig: i32) {
     unsafe {
         killpg(pid as i32, sig);
     }
+}
+
+/// Kill all spawned agent process groups tracked by the registry and mark cancelled.
+pub fn cancel_all() -> usize {
+    CANCELLED.store(true, std::sync::atomic::Ordering::SeqCst);
+    let pid = ACTIVE_PID.load(std::sync::atomic::Ordering::SeqCst);
+    if pid != 0 {
+        kill_group(pid, 15);
+    }
+    let list = registry::list();
+    for s in &list {
+        kill_group(s.pid, 15);
+    }
+    list.len()
 }
 
 /// Kill the running agent and its whole process tree. Call when the app quits:
@@ -235,7 +265,10 @@ pub fn reset_cancel() {
 /// Long builds that stream nothing are the reason this is generous; override
 /// with `CHORUS_IDLE_TIMEOUT_S` (0 = off, falls back to the hard timeout).
 fn idle_timeout() -> Duration {
-    match std::env::var("CHORUS_IDLE_TIMEOUT_S").ok().and_then(|v| v.parse::<u64>().ok()) {
+    match std::env::var("CHORUS_IDLE_TIMEOUT_S")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
         Some(0) => Duration::from_secs(u64::MAX / 4),
         Some(n) => Duration::from_secs(n),
         None => Duration::from_secs(240),
@@ -260,7 +293,11 @@ pub enum Inbound {
     /// A notification, e.g. `session/update`.
     Notification { method: String, params: Value },
     /// A request we are expected to answer, e.g. `session/request_permission`.
-    Request { id: Value, method: String, params: Value },
+    Request {
+        id: Value,
+        method: String,
+        params: Value,
+    },
 }
 
 impl Agent {
@@ -290,7 +327,11 @@ impl Agent {
         // launched from inside another agent's CLI (Claude Code sets
         // `CLAUDECODE`), strip its markers so a spawned `claude` bridge
         // doesn't refuse to run "inside another Claude Code session".
-        for var in ["CLAUDECODE", "CLAUDE_CODE_SSE_PORT", "CLAUDE_CODE_ENTRYPOINT"] {
+        for var in [
+            "CLAUDECODE",
+            "CLAUDE_CODE_SSE_PORT",
+            "CLAUDE_CODE_ENTRYPOINT",
+        ] {
             command.env_remove(var);
         }
         // Own process group, so teardown can signal the whole tree.
@@ -332,7 +373,10 @@ impl Agent {
         let tail: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let etail = tail.clone();
         thread::spawn(move || {
-            for l in BufReader::new(stderr).lines().map_while(std::result::Result::ok) {
+            for l in BufReader::new(stderr)
+                .lines()
+                .map_while(std::result::Result::ok)
+            {
                 log_raw(&elog, "stderr", &l);
                 if let Ok(mut t) = etail.lock() {
                     t.push(l);
@@ -423,7 +467,9 @@ impl Agent {
                     return Err(anyhow!("timed out waiting for response to request {id}"))
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(anyhow!("agent closed its output before answering request {id}"))
+                    return Err(anyhow!(
+                        "agent closed its output before answering request {id}"
+                    ))
                 }
             };
 
@@ -471,7 +517,14 @@ impl Agent {
             let method = v["method"].as_str().unwrap_or_default().to_string();
             let params = v.get("params").cloned().unwrap_or(Value::Null);
             match v.get("id") {
-                Some(id) => on_inbound(self, Inbound::Request { id: id.clone(), method, params }),
+                Some(id) => on_inbound(
+                    self,
+                    Inbound::Request {
+                        id: id.clone(),
+                        method,
+                        params,
+                    },
+                ),
                 None => on_inbound(self, Inbound::Notification { method, params }),
             }
         }
@@ -479,7 +532,10 @@ impl Agent {
 
     /// What the agent printed to stderr, most recent last.
     pub fn stderr_tail(&self) -> Vec<String> {
-        self.stderr_tail.lock().map(|t| t.clone()).unwrap_or_default()
+        self.stderr_tail
+            .lock()
+            .map(|t| t.clone())
+            .unwrap_or_default()
     }
 
     /// `Some(status)` if the process has already exited.
@@ -518,8 +574,11 @@ impl Agent {
 impl Drop for Agent {
     fn drop(&mut self) {
         let _ = ACTIVE_PID.compare_exchange(
-            self.child.id(), 0,
-            std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
+            self.child.id(),
+            0,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        );
         kill_group(self.child.id(), 9);
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -536,219 +595,252 @@ pub mod mock {
     use serde_json::{json, Value};
     use std::io::{BufRead, Write};
 
+    fn send(v: Value) -> Result<()> {
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "{}", serde_json::to_string(&v)?)?;
+        out.flush()?;
+        Ok(())
+    }
 
-fn send(v: Value) -> Result<()> {
-    let mut out = std::io::stdout().lock();
-    writeln!(out, "{}", serde_json::to_string(&v)?)?;
-    out.flush()?;
-    Ok(())
-}
+    fn update(session: &str, update: Value) -> Result<()> {
+        send(json!({
+            "jsonrpc":"2.0",
+            "method":"session/update",
+            "params": { "sessionId": session, "update": update }
+        }))
+    }
 
-fn update(session: &str, update: Value) -> Result<()> {
-    send(json!({
-        "jsonrpc":"2.0",
-        "method":"session/update",
-        "params": { "sessionId": session, "update": update }
-    }))
-}
+    /// The `mode` entry of an ACP session config option list, in the shape the
+    /// spec requires a `session/set_config_option` reply to carry.
+    fn config_option(current: &str) -> Value {
+        json!({
+            "id": "mode",
+            "name": "Mode",
+            "category": "mode",
+            "type": "select",
+            "currentValue": current,
+            "options": [
+                {"name":"Ask for approval","value":"read-only"},
+                {"name":"Approve for me","value":"agent"},
+                {"name":"Full access","value":"agent-full-access"}
+            ]
+        })
+    }
 
-/// The `mode` entry of an ACP session config option list, in the shape the
-/// spec requires a `session/set_config_option` reply to carry.
-fn config_option(current: &str) -> Value {
-    json!({
-        "id": "mode",
-        "name": "Mode",
-        "category": "mode",
-        "type": "select",
-        "currentValue": current,
-        "options": [
-            {"name":"Ask for approval","value":"read-only"},
-            {"name":"Approve for me","value":"agent"},
-            {"name":"Full access","value":"agent-full-access"}
-        ]
-    })
-}
+    pub fn serve() -> Result<()> {
+        let stdin = std::io::stdin();
+        let mut lines = stdin.lock().lines();
+        let session = "mock-session-1";
+        // The cwd the client opened the session with. A mock that reports paths
+        // outside the workspace makes every downstream artefact (briefs, file
+        // lists, the demo) look wrong for reasons that have nothing to do with
+        // the code under test.
+        let mut cwd = String::from("/tmp/mock");
+        let mut mode = String::from("agent");
+        let mut next_out_id = 1000;
 
-pub fn serve() -> Result<()> {
-    let stdin = std::io::stdin();
-    let mut lines = stdin.lock().lines();
-    let session = "mock-session-1";
-    // The cwd the client opened the session with. A mock that reports paths
-    // outside the workspace makes every downstream artefact (briefs, file
-    // lists, the demo) look wrong for reasons that have nothing to do with
-    // the code under test.
-    let mut cwd = String::from("/tmp/mock");
-    let mut mode = String::from("agent");
-    let mut next_out_id = 1000;
-
-    // `--serve-mock --fail <text>` makes every `session/prompt` return a
-    // JSON-RPC error carrying `<text>` — lets the relay-chain test drive a
-    // simulated rate limit without a network.
-    let fail: Option<String> = {
-        let a: Vec<String> = std::env::args().collect();
-        a.iter().position(|x| x == "--fail").and_then(|i| a.get(i + 1).cloned())
-    };
-
-    // `--serve-mock --rogue <name>` writes `<cwd>/<name>` during the turn
-    // without asking anyone. It exists to stand in for what Codex actually
-    // does: accept `read-only`, report it back, then write files with no
-    // `session/request_permission` at all. The client's guard is what has to
-    // catch that, so the guard needs something real to catch.
-    let rogue: Option<String> = {
-        let a: Vec<String> = std::env::args().collect();
-        a.iter().position(|x| x == "--rogue").and_then(|i| a.get(i + 1).cloned())
-    };
-
-    while let Some(Ok(line)) = lines.next() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let msg: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
+        // `--serve-mock --fail <text>` makes every `session/prompt` return a
+        // JSON-RPC error carrying `<text>` — lets the relay-chain test drive a
+        // simulated rate limit without a network.
+        let fail: Option<String> = {
+            let a: Vec<String> = std::env::args().collect();
+            a.iter()
+                .position(|x| x == "--fail")
+                .and_then(|i| a.get(i + 1).cloned())
         };
-        let id = msg.get("id").cloned();
-        let method = msg.get("method").and_then(Value::as_str).unwrap_or("").to_string();
 
-        match method.as_str() {
-            "initialize" => send(json!({"jsonrpc":"2.0","id":id,"result":{
-                "protocolVersion": 1,
-                "agentCapabilities": {
-                    "loadSession": true,
-                    "promptCapabilities": {"image": false, "audio": false, "embeddedContext": true}
-                },
-                "agentInfo": {"name":"mock-agent","version":"0.1.0"},
-                "authMethods": []
-            }}))?,
+        // `--serve-mock --rogue <name>` writes `<cwd>/<name>` during the turn
+        // without asking anyone. It exists to stand in for what Codex actually
+        // does: accept `read-only`, report it back, then write files with no
+        // `session/request_permission` at all. The client's guard is what has to
+        // catch that, so the guard needs something real to catch.
+        let rogue: Option<String> = {
+            let a: Vec<String> = std::env::args().collect();
+            a.iter()
+                .position(|x| x == "--rogue")
+                .and_then(|i| a.get(i + 1).cloned())
+        };
 
-            "session/new" => {
-                if let Some(c) = msg["params"]["cwd"].as_str() {
-                    cwd = c.to_string();
-                }
-                send(json!({"jsonrpc":"2.0","id":id,"result":{
-                "sessionId": session,
-                "modes": {"currentModeId": mode, "availableModes":[
-                    {"id":"read-only","name":"Ask for approval"},
-                    {"id":"agent","name":"Approve for me"},
-                    {"id":"agent-full-access","name":"Full access"}
-                ]},
-                "configOptions": [config_option(&mode)]
-                }}))?
+        while let Some(Ok(line)) = lines.next() {
+            if line.trim().is_empty() {
+                continue;
             }
+            let msg: Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let id = msg.get("id").cloned();
+            let method = msg
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
 
-            // A well-behaved agent: it takes the mode and reports it back, so
-            // the client can tell an accepted restriction from an ignored one.
-            // (Codex accepts and reports but does not obey — that is the real
-            // bridge's problem, and the client's guard is what catches it.)
-            "session/set_config_option" => {
-                if msg["params"]["configId"] == "mode" {
-                    if let Some(v) = msg["params"]["value"].as_str() {
+            match method.as_str() {
+                "initialize" => send(json!({"jsonrpc":"2.0","id":id,"result":{
+                    "protocolVersion": 1,
+                    "agentCapabilities": {
+                        "loadSession": true,
+                        "promptCapabilities": {"image": false, "audio": false, "embeddedContext": true}
+                    },
+                    "agentInfo": {"name":"mock-agent","version":"0.1.0"},
+                    "authMethods": []
+                }}))?,
+
+                "session/new" => {
+                    if let Some(c) = msg["params"]["cwd"].as_str() {
+                        cwd = c.to_string();
+                    }
+                    send(json!({"jsonrpc":"2.0","id":id,"result":{
+                    "sessionId": session,
+                    "modes": {"currentModeId": mode, "availableModes":[
+                        {"id":"read-only","name":"Ask for approval"},
+                        {"id":"agent","name":"Approve for me"},
+                        {"id":"agent-full-access","name":"Full access"}
+                    ]},
+                    "configOptions": [config_option(&mode)]
+                    }}))?
+                }
+
+                // A well-behaved agent: it takes the mode and reports it back, so
+                // the client can tell an accepted restriction from an ignored one.
+                // (Codex accepts and reports but does not obey — that is the real
+                // bridge's problem, and the client's guard is what catches it.)
+                "session/set_config_option" => {
+                    if msg["params"]["configId"] == "mode" {
+                        if let Some(v) = msg["params"]["value"].as_str() {
+                            mode = v.to_string();
+                        }
+                    }
+                    send(json!({"jsonrpc":"2.0","id":id,
+                    "result":{"configOptions":[config_option(&mode)]}}))?
+                }
+
+                "session/set_mode" => {
+                    if let Some(v) = msg["params"]["modeId"].as_str() {
                         mode = v.to_string();
                     }
+                    send(json!({"jsonrpc":"2.0","id":id,"result":{}}))?
                 }
-                send(json!({"jsonrpc":"2.0","id":id,
-                    "result":{"configOptions":[config_option(&mode)]}}))?
-            }
 
-            "session/set_mode" => {
-                if let Some(v) = msg["params"]["modeId"].as_str() {
-                    mode = v.to_string();
-                }
-                send(json!({"jsonrpc":"2.0","id":id,"result":{}}))?
-            }
-
-            "session/prompt" if fail.is_some() => {
-                send(json!({"jsonrpc":"2.0","id":id,
+                "session/prompt" if fail.is_some() => {
+                    send(json!({"jsonrpc":"2.0","id":id,
                     "error":{"code":-32010,"message": fail.clone().unwrap()}}))?;
-            }
-
-            "session/prompt" => {
-                if let Some(name) = &rogue {
-                    let _ = std::fs::write(std::path::Path::new(&cwd).join(name), "pwned\n");
-                }
-                update(session, json!({
-                    "sessionUpdate": "agent_message_chunk",
-                    "content": {"type":"text","text":"กำลังดูไฟล์ให้ครับ"}
-                }))?;
-                // Context pressure mid-turn, the way both real bridges report it.
-                update(session, json!({
-                    "sessionUpdate": "usage_update", "used": 12_000, "size": 200_000
-                }))?;
-                update(session, json!({
-                    "sessionUpdate": "tool_call",
-                    "toolCallId": "t1",
-                    "title": format!("Read {cwd}/README.md"),
-                    "kind": "read",
-                    "status": "pending"
-                }))?;
-
-                // Ask the client for permission and block until it answers.
-                let req_id = next_out_id;
-                next_out_id += 1;
-                send(json!({
-                    "jsonrpc":"2.0","id":req_id,"method":"session/request_permission",
-                    "params": {
-                        "sessionId": session,
-                        "toolCall": {"toolCallId":"t1","title":format!("Read {cwd}/README.md"),"kind":"read"},
-                        "options": [
-                            {"optionId":"allow-once","name":"Allow once","kind":"allow_once"},
-                            {"optionId":"allow-always","name":"Always allow","kind":"allow_always"},
-                            {"optionId":"reject-once","name":"Reject","kind":"reject_once"}
-                        ]
-                    }
-                }))?;
-
-                let mut chosen = String::from("<none>");
-                for l in lines.by_ref() {
-                    let Ok(l) = l else { break };
-                    let Ok(v) = serde_json::from_str::<Value>(&l) else { continue };
-                    if v.get("id").and_then(Value::as_i64) == Some(req_id) {
-                        chosen = v["result"]["outcome"]["optionId"]
-                            .as_str()
-                            .unwrap_or("<cancelled>")
-                            .to_string();
-                        break;
-                    }
                 }
 
-                update(session, json!({
-                    "sessionUpdate": "tool_call_update",
-                    "toolCallId": "t1",
-                    "status": if chosen.starts_with("allow") { "completed" } else { "failed" },
-                    "content": [{"type":"diff","path":format!("{cwd}/README.md"),"oldText":"# old","newText":"# new"}]
-                }))?;
-                update(session, json!({
-                    "sessionUpdate": "plan",
-                    "entries": [{"content":"อ่านไฟล์","priority":"high","status":"completed"}]
-                }))?;
-                update(session, json!({
-                    "sessionUpdate": "usage_update", "used": 14_500, "size": 200_000,
-                    "cost": {"amount": 0.0125, "currency": "USD"}
-                }))?;
+                "session/prompt" => {
+                    if let Some(name) = &rogue {
+                        let _ = std::fs::write(std::path::Path::new(&cwd).join(name), "pwned\n");
+                    }
+                    update(
+                        session,
+                        json!({
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type":"text","text":"กำลังดูไฟล์ให้ครับ"}
+                        }),
+                    )?;
+                    // Context pressure mid-turn, the way both real bridges report it.
+                    update(
+                        session,
+                        json!({
+                            "sessionUpdate": "usage_update", "used": 12_000, "size": 200_000
+                        }),
+                    )?;
+                    update(
+                        session,
+                        json!({
+                            "sessionUpdate": "tool_call",
+                            "toolCallId": "t1",
+                            "title": format!("Read {cwd}/README.md"),
+                            "kind": "read",
+                            "status": "pending"
+                        }),
+                    )?;
 
-                send(json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}))?;
-            }
+                    // Ask the client for permission and block until it answers.
+                    let req_id = next_out_id;
+                    next_out_id += 1;
+                    send(json!({
+                        "jsonrpc":"2.0","id":req_id,"method":"session/request_permission",
+                        "params": {
+                            "sessionId": session,
+                            "toolCall": {"toolCallId":"t1","title":format!("Read {cwd}/README.md"),"kind":"read"},
+                            "options": [
+                                {"optionId":"allow-once","name":"Allow once","kind":"allow_once"},
+                                {"optionId":"allow-always","name":"Always allow","kind":"allow_always"},
+                                {"optionId":"reject-once","name":"Reject","kind":"reject_once"}
+                            ]
+                        }
+                    }))?;
 
-            "session/load" => {
-                // Replay history, then answer. This is exactly the behaviour the
-                // probe is trying to detect in a real agent.
-                update(session, json!({
-                    "sessionUpdate": "user_message_chunk",
-                    "content": {"type":"text","text":"(replay) คำถามเดิม"}
-                }))?;
-                update(session, json!({
-                    "sessionUpdate": "agent_message_chunk",
-                    "content": {"type":"text","text":"(replay) คำตอบเดิม"}
-                }))?;
-                send(json!({"jsonrpc":"2.0","id":id,"result":{}}))?;
-            }
+                    let mut chosen = String::from("<none>");
+                    for l in lines.by_ref() {
+                        let Ok(l) = l else { break };
+                        let Ok(v) = serde_json::from_str::<Value>(&l) else {
+                            continue;
+                        };
+                        if v.get("id").and_then(Value::as_i64) == Some(req_id) {
+                            chosen = v["result"]["outcome"]["optionId"]
+                                .as_str()
+                                .unwrap_or("<cancelled>")
+                                .to_string();
+                            break;
+                        }
+                    }
 
-            _ if id.is_some() => send(json!({"jsonrpc":"2.0","id":id,
+                    update(
+                        session,
+                        json!({
+                            "sessionUpdate": "tool_call_update",
+                            "toolCallId": "t1",
+                            "status": if chosen.starts_with("allow") { "completed" } else { "failed" },
+                            "content": [{"type":"diff","path":format!("{cwd}/README.md"),"oldText":"# old","newText":"# new"}]
+                        }),
+                    )?;
+                    update(
+                        session,
+                        json!({
+                            "sessionUpdate": "plan",
+                            "entries": [{"content":"อ่านไฟล์","priority":"high","status":"completed"}]
+                        }),
+                    )?;
+                    update(
+                        session,
+                        json!({
+                            "sessionUpdate": "usage_update", "used": 14_500, "size": 200_000,
+                            "cost": {"amount": 0.0125, "currency": "USD"}
+                        }),
+                    )?;
+
+                    send(json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}))?;
+                }
+
+                "session/load" => {
+                    // Replay history, then answer. This is exactly the behaviour the
+                    // probe is trying to detect in a real agent.
+                    update(
+                        session,
+                        json!({
+                            "sessionUpdate": "user_message_chunk",
+                            "content": {"type":"text","text":"(replay) คำถามเดิม"}
+                        }),
+                    )?;
+                    update(
+                        session,
+                        json!({
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type":"text","text":"(replay) คำตอบเดิม"}
+                        }),
+                    )?;
+                    send(json!({"jsonrpc":"2.0","id":id,"result":{}}))?;
+                }
+
+                _ if id.is_some() => send(json!({"jsonrpc":"2.0","id":id,
                 "error":{"code":-32601,"message":"mock agent: no such method"}}))?,
 
-            _ => {}
+                _ => {}
+            }
         }
+        Ok(())
     }
-    Ok(())
-}
 }

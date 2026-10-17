@@ -26,11 +26,35 @@ pub struct MergeOutcome {
     pub message: String,
 }
 
-/// Provision an isolated worktree under `.chorus/worktrees/<role>-<short_id>`
+/// Where agent worktrees live: `~/Library/Application Support/Chorus/worktrees/` (fixes D4).
+pub fn default_worktrees_dir() -> std::path::PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        std::path::PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("Chorus")
+            .join("worktrees")
+    } else {
+        std::path::PathBuf::from(".chorus").join("worktrees")
+    }
+}
+
+/// Provision an isolated worktree under `~/Library/Application Support/Chorus/worktrees/<role>-<short_id>`.
 pub fn create_worktree(root: &Path, role: &str) -> Result<WorktreeInfo> {
-    let short_id = format!("{:x}", rand_u32());
+    create_worktree_ext(root, role, false)
+}
+
+/// Provision an isolated worktree with opt-in `.env*` copying.
+pub fn create_worktree_ext(root: &Path, role: &str, copy_env: bool) -> Result<WorktreeInfo> {
+    if !crate::roles::is_valid_role_name(role) {
+        return Err(crate::ChorusError::Invalid(format!(
+            "invalid role name {role:?}: must match [a-z0-9-]{{1,64}}"
+        )));
+    }
+
+    let short_id = secure_short_id(role);
     let branch = format!("chorus/{role}-{short_id}");
-    let worktrees_dir = root.join(".chorus").join("worktrees");
+    let worktrees_dir = default_worktrees_dir();
     fs::create_dir_all(&worktrees_dir)?;
 
     let wt_path = worktrees_dir.join(format!("{role}-{short_id}"));
@@ -40,7 +64,14 @@ pub fn create_worktree(root: &Path, role: &str) -> Result<WorktreeInfo> {
 
     // Run git worktree add -b <branch> <path> HEAD
     let output = Command::new("git")
-        .args(["worktree", "add", "-b", &branch, wt_path.to_str().unwrap(), "HEAD"])
+        .args([
+            "worktree",
+            "add",
+            "-b",
+            &branch,
+            wt_path.to_str().unwrap(),
+            "HEAD",
+        ])
         .current_dir(root)
         .output()?;
 
@@ -51,8 +82,8 @@ pub fn create_worktree(root: &Path, role: &str) -> Result<WorktreeInfo> {
         )));
     }
 
-    // Synchronize .worktreeinclude files (.env, etc.)
-    sync_worktree_includes(root, &wt_path)?;
+    // Synchronize confined .worktreeinclude files (.env is opt-in)
+    sync_worktree_includes(root, &wt_path, copy_env)?;
 
     // Allocate dynamic port
     let allocated_port = allocate_dynamic_port();
@@ -70,7 +101,12 @@ pub fn create_worktree(root: &Path, role: &str) -> Result<WorktreeInfo> {
 /// Remove worktree and delete branch
 pub fn remove_worktree(root: &Path, worktree_path: &Path, branch: Option<&str>) -> Result<()> {
     let _ = Command::new("git")
-        .args(["worktree", "remove", "--force", worktree_path.to_str().unwrap()])
+        .args([
+            "worktree",
+            "remove",
+            "--force",
+            worktree_path.to_str().unwrap(),
+        ])
         .current_dir(root)
         .output();
 
@@ -84,8 +120,13 @@ pub fn remove_worktree(root: &Path, worktree_path: &Path, branch: Option<&str>) 
     Ok(())
 }
 
-/// Attempt to merge worktree branch into current HEAD
+/// Attempt to merge worktree branch into current HEAD without committing automatically.
 pub fn merge_worktree(root: &Path, branch: &str) -> Result<MergeOutcome> {
+    merge_worktree_ext(root, branch, false)
+}
+
+/// Attempt to merge worktree branch into current HEAD, with optional auto-commit.
+pub fn merge_worktree_ext(root: &Path, branch: &str, auto_commit: bool) -> Result<MergeOutcome> {
     let output = Command::new("git")
         .args(["merge", "--no-commit", "--no-ff", branch])
         .current_dir(root)
@@ -95,18 +136,29 @@ pub fn merge_worktree(root: &Path, branch: &str) -> Result<MergeOutcome> {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     if output.status.success() {
-        // Complete the merge commit
-        let _ = Command::new("git")
-            .args(["commit", "-m", &format!("Merge agent worktree branch {branch}")])
-            .current_dir(root)
-            .output();
-
-        Ok(MergeOutcome {
-            success: true,
-            fast_forward: stdout.contains("Fast-forward"),
-            has_conflicts: false,
-            message: "Merged cleanly".into(),
-        })
+        if auto_commit {
+            let _ = Command::new("git")
+                .args([
+                    "commit",
+                    "-m",
+                    &format!("Merge agent worktree branch {branch}"),
+                ])
+                .current_dir(root)
+                .output();
+            Ok(MergeOutcome {
+                success: true,
+                fast_forward: stdout.contains("Fast-forward"),
+                has_conflicts: false,
+                message: "Merged cleanly and committed".into(),
+            })
+        } else {
+            Ok(MergeOutcome {
+                success: true,
+                fast_forward: stdout.contains("Fast-forward"),
+                has_conflicts: false,
+                message: "Merge staged cleanly for user review".into(),
+            })
+        }
     } else {
         let has_conflicts = stdout.contains("CONFLICT") || stderr.contains("CONFLICT");
         // Abort merge to keep workspace clean
@@ -174,13 +226,19 @@ pub fn list_active_worktrees(root: &Path) -> Result<Vec<WorktreeInfo>> {
     Ok(worktrees)
 }
 
-fn sync_worktree_includes(root: &Path, target: &Path) -> Result<()> {
-    let default_files = [".env", ".env.local", ".env.development"];
-    for file in default_files {
-        let src = root.join(file);
-        if src.exists() {
-            let dst = target.join(file);
-            let _ = fs::copy(&src, &dst);
+fn sync_worktree_includes(root: &Path, target: &Path, copy_env: bool) -> Result<()> {
+    if copy_env {
+        let default_files = [".env", ".env.local", ".env.development"];
+        for file in default_files {
+            let src = root.join(file);
+            if src.exists() {
+                if let Ok(meta) = fs::symlink_metadata(&src) {
+                    if !meta.file_type().is_symlink() && meta.is_file() {
+                        let dst = target.join(file);
+                        let _ = fs::copy(&src, &dst);
+                    }
+                }
+            }
         }
     }
 
@@ -193,8 +251,20 @@ fn sync_worktree_includes(root: &Path, target: &Path) -> Result<()> {
                 if pattern.is_empty() || pattern.starts_with('#') {
                     continue;
                 }
+                // Confinement check: strictly reject '..', absolute paths, or null bytes
+                if pattern.contains("..")
+                    || pattern.starts_with('/')
+                    || pattern.starts_with('\\')
+                    || pattern.contains('\0')
+                {
+                    continue;
+                }
                 let src = root.join(pattern);
-                if src.exists() {
+                if let Ok(meta) = fs::symlink_metadata(&src) {
+                    // Refuse symlinks to prevent copying files outside the repository
+                    if meta.file_type().is_symlink() || !meta.is_file() {
+                        continue;
+                    }
                     let dst = target.join(pattern);
                     if let Some(parent) = dst.parent() {
                         let _ = fs::create_dir_all(parent);
@@ -218,12 +288,14 @@ fn allocate_dynamic_port() -> u16 {
     3001
 }
 
-fn rand_u32() -> u32 {
+fn secure_short_id(role: &str) -> String {
     let t = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    (t ^ (t >> 32)) as u32
+    let pid = std::process::id();
+    let hash = blake3::hash(format!("{role}-{t}-{pid}").as_bytes());
+    hash.to_hex()[..10].to_string()
 }
 
 /// Discard and cleanly remove a git worktree by its branch name.
@@ -233,5 +305,68 @@ pub fn discard_worktree_by_branch(root: &Path, branch: &str) -> Result<()> {
         remove_worktree(root, Path::new(&w.path), Some(branch))
     } else {
         remove_worktree(root, Path::new(branch), Some(branch))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_role_names_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(create_worktree(dir.path(), "../../etc/passwd").is_err());
+        assert!(create_worktree(dir.path(), "INVALID_ROLE").is_err());
+        assert!(create_worktree(dir.path(), "role/with/slashes").is_err());
+    }
+
+    #[test]
+    fn worktree_includes_are_strictly_confined_and_env_is_opt_in() {
+        let root = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+
+        // Create sample files
+        fs::write(root.path().join(".env"), "SECRET=true").unwrap();
+        fs::write(root.path().join("normal.txt"), "hello").unwrap();
+        fs::write(root.path().join("safe.json"), "{}").unwrap();
+
+        // Traversal and outside files
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("outside.txt"), "stolen").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            outside.path().join("outside.txt"),
+            root.path().join("symlink_outside"),
+        )
+        .unwrap();
+
+        fs::write(
+            root.path().join(".worktreeinclude"),
+            "normal.txt\n../secret.txt\n/etc/passwd\nsymlink_outside\nsafe.json\n",
+        )
+        .unwrap();
+
+        // 1. Without copy_env: .env is NOT copied
+        sync_worktree_includes(root.path(), target.path(), false).unwrap();
+        assert!(
+            !target.path().join(".env").exists(),
+            ".env must not be copied by default"
+        );
+        assert!(target.path().join("normal.txt").exists());
+        assert!(target.path().join("safe.json").exists());
+        assert!(!target.path().join("secret.txt").exists());
+        assert!(!target.path().join("passwd").exists());
+        assert!(
+            !target.path().join("symlink_outside").exists(),
+            "symlinks must not be followed"
+        );
+
+        // 2. With copy_env: .env IS copied
+        let target2 = tempfile::tempdir().unwrap();
+        sync_worktree_includes(root.path(), target2.path(), true).unwrap();
+        assert!(
+            target2.path().join(".env").exists(),
+            ".env must be copied when copy_env is true"
+        );
     }
 }

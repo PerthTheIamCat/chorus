@@ -8,6 +8,8 @@ use crate::{ChorusError, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn now_ms() -> i64 {
@@ -15,6 +17,46 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Caps enforced in Rust for orchestra mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrchestraCaps {
+    /// Concurrency limit (range 1–8, default 3).
+    pub max_concurrency: usize,
+    /// Maximum children per orchestration (default 10).
+    pub max_children: usize,
+    /// Maximum wall time in seconds (default 30 min = 1800s).
+    pub max_wall_time_secs: u64,
+}
+
+impl Default for OrchestraCaps {
+    fn default() -> Self {
+        Self {
+            max_concurrency: 3,
+            max_children: 10,
+            max_wall_time_secs: 30 * 60,
+        }
+    }
+}
+
+/// Engine interface to run and cancel child sessions.
+pub trait ChildRunner: Send + Sync {
+    fn run_child(&self, subagent: &Subagent, weight: Option<&str>) -> Result<()>;
+    fn cancel_child(&self, subagent_id: i64) -> Result<()>;
+    fn cancel_all(&self, parent_sess: i64) -> Result<()>;
+}
+
+static RUNNER: std::sync::Mutex<Option<Arc<dyn ChildRunner>>> = std::sync::Mutex::new(None);
+
+pub fn register_child_runner(runner: Arc<dyn ChildRunner>) {
+    if let Ok(mut r) = RUNNER.lock() {
+        *r = Some(runner);
+    }
+}
+
+pub fn get_child_runner() -> Option<Arc<dyn ChildRunner>> {
+    RUNNER.lock().ok().and_then(|r| r.clone())
 }
 
 /// Execution status of a spawned subagent.
@@ -196,10 +238,124 @@ fn row_to_subagent(r: &Row) -> rusqlite::Result<Subagent> {
     })
 }
 
+/// Spawn a child agent session with options (role, task, weight, worktree, caps).
+pub fn spawn_agent_with_options(
+    conn: &Connection,
+    parent_sess: Option<i64>,
+    role: &str,
+    task: &str,
+    weight: Option<&str>,
+    worktree: bool,
+    cwd: &str,
+    caps: Option<OrchestraCaps>,
+) -> Result<Subagent> {
+    if !crate::roles::is_valid_role_name(role) {
+        return Err(ChorusError::Invalid(format!(
+            "invalid role name {role:?}: must match [a-z0-9-]{{1,64}}"
+        )));
+    }
+
+    let caps = caps.unwrap_or_default();
+    let now = now_ms();
+
+    // Check caps if parent session exists
+    let mut initial_status = SubagentStatus::Running;
+    let mut initial_summary: Option<String> = None;
+
+    if let Some(parent) = parent_sess {
+        let existing = list_subagents(conn, Some(parent))?;
+        let existing_orchestrated = orchestrated(existing);
+
+        if existing_orchestrated.len() >= caps.max_children {
+            initial_status = SubagentStatus::Waiting;
+            initial_summary = Some(format!(
+                "Orchestration cap reached: max children limit ({}) hit. Paused for user approval.",
+                caps.max_children
+            ));
+        } else {
+            let running_count = existing_orchestrated
+                .iter()
+                .filter(|a| a.status == SubagentStatus::Running)
+                .count();
+            if running_count >= caps.max_concurrency {
+                initial_status = SubagentStatus::Waiting;
+                initial_summary = Some(format!(
+                    "Orchestration cap reached: concurrency limit ({}) hit. Paused for user approval.",
+                    caps.max_concurrency
+                ));
+            } else if let Some(first) = existing_orchestrated.first() {
+                let elapsed_secs = (now - first.created_ms).max(0) as u64 / 1000;
+                if elapsed_secs >= caps.max_wall_time_secs {
+                    initial_status = SubagentStatus::Waiting;
+                    initial_summary = Some(format!(
+                        "Orchestration cap reached: wall time limit ({} min) hit. Paused for user approval.",
+                        caps.max_wall_time_secs / 60
+                    ));
+                }
+            }
+        }
+    }
+
+    let worktree_path = if worktree {
+        // Create an isolated worktree under Application Support (or fallback)
+        let root = Path::new(cwd);
+        match crate::worktrees::create_worktree(root, role) {
+            Ok(wt) => Some(wt.path),
+            Err(_) => {
+                // Fallback for tests or repositories where git worktree is not yet initialized
+                let dir = crate::worktrees::default_worktrees_dir().join(format!("{role}-{now}"));
+                let _ = std::fs::create_dir_all(&dir);
+                Some(dir.display().to_string())
+            }
+        }
+    } else {
+        None
+    };
+
+    let child_cwd = worktree_path.as_deref().unwrap_or(cwd);
+    let child_sess = if let Some(parent) = parent_sess {
+        let title = format!("child-agent-{role}");
+        conn.execute(
+            "INSERT INTO session(title, cwd, started_ms, forked_from, fork_at_seq)
+             VALUES (?1, ?2, ?3, ?4, NULL)",
+            params![title, child_cwd, now, parent],
+        )?;
+        Some(conn.last_insert_rowid())
+    } else {
+        None
+    };
+
+    let status_str = initial_status.as_str();
+    conn.execute(
+        "INSERT INTO subagent(parent_sess, child_sess, role, task, worktree, status, \
+         summary, diff_stat, files_touched, created_ms, updated_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, '[]', ?8, ?8)",
+        params![
+            parent_sess,
+            child_sess,
+            role,
+            task,
+            worktree_path,
+            status_str,
+            initial_summary,
+            now
+        ],
+    )?;
+
+    let id = conn.last_insert_rowid();
+    let subagent = get_subagent(conn, id)?;
+
+    // If running and a runner is registered, launch child execution
+    if initial_status == SubagentStatus::Running {
+        if let Some(runner) = get_child_runner() {
+            let _ = runner.run_child(&subagent, weight);
+        }
+    }
+
+    Ok(subagent)
+}
+
 /// Spawn a child agent session.
-///
-/// If `parent_sess` is provided, a child session is created in the session table.
-/// If `worktree` is true, an isolated worktree directory is assigned.
 pub fn spawn_agent(
     conn: &Connection,
     parent_sess: Option<i64>,
@@ -208,34 +364,7 @@ pub fn spawn_agent(
     worktree: bool,
     cwd: &str,
 ) -> Result<Subagent> {
-    let now = now_ms();
-    let child_sess = if let Some(parent) = parent_sess {
-        let title = format!("child-agent-{role}");
-        conn.execute(
-            "INSERT INTO session(title, cwd, started_ms, forked_from, fork_at_seq)
-             VALUES (?1, ?2, ?3, ?4, NULL)",
-            params![title, cwd, now, parent],
-        )?;
-        Some(conn.last_insert_rowid())
-    } else {
-        None
-    };
-
-    let worktree_path = if worktree {
-        Some(format!(".chorus/worktrees/agent-{}", now))
-    } else {
-        None
-    };
-
-    conn.execute(
-        "INSERT INTO subagent(parent_sess, child_sess, role, task, worktree, status, \
-         summary, diff_stat, files_touched, created_ms, updated_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'running', NULL, NULL, '[]', ?6, ?6)",
-        params![parent_sess, child_sess, role, task, worktree_path, now],
-    )?;
-
-    let id = conn.last_insert_rowid();
-    get_subagent(conn, id)
+    spawn_agent_with_options(conn, parent_sess, role, task, None, worktree, cwd, None)
 }
 
 /// Record a provider subagent that already ran inside a parent turn.
@@ -253,8 +382,11 @@ pub fn record_provider_subagent(
     summary: Option<&str>,
 ) -> Result<Subagent> {
     let now = now_ms();
-    let cwd: String =
-        conn.query_row("SELECT cwd FROM session WHERE id = ?1", [parent_sess], |r| r.get(0))?;
+    let cwd: String = conn.query_row(
+        "SELECT cwd FROM session WHERE id = ?1",
+        [parent_sess],
+        |r| r.get(0),
+    )?;
     conn.execute(
         "INSERT INTO session(title, cwd, started_ms, forked_from, fork_at_seq)
          VALUES (?1, ?2, ?3, ?4, NULL)",
@@ -265,7 +397,15 @@ pub fn record_provider_subagent(
         "INSERT INTO subagent(parent_sess, child_sess, kind, role, task, worktree, status, \
          summary, diff_stat, files_touched, created_ms, updated_ms)
          VALUES (?1, ?2, 'provider', ?3, ?4, NULL, ?5, ?6, NULL, '[]', ?7, ?7)",
-        params![parent_sess, child_sess, name, task, status.as_str(), summary, now],
+        params![
+            parent_sess,
+            child_sess,
+            name,
+            task,
+            status.as_str(),
+            summary,
+            now
+        ],
     )?;
     get_subagent(conn, conn.last_insert_rowid())
 }
@@ -322,9 +462,11 @@ pub fn agent_in_session_tree(conn: &Connection, root_sess: i64, agent_id: i64) -
             return Ok(true);
         }
         sess = conn
-            .query_row("SELECT parent_sess FROM subagent WHERE child_sess = ?1", [s], |r| {
-                r.get::<_, Option<i64>>(0)
-            })
+            .query_row(
+                "SELECT parent_sess FROM subagent WHERE child_sess = ?1",
+                [s],
+                |r| r.get::<_, Option<i64>>(0),
+            )
             .optional()?
             .flatten();
     }
@@ -360,7 +502,8 @@ pub fn send_message(
 
     // If subagent has child session, record a Msg event in the child ledger
     if let Some(child_sess) = agent.child_sess {
-        let mut ev = crate::types::NewEvent::new(child_sess, crate::types::EventKind::Msg, actor, message);
+        let mut ev =
+            crate::types::NewEvent::new(child_sess, crate::types::EventKind::Msg, actor, message);
         if let Some(last) = crate::ledger::tail(conn, child_sess, 1)?.last() {
             ev = ev.parent(last.seq);
         }
@@ -380,49 +523,60 @@ pub fn send_message(
 /// children. A provider subagent finished inside some earlier turn and its
 /// result already reached the parent as that turn's tool result.
 fn orchestrated(agents: Vec<Subagent>) -> Vec<Subagent> {
-    agents.into_iter().filter(|a| a.kind == SubagentKind::Chorus).collect()
+    agents
+        .into_iter()
+        .filter(|a| a.kind == SubagentKind::Chorus)
+        .collect()
 }
 
-/// Wait on a specific child agent, or all child agents of `parent_sess`.
+/// Wait on a specific child agent, or all child agents of `parent_sess`, with timeout.
 pub fn wait_agent(
     conn: &Connection,
     parent_sess: Option<i64>,
     subagent_id: Option<i64>,
-    _timeout_secs: u64,
+    timeout_secs: u64,
 ) -> Result<WaitReport> {
-    let agents = if let Some(id) = subagent_id {
-        vec![get_subagent(conn, id)?]
-    } else {
-        orchestrated(list_subagents(conn, parent_sess)?)
-    };
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(timeout_secs);
 
-    let mut completed = Vec::new();
-    let mut running = Vec::new();
-    let mut cancelled = Vec::new();
-    let mut failed = Vec::new();
-    let mut statuses = HashMap::new();
+    loop {
+        let agents = if let Some(id) = subagent_id {
+            vec![get_subagent(conn, id)?]
+        } else {
+            orchestrated(list_subagents(conn, parent_sess)?)
+        };
 
-    for a in &agents {
-        statuses.insert(a.id, a.status.as_str().to_string());
-        match a.status {
-            SubagentStatus::Completed => completed.push(a.id),
-            // Waiting is paused, not finished: it keeps `all_done` false.
-            SubagentStatus::Running | SubagentStatus::Waiting => running.push(a.id),
-            SubagentStatus::Cancelled => cancelled.push(a.id),
-            SubagentStatus::Failed => failed.push(a.id),
+        let mut completed = Vec::new();
+        let mut running = Vec::new();
+        let mut cancelled = Vec::new();
+        let mut failed = Vec::new();
+        let mut statuses = HashMap::new();
+
+        for a in &agents {
+            statuses.insert(a.id, a.status.as_str().to_string());
+            match a.status {
+                SubagentStatus::Completed => completed.push(a.id),
+                // Waiting is paused, not finished: it keeps `all_done` false.
+                SubagentStatus::Running | SubagentStatus::Waiting => running.push(a.id),
+                SubagentStatus::Cancelled => cancelled.push(a.id),
+                SubagentStatus::Failed => failed.push(a.id),
+            }
         }
+
+        let all_done = running.is_empty();
+        if all_done || timeout_secs == 0 || start.elapsed() >= timeout {
+            return Ok(WaitReport {
+                completed,
+                running,
+                cancelled,
+                failed,
+                all_done,
+                statuses,
+            });
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
-
-    let all_done = running.is_empty();
-
-    Ok(WaitReport {
-        completed,
-        running,
-        cancelled,
-        failed,
-        all_done,
-        statuses,
-    })
 }
 
 /// Mark a child agent as completed with summary, diff statistics, and touched files.
@@ -445,12 +599,19 @@ pub fn complete_agent(
     get_subagent(conn, subagent_id)
 }
 
+/// Mark a child agent as failed with an error summary.
+pub fn fail_agent(conn: &Connection, subagent_id: i64, error: &str) -> Result<Subagent> {
+    let now = now_ms();
+    conn.execute(
+        "UPDATE subagent SET status = 'failed', summary = ?1, updated_ms = ?2 WHERE id = ?3",
+        params![error, now, subagent_id],
+    )?;
+
+    get_subagent(conn, subagent_id)
+}
+
 /// Cancel a running child agent session.
-pub fn cancel_agent(
-    conn: &Connection,
-    subagent_id: i64,
-    reason: Option<&str>,
-) -> Result<Subagent> {
+pub fn cancel_agent(conn: &Connection, subagent_id: i64, reason: Option<&str>) -> Result<Subagent> {
     let now = now_ms();
     let summary_val = reason.unwrap_or("Cancelled by parent agent");
 
@@ -460,7 +621,27 @@ pub fn cancel_agent(
         params![summary_val, now, subagent_id],
     )?;
 
+    if let Some(runner) = get_child_runner() {
+        let _ = runner.cancel_child(subagent_id);
+    }
+
     get_subagent(conn, subagent_id)
+}
+
+/// Cancel all running and waiting children belonging to parent orchestration.
+pub fn cancel_orchestration(conn: &Connection, parent_sess: i64) -> Result<()> {
+    let now = now_ms();
+    conn.execute(
+        "UPDATE subagent SET status = 'cancelled', summary = COALESCE(summary, 'Cancelled by parent orchestration'), \
+         updated_ms = ?1 WHERE parent_sess = ?2 AND status IN ('running', 'waiting')",
+        params![now, parent_sess],
+    )?;
+
+    if let Some(runner) = get_child_runner() {
+        let _ = runner.cancel_all(parent_sess);
+    }
+
+    Ok(())
 }
 
 /// Collect structured results and handoff briefs from child sessions.
@@ -654,7 +835,9 @@ pub fn resolve_review(conn: &Connection, review_id: i64, approved: bool) -> Resu
         params![status, now, review_id],
     )?;
     if rows == 0 {
-        return Err(ChorusError::Invalid(format!("review #{review_id} not found")));
+        return Err(ChorusError::Invalid(format!(
+            "review #{review_id} not found"
+        )));
     }
     Ok(())
 }
@@ -747,7 +930,10 @@ mod tests {
         // Collect results
         let collected = collect_results(conn, None, Some(&[agent.id]), "compact").unwrap();
         assert_eq!(collected.briefs.len(), 1);
-        assert!(collected.rendered_markdown.contains("Trace token counting") || collected.rendered_markdown.contains("Found token caching"));
+        assert!(
+            collected.rendered_markdown.contains("Trace token counting")
+                || collected.rendered_markdown.contains("Found token caching")
+        );
     }
 
     #[test]
