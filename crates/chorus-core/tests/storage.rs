@@ -1,5 +1,5 @@
-use chorus_core::types::EventKind;
 use chorus_core::compaction;
+use chorus_core::types::EventKind;
 use chorus_core::{actor, blob, ledger, memory, schema, store::Store, NewEvent};
 
 fn setup() -> Store {
@@ -48,13 +48,23 @@ fn duplicate_large_payload_creates_one_blob_row() {
         ledger::append(conn, &ev).unwrap();
     }
 
-    let blob_count: i64 = conn.query_row("SELECT COUNT(*) FROM blob", [], |r| r.get(0)).unwrap();
-    assert_eq!(blob_count, 1, "identical large payloads must dedup to a single blob row");
+    let blob_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM blob", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        blob_count, 1,
+        "identical large payloads must dedup to a single blob row"
+    );
 
     let event_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM event WHERE sess = ?1", [sess], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM event WHERE sess = ?1", [sess], |r| {
+            r.get(0)
+        })
         .unwrap();
-    assert_eq!(event_count, 10, "each append should still create its own event row");
+    assert_eq!(
+        event_count, 10,
+        "each append should still create its own event row"
+    );
 }
 
 #[test]
@@ -69,7 +79,10 @@ fn large_body_round_trips_through_blob_store() {
     let seq = ledger::append(conn, &ev).unwrap();
 
     let stored = ledger::get(conn, seq).unwrap();
-    assert!(stored.body.is_none(), "large body should not be stored inline");
+    assert!(
+        stored.body.is_none(),
+        "large body should not be stored inline"
+    );
     assert!(stored.blob.is_some(), "large body should reference a blob");
 
     let round_tripped = ledger::body(conn, &stored).unwrap();
@@ -87,7 +100,10 @@ fn small_body_stays_inline() {
     let seq = ledger::append(conn, &ev).unwrap();
 
     let stored = ledger::get(conn, seq).unwrap();
-    assert!(stored.blob.is_none(), "small body must stay inline (event.blob IS NULL)");
+    assert!(
+        stored.blob.is_none(),
+        "small body must stay inline (event.blob IS NULL)"
+    );
     assert_eq!(stored.body.as_deref(), Some("hello world"));
 
     let body_col: Option<String> = conn
@@ -110,7 +126,10 @@ fn tail_is_chronological_and_respects_n() {
 
     let last3 = ledger::tail(conn, sess, 3).unwrap();
     assert_eq!(last3.len(), 3);
-    let bodies: Vec<String> = last3.iter().map(|e| ledger::body(conn, e).unwrap()).collect();
+    let bodies: Vec<String> = last3
+        .iter()
+        .map(|e| ledger::body(conn, e).unwrap())
+        .collect();
     assert_eq!(bodies, vec!["msg-2", "msg-3", "msg-4"]);
 
     // chronological: seqs strictly increasing
@@ -136,7 +155,11 @@ fn fork_creates_session_and_copies_no_events() {
     assert_ne!(forked, sess);
 
     let forked_events: i64 = conn
-        .query_row("SELECT COUNT(*) FROM event WHERE sess = ?1", [forked], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM event WHERE sess = ?1",
+            [forked],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(forked_events, 0, "fork must copy zero events");
 
@@ -167,13 +190,17 @@ fn gc_removes_only_unreferenced_blobs() {
     let orphan_payload = b"z".repeat(10 * 1024);
     let orphan_id = blob::put(conn, &orphan_payload).unwrap();
 
-    let before: i64 = conn.query_row("SELECT COUNT(*) FROM blob", [], |r| r.get(0)).unwrap();
+    let before: i64 = conn
+        .query_row("SELECT COUNT(*) FROM blob", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(before, 2);
 
     let deleted = blob::gc(conn, i64::MAX).unwrap();
     assert_eq!(deleted, 1, "gc should delete exactly the unreferenced blob");
 
-    let after: i64 = conn.query_row("SELECT COUNT(*) FROM blob", [], |r| r.get(0)).unwrap();
+    let after: i64 = conn
+        .query_row("SELECT COUNT(*) FROM blob", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(after, 1);
 
     assert!(blob::get(conn, &orphan_id).is_err());
@@ -282,7 +309,10 @@ fn schema_v1_database_upgrades_to_v2() {
 
     // Reopening runs migrate again and must add the v2 table without losing data.
     let store = Store::open(&path).unwrap();
-    let v: i64 = store.conn().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    let v: i64 = store
+        .conn()
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(v, schema::SCHEMA_VERSION);
     assert!(memory::propose(store.conn(), 0, "works after upgrade", None).is_ok());
 }
@@ -301,15 +331,20 @@ fn a_v2_database_gains_the_summary_table_without_losing_anything() {
         let c = store.conn();
         let a = actor::intern(c, "codex", "openai").unwrap();
         sess = ledger::new_session(c, "old", "/tmp").unwrap();
-        seq = ledger::append(c, &NewEvent::new(sess, EventKind::Msg, a, "said before upgrade"))
-            .unwrap();
+        seq = ledger::append(
+            c,
+            &NewEvent::new(sess, EventKind::Msg, a, "said before upgrade"),
+        )
+        .unwrap();
         c.execute_batch("DROP TABLE summary; PRAGMA user_version = 2;")
             .unwrap();
     }
 
     let store = Store::open(&path).unwrap();
     let c = store.conn();
-    let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    let v: i64 = c
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(v, schema::SCHEMA_VERSION);
 
     // The old event survived, and the warm tier now works for it.
@@ -319,7 +354,10 @@ fn a_v2_database_gains_the_summary_table_without_losing_anything() {
     compaction::save_rungs(
         c,
         seq,
-        &compaction::Rungs { l1: "one".into(), l2: "two".into() },
+        &compaction::Rungs {
+            l1: "one".into(),
+            l2: "two".into(),
+        },
         "test",
     )
     .unwrap();
@@ -336,11 +374,19 @@ fn history_walks_the_fork_chain() {
     let root = ledger::new_session(c, "root", "/tmp").unwrap();
     let s1 = ledger::append(c, &NewEvent::new(root, EventKind::Msg, a, "root turn 1")).unwrap();
     let s2 = ledger::append(c, &NewEvent::new(root, EventKind::Msg, a, "root turn 2")).unwrap();
-    let _s3 = ledger::append(c, &NewEvent::new(root, EventKind::Msg, a, "root turn 3 (after fork)")).unwrap();
+    let _s3 = ledger::append(
+        c,
+        &NewEvent::new(root, EventKind::Msg, a, "root turn 3 (after fork)"),
+    )
+    .unwrap();
 
     // Fork at s2: the branch should see turns 1-2 but not 3.
     let branch = ledger::fork(c, root, s2, "branch").unwrap();
-    ledger::append(c, &NewEvent::new(branch, EventKind::Msg, a, "branch turn A")).unwrap();
+    ledger::append(
+        c,
+        &NewEvent::new(branch, EventKind::Msg, a, "branch turn A"),
+    )
+    .unwrap();
 
     let h: Vec<String> = ledger::history(c, branch, 100)
         .unwrap()
@@ -349,7 +395,10 @@ fn history_walks_the_fork_chain() {
         .collect();
 
     assert_eq!(h, vec!["root turn 1", "root turn 2", "branch turn A"]);
-    assert!(!h.iter().any(|b| b.contains("after fork")), "branch saw a post-fork parent event");
+    assert!(
+        !h.iter().any(|b| b.contains("after fork")),
+        "branch saw a post-fork parent event"
+    );
     let _ = (s1, s2);
 
     // The root's own history is unaffected.
@@ -360,7 +409,6 @@ fn history_walks_the_fork_chain() {
         .collect();
     assert_eq!(rh.len(), 3);
 }
-
 
 #[test]
 fn rename_and_delete_session() {
@@ -375,7 +423,11 @@ fn rename_and_delete_session() {
     ledger::append(c, &NewEvent::new(gone, EventKind::Msg, user, "only here")).unwrap();
 
     ledger::rename_session(c, keep, "renamed").unwrap();
-    let t: String = c.query_row("SELECT title FROM session WHERE id = ?1", [keep], |r| r.get(0)).unwrap();
+    let t: String = c
+        .query_row("SELECT title FROM session WHERE id = ?1", [keep], |r| {
+            r.get(0)
+        })
+        .unwrap();
     assert_eq!(t, "renamed");
 
     // A fork blocks deleting its parent.
@@ -384,10 +436,16 @@ fn rename_and_delete_session() {
     ledger::delete_session(c, fork).unwrap();
 
     ledger::delete_session(c, gone).unwrap();
-    let n: i64 = c.query_row("SELECT COUNT(*) FROM event WHERE sess = ?1", [gone], |r| r.get(0)).unwrap();
+    let n: i64 = c
+        .query_row("SELECT COUNT(*) FROM event WHERE sess = ?1", [gone], |r| {
+            r.get(0)
+        })
+        .unwrap();
     assert_eq!(n, 0);
     // The shared blob is still referenced by `keep`, so it survives.
-    let blobs: i64 = c.query_row("SELECT COUNT(*) FROM blob", [], |r| r.get(0)).unwrap();
+    let blobs: i64 = c
+        .query_row("SELECT COUNT(*) FROM blob", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(blobs, 1);
     assert!(ledger::delete_session(c, gone).is_err());
 }
@@ -405,8 +463,45 @@ fn session_cost_sums_reported_cost() {
         ev.cost_usd = cost;
         ledger::append(conn, &ev).unwrap();
     }
-    let total = ledger::session_cost_usd(conn, sess).unwrap();
+    let total = ledger::session_cost_usd(conn, sess).unwrap().unwrap();
     assert!((total - 0.75).abs() < 1e-9, "got {total}");
+}
+
+#[test]
+fn cost_is_summed_from_session_usage_and_no_estimate_without_cost() {
+    let store = setup();
+    let conn = store.conn();
+    let sess = ledger::new_session(conn, "nocost", "/tmp").unwrap();
+    let actor_id = actor::intern(conn, "codex", "openai").unwrap();
+
+    // 1. Session with tokens but NO cost_usd reported by bridge (e.g. Codex)
+    let mut ev = NewEvent::new(sess, EventKind::Msg, actor_id, "hello");
+    ev.tok_in = Some(5000);
+    ev.tok_out = Some(1000);
+    ev.cost_usd = None;
+    ledger::append(conn, &ev).unwrap();
+
+    // No price-table estimate is produced!
+    assert_eq!(ledger::session_cost_usd(conn, sess).unwrap(), None);
+
+    // 2. Now record cost in session_usage (e.g. from Claude bridge)
+    chorus_core::usage::record_turn(
+        conn,
+        sess,
+        Some(6000),
+        Some(200_000),
+        5000,
+        1000,
+        Some(0.12),
+    )
+    .unwrap();
+    assert_eq!(ledger::session_cost_usd(conn, sess).unwrap(), Some(0.12));
+
+    // Turn 2 adds to the session_usage cost total
+    chorus_core::usage::record_turn(conn, sess, Some(7000), Some(200_000), 1000, 500, Some(0.08))
+        .unwrap();
+    let total = ledger::session_cost_usd(conn, sess).unwrap().unwrap();
+    assert!((total - 0.20).abs() < 1e-9, "got {total}");
 }
 
 #[test]
@@ -453,26 +548,42 @@ fn a_v6_database_gains_usage_review_base_and_subagent_kind() {
     for _ in 0..2 {
         let store = Store::open(&path).unwrap();
         let c = store.conn();
-        let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let v: i64 = c
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(v, schema::SCHEMA_VERSION);
         // Old rows survive the rebuild, including the cascade-linked message.
-        let kind: String = c.query_row("SELECT kind FROM subagent WHERE id = 1", [], |r| r.get(0)).unwrap();
+        let kind: String = c
+            .query_row("SELECT kind FROM subagent WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(kind, "chorus");
-        let msgs: i64 = c.query_row("SELECT COUNT(*) FROM subagent_message", [], |r| r.get(0)).unwrap();
+        let msgs: i64 = c
+            .query_row("SELECT COUNT(*) FROM subagent_message", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(msgs, 1);
         schema::migrate(c).unwrap();
     }
 
     let store = Store::open(&path).unwrap();
     let c = store.conn();
-    c.execute("UPDATE subagent SET status = 'waiting', kind = 'provider' WHERE id = 1", []).unwrap();
-    c.execute("UPDATE session SET review_base = 'abc' WHERE id = ?1", [sess]).unwrap();
+    c.execute(
+        "UPDATE subagent SET status = 'waiting', kind = 'provider' WHERE id = 1",
+        [],
+    )
+    .unwrap();
+    c.execute(
+        "UPDATE session SET review_base = 'abc' WHERE id = ?1",
+        [sess],
+    )
+    .unwrap();
     c.execute(
         "INSERT INTO session_usage(sess, context_used, context_window, updated_ms) VALUES (?1, 10, 200, 1)",
         [sess],
     )
     .unwrap();
-    assert!(c.execute("UPDATE subagent SET kind = 'bogus' WHERE id = 1", []).is_err());
+    assert!(c
+        .execute("UPDATE subagent SET kind = 'bogus' WHERE id = 1", [])
+        .is_err());
 }
 
 #[test]
@@ -480,7 +591,11 @@ fn a_fresh_database_has_the_v7_schema() {
     let store = setup();
     let c = store.conn();
     let sess = ledger::new_session(c, "new", "/tmp").unwrap();
-    c.execute("UPDATE session SET review_base = 'abc' WHERE id = ?1", [sess]).unwrap();
+    c.execute(
+        "UPDATE session SET review_base = 'abc' WHERE id = ?1",
+        [sess],
+    )
+    .unwrap();
     c.execute(
         "INSERT INTO subagent(parent_sess, kind, role, task, status, created_ms, updated_ms)
          VALUES (?1, 'provider', 'r', 't', 'waiting', 1, 1)",
@@ -518,5 +633,8 @@ fn session_usage_keeps_last_context_and_sums_cost() {
 
     assert_eq!(usage::review_base(c, sess).unwrap(), None);
     usage::set_review_base(c, sess, Some("abc123")).unwrap();
-    assert_eq!(usage::review_base(c, sess).unwrap().as_deref(), Some("abc123"));
+    assert_eq!(
+        usage::review_base(c, sess).unwrap().as_deref(),
+        Some("abc123")
+    );
 }

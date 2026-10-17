@@ -2039,9 +2039,16 @@ fn is_transient_stop(stop: &str) -> bool {
     matches!(stop, "max_tokens" | "context_exhausted" | "error")
 }
 
-/// `(seq, kind name, actor name, body, model id)` — the row shape the FFI
+/// `(seq, kind name, actor name, body, model id, cost_usd)` — the row shape the FFI
 /// and UI want without exposing core types.
-pub type LabeledEvent = (i64, &'static str, String, String, Option<String>);
+pub type LabeledEvent = (
+    i64,
+    &'static str,
+    String,
+    String,
+    Option<String>,
+    Option<f64>,
+);
 
 /// Events in `sess`'s history (fork chain included) with `seq > after`.
 /// Filters before resolving bodies, so a delta pull never decompresses the
@@ -2055,7 +2062,14 @@ fn labeled_since(store: &Store, sess: i64, after: i64) -> Result<Vec<LabeledEven
         }
         let body = ledger::body(c, &e)?;
         let actor = actor::name(c, e.actor).unwrap_or_else(|_| "?".into());
-        out.push((e.seq, kind_name(e.kind), actor, body, e.model_id));
+        out.push((
+            e.seq,
+            kind_name(e.kind),
+            actor,
+            body,
+            e.model_id,
+            e.cost_usd,
+        ));
     }
     Ok(out)
 }
@@ -2190,6 +2204,7 @@ pub struct SessionSummary {
     /// anything yet.
     pub goal: String,
     pub forked_from: Option<i64>,
+    pub cost_usd: Option<f64>,
 }
 
 /// List every session in `db`, newest activity first. Two SQL statements
@@ -2223,6 +2238,7 @@ pub fn list_sessions(db: &Path) -> Result<Vec<SessionSummary>> {
         forked_from: Option<i64>,
         events: i64,
         last_ms: i64,
+        cost_usd: Option<f64>,
     }
 
     let mut bases = Vec::new();
@@ -2236,8 +2252,10 @@ pub fn list_sessions(db: &Path) -> Result<Vec<SessionSummary>> {
         // offset the rest of the codebase expects.
         let mut stmt = c.prepare(
             "SELECT s.id, s.title, s.cwd, s.started_ms, s.forked_from, \
-             COUNT(e.seq) AS events, COALESCE(MAX(e.t), 0) AS last_ms \
+             COUNT(e.seq) AS events, COALESCE(MAX(e.t), 0) AS last_ms, \
+             u.cost_usd \
              FROM session s LEFT JOIN event e ON e.sess = s.id \
+             LEFT JOIN session_usage u ON u.sess = s.id \
              GROUP BY s.id \
              ORDER BY (s.started_ms + COALESCE(MAX(e.t), 0)) DESC, s.started_ms DESC",
         )?;
@@ -2251,6 +2269,7 @@ pub fn list_sessions(db: &Path) -> Result<Vec<SessionSummary>> {
                 forked_from: r.get(4)?,
                 events: r.get(5)?,
                 last_ms: r.get(6)?,
+                cost_usd: r.get(7)?,
             });
         }
     }
@@ -2302,6 +2321,7 @@ pub fn list_sessions(db: &Path) -> Result<Vec<SessionSummary>> {
                 agents,
                 goal: goal.unwrap_or_default(),
                 forked_from: b.forked_from,
+                cost_usd: b.cost_usd,
             }
         })
         .collect())

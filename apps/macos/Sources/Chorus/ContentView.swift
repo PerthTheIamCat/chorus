@@ -84,6 +84,7 @@ struct ContentView: View {
     @AppStorage("chorus.routerModelAuto") private var routerModelAuto = true
     @AppStorage("chorus.autoCatalogUpdates") private var autoCatalogUpdates = true
     @AppStorage("chorus.dismissedSetupCards") private var dismissedSetupCards = ""
+    @AppStorage(SettingsKey.thbRate) private var thbRate = ""
     @State private var routingInProgress = false
     @State private var routerAutoInstallAttempted = false
     @State private var pendingRoute: PendingRoute?
@@ -2649,6 +2650,14 @@ struct ContentView: View {
         let selected = folder == workspace && s.id == engine.sessionID
         let meta = ((showFolder ? [(folder as NSString).lastPathComponent] : []) + s.agents).joined(separator: " · ")
         let isRenamingThis = engine.renamingSessionIDs.contains(s.id)
+        let dbSessions = engine.sessionsByDB[dbPath(for: folder)] ?? []
+        let childSessions = dbSessions.filter { $0.forked_from == s.id }
+        let totalCost: Double? = {
+            let selfCost = s.cost_usd
+            let childCosts = childSessions.compactMap { $0.cost_usd }
+            if selfCost == nil && childCosts.isEmpty { return nil }
+            return (selfCost ?? 0.0) + childCosts.reduce(0.0, +)
+        }()
         return Button {
             guard !selected, !engine.busy, !engine.switching else { return }
             workspace = folder
@@ -2661,6 +2670,22 @@ struct ContentView: View {
                     if isRenamingThis {
                         ProgressView()
                             .controlSize(.mini)
+                    }
+                    Spacer(minLength: 4)
+                    if let cost = totalCost {
+                        let costText: String = {
+                            if let rate = Double(thbRate.trimmingCharacters(in: .whitespaces)), rate > 0 {
+                                return String(format: "฿%.1f", cost * rate)
+                            }
+                            return String(format: "$%.3f", cost)
+                        }()
+                        Text(costText)
+                            .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 3))
+                            .help(!childSessions.isEmpty ? "มูลค่ารวม parent + \(childSessions.count) งานย่อย" : "มูลค่าเทียบ API")
                     }
                 }
                 if !meta.isEmpty {
@@ -2879,21 +2904,114 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
 
-                    // Real-Time Monetary Cost Accounting Card ($ USD)
+                    // 2. 5-hour and Weekly Quota Bars (from limits.rs)
+                    if let accountWithLimits = engine.accounts.first(where: { $0.rate_limits?.primary != nil || $0.rate_limits?.secondary != nil }),
+                       let rl = accountWithLimits.rate_limits {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Label("โควตาการใช้งาน (\(accountWithLimits.agent.isEmpty ? accountWithLimits.name : accountWithLimits.agent))", systemImage: "chart.bar.xaxis")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                            }
+
+                            if let p = rl.primary {
+                                let pct = min(max(p.used_percent / 100.0, 0.0), 1.0)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack {
+                                        Text("5 ชั่วโมง")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                        Spacer()
+                                        Text("\(Int(p.used_percent))%")
+                                            .font(.caption2.weight(.semibold).monospacedDigit())
+                                            .foregroundStyle(p.used_percent >= 90 ? Color.red : (p.used_percent >= 75 ? Color.orange : Color.primary))
+                                    }
+                                    GeometryReader { g in
+                                        ZStack(alignment: .leading) {
+                                            Capsule().fill(Color.primary.opacity(0.08)).frame(height: 5)
+                                            Capsule().fill(p.used_percent >= 90 ? Color.red : (p.used_percent >= 75 ? Color.orange : Color.accentColor))
+                                                .frame(width: max(g.size.width * CGFloat(pct), pct > 0 ? 5 : 0), height: 5)
+                                        }
+                                    }
+                                    .frame(height: 5)
+                                    if let reset = p.resets_label {
+                                        Text("รีเซ็ตใน \(reset)")
+                                            .font(.system(size: 9.5))
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                }
+                            }
+
+                            if let s = rl.secondary {
+                                let pct = min(max(s.used_percent / 100.0, 0.0), 1.0)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack {
+                                        Text("รายสัปดาห์")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                        Spacer()
+                                        Text("\(Int(s.used_percent))%")
+                                            .font(.caption2.weight(.semibold).monospacedDigit())
+                                            .foregroundStyle(s.used_percent >= 90 ? Color.red : (s.used_percent >= 75 ? Color.orange : Color.primary))
+                                    }
+                                    GeometryReader { g in
+                                        ZStack(alignment: .leading) {
+                                            Capsule().fill(Color.primary.opacity(0.08)).frame(height: 5)
+                                            Capsule().fill(s.used_percent >= 90 ? Color.red : (s.used_percent >= 75 ? Color.orange : Color.accentColor))
+                                                .frame(width: max(g.size.width * CGFloat(pct), pct > 0 ? 5 : 0), height: 5)
+                                        }
+                                    }
+                                    .frame(height: 5)
+                                    if let reset = s.resets_label {
+                                        Text("รีเซ็ตใน \(reset)")
+                                            .font(.system(size: 9.5))
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                }
+                            }
+                        }
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+
+                    // 3. Session Tokens In / Out
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
-                            Label("ต้นทุน session · USD", systemImage: "dollarsign.circle.fill")
+                            Label("Token ของ session", systemImage: "arrow.triangle.swap")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                        HStack(spacing: 14) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.down.right")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.blue)
+                                Text("In: \(engine.sessionTokensIn.formatted())")
+                                    .font(.caption.monospacedDigit())
+                            }
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.up.right")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.purple)
+                                Text("Out: \(engine.sessionTokensOut.formatted())")
+                                    .font(.caption.monospacedDigit())
+                            }
+                            Spacer()
+                        }
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                    // 4. Monetary Cost Accounting Card (มูลค่าเทียบ API)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Label("มูลค่าเทียบ API", systemImage: "dollarsign.circle.fill")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.green)
-                            Spacer()
-                            Text(String(format: "$%.4f USD", engine.sessionCostUSD))
-                                .font(.system(.body, design: .monospaced).weight(.bold))
-                                .foregroundStyle(engine.sessionCostUSD > 0 ? Color.primary : Color.secondary)
-                        }
-                        HStack {
-                            Text("คำนวณจาก Token ขาเข้า/ออก ตามราคาโมเดลจริง")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
                             Spacer()
                             Button {
                                 if engine.sessionID >= 0 {
@@ -2906,6 +3024,40 @@ struct ContentView: View {
                             }
                             .buttonStyle(.plain)
                             .help("รีเฟรชค่าใช้จ่าย")
+                        }
+                        if let cost = engine.sessionCostUSD {
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text(String(format: "$%.4f USD", cost))
+                                    .font(.system(.body, design: .monospaced).weight(.bold))
+                                    .foregroundStyle(cost > 0 ? Color.primary : Color.secondary)
+
+                                if let rate = Double(thbRate.trimmingCharacters(in: .whitespaces)), rate > 0 {
+                                    Text(String(format: "(≈ ฿%.2f)", cost * rate))
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    Button("ตั้งอัตราบาท") {
+                                        settingsSection = .cost
+                                        showSettings = true
+                                    }
+                                    .font(.caption)
+                                    .buttonStyle(.link)
+                                }
+                                Spacer()
+                            }
+                            Text("รายงานจาก usage_update.cost ของ bridge")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        } else {
+                            HStack {
+                                Text("ไม่มีข้อมูลราคา")
+                                    .font(.system(.body).weight(.medium))
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                            }
+                            Text("โมเดล/bridge นี้ไม่รายงานราคา API (เช่น บัญชี subscription หรือ Codex)")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
                         }
                     }
                     .padding(10)
@@ -3260,6 +3412,14 @@ struct EventRow: View {
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 6).padding(.vertical, 1.5)
                             .background(Color.primary.opacity(0.05), in: Capsule())
+                    }
+                    if let cost = event.cost_usd {
+                        Text(String(format: "$%.4f", cost))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Color.primary.opacity(0.05), in: Capsule())
+                            .help("มูลค่าเทียบ API ของเทิร์นนี้: $\(String(format: "%.4f", cost)) USD")
                     }
                     Spacer(minLength: 0)
                     if isHovered {

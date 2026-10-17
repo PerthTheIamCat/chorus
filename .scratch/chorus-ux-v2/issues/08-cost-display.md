@@ -1,6 +1,6 @@
 # Cost display
 
-Status: ready-for-agent
+Status: resolved
 Blocked by: 02, 03
 Parent: ../spec.md
 Decided in: [Cost display](../../chorus-ux-overhaul/issues/15-cost-display.md)

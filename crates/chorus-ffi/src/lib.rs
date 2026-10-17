@@ -873,16 +873,18 @@ struct EventJson {
     actor: String,
     body: String,
     model_id: Option<String>,
+    cost_usd: Option<f64>,
 }
 
 fn events_json(rows: Vec<chorus_cli::session::LabeledEvent>) -> Vec<EventJson> {
     rows.into_iter()
-        .map(|(seq, kind, actor, body, model_id)| EventJson {
+        .map(|(seq, kind, actor, body, model_id, cost_usd)| EventJson {
             seq,
             kind,
             actor,
             body,
             model_id,
+            cost_usd,
         })
         .collect()
 }
@@ -1769,6 +1771,7 @@ struct SessionSummaryJson {
     agents: Vec<String>,
     goal: String,
     forked_from: Option<i64>,
+    cost_usd: Option<f64>,
 }
 
 /// Every session in `db_path`, newest activity first — the shell's session
@@ -1776,7 +1779,7 @@ struct SessionSummaryJson {
 /// query, one connection for however many sessions exist.
 /// JSON: {"ok":true,"sessions":[{"id":N,"title":"...","cwd":"...",
 ///        "started_ms":N,"last_ms":N,"events":N,"agents":["..."],
-///        "goal":"...","forked_from":N|null}, ...]}
+///        "goal":"...","forked_from":N|null,"cost_usd":X|null}, ...]}
 ///
 /// # Safety
 /// `db_path` must be a valid NUL-terminated UTF-8 string.
@@ -1801,6 +1804,7 @@ pub unsafe extern "C" fn chorus_list_sessions(db_path: *const c_char) -> *mut c_
                     agents: s.agents,
                     goal: s.goal,
                     forked_from: s.forked_from,
+                    cost_usd: s.cost_usd,
                 })
                 .collect();
             out(serde_json::json!({ "ok": true, "sessions": sessions }).to_string())
@@ -2401,16 +2405,20 @@ pub unsafe extern "C" fn chorus_remove_worktree(
     }
 }
 
-/// The total monetary cost of a session in USD.
+/// The total monetary cost of a session in USD from bridge-reported cost,
+/// or -1.0 when no cost has been reported.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_session_cost_usd(db_path: *const c_char, session_id: i64) -> f64 {
     let Some(db) = borrow(db_path) else {
-        return 0.0;
+        return -1.0;
     };
     let Ok(store) = chorus_core::Store::open(Path::new(db)) else {
-        return 0.0;
+        return -1.0;
     };
-    chorus_core::ledger::session_cost_usd(store.conn(), session_id).unwrap_or(0.0)
+    chorus_core::ledger::session_cost_usd(store.conn(), session_id)
+        .ok()
+        .flatten()
+        .unwrap_or(-1.0)
 }
 
 fn open_router_store(db_path: Option<&str>) -> std::result::Result<chorus_core::Store, String> {

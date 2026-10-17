@@ -11,7 +11,17 @@ struct LedgerEvent: Codable, Identifiable, Hashable {
     let actor: String
     let body: String
     let model_id: String?
+    let cost_usd: Double?
     var id: Int64 { seq }
+
+    init(seq: Int64, kind: String, actor: String, body: String, model_id: String?, cost_usd: Double? = nil) {
+        self.seq = seq
+        self.kind = kind
+        self.actor = actor
+        self.body = body
+        self.model_id = model_id
+        self.cost_usd = cost_usd
+    }
 }
 
 struct SessionAttachment: Decodable, Identifiable, Hashable {
@@ -143,7 +153,9 @@ final class Engine: ObservableObject {
     @Published var sessionID: Int64 = -1
     @Published var contextUsed: Int64?
     @Published var contextWindow: Int64?
-    @Published var sessionCostUSD: Double = 0.0
+    @Published var sessionTokensIn: Int64 = 0
+    @Published var sessionTokensOut: Int64 = 0
+    @Published var sessionCostUSD: Double? = nil
     /// goal / done / pending for this session — the context tier the design
     /// never trims. Empty only before the first turn.
     @Published var taskState = ""
@@ -264,6 +276,9 @@ final class Engine: ObservableObject {
                 let usage = Self.decode(SessionUsageResult.self, usageJSON)?.usage
                 self.contextUsed = usage?.context_used
                 self.contextWindow = usage?.context_window
+                self.sessionTokensIn = usage?.tokens_in ?? 0
+                self.sessionTokensOut = usage?.tokens_out ?? 0
+                self.sessionCostUSD = usage?.cost_usd
                 guard let h else {
                     self.sessionID = -1
                     self.events = []
@@ -282,11 +297,20 @@ final class Engine: ObservableObject {
         }
     }
 
-    struct SessionUsage: Codable { let context_used: Int64?; let context_window: Int64? }
+    struct SessionUsage: Codable {
+        let context_used: Int64?
+        let context_window: Int64?
+        let tokens_in: Int64?
+        let tokens_out: Int64?
+        let cost_usd: Double?
+    }
     struct SessionUsageResult: Codable { let ok: Bool; let usage: SessionUsage? }
 
     func close() {
         memoryScope = nil
+        sessionCostUSD = nil
+        sessionTokensIn = 0
+        sessionTokensOut = 0
         if let oldReader = reader {
             reader = nil
             readQueue.async { chorus_reader_free(oldReader.raw) }
@@ -630,6 +654,26 @@ final class Engine: ObservableObject {
         if !live.thoughts.isEmpty { lastThoughts = live.thoughts }
         live = LiveTurn()
         liveAgent = nil
+        refreshSessionUsage()
+    }
+
+    /// Refresh token usage and cost from reader.
+    func refreshSessionUsage() {
+        guard let r = reader else { return }
+        readQueue.async { [weak self] in
+            let json = Self.string(from: chorus_reader_usage(r.raw))
+            let u = Self.decode(SessionUsageResult.self, json)?.usage
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let u {
+                    if let cu = u.context_used { self.contextUsed = cu }
+                    if let cw = u.context_window { self.contextWindow = cw }
+                    self.sessionTokensIn = u.tokens_in ?? 0
+                    self.sessionTokensOut = u.tokens_out ?? 0
+                    self.sessionCostUSD = u.cost_usd
+                }
+            }
+        }
     }
 
     /// Stop button. Kills the agent process; the turn thread then returns an
@@ -1581,6 +1625,7 @@ final class Engine: ObservableObject {
         let agents: [String]
         let goal: String
         let forked_from: Int64?
+        let cost_usd: Double?
     }
 
     private struct AgentsResult: Codable { let ok: Bool?; let agents: [AgentInfo]? }
@@ -2201,7 +2246,7 @@ final class Engine: ObservableObject {
 
     func updateSessionCost(db: String, id: Int64) {
         guard id >= 0, !db.isEmpty else {
-            self.sessionCostUSD = 0.0
+            self.sessionCostUSD = nil
             return
         }
         ioQueue.async {
@@ -2209,7 +2254,7 @@ final class Engine: ObservableObject {
                 chorus_session_cost_usd(cDb, id)
             }
             DispatchQueue.main.async {
-                self.sessionCostUSD = cost
+                self.sessionCostUSD = cost < 0.0 ? nil : cost
             }
         }
     }
