@@ -1707,6 +1707,7 @@ final class Engine: ObservableObject {
         let name: String
         let rel_path: String
         let is_dir: Bool
+        let icon: String?
         let size: Int64
         let git_status: String?
         let is_focus: Bool

@@ -16,6 +16,7 @@ pub mod context;
 pub mod darwin_qos;
 pub mod diff_align;
 pub mod error;
+pub mod file_icons;
 pub mod file_tree;
 pub mod handoff;
 pub mod highlight;

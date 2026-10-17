@@ -36,6 +36,9 @@ struct ChorusApp: App {
         // shifts hit-testing away from what is drawn, so sidebar clicks landed
         // on the row next to the one under the pointer.
         .windowToolbarStyle(.unified)
-        .commands { CheckForUpdatesCommand(updater: updater) }
+        .commands {
+            AboutCommand()
+            CheckForUpdatesCommand(updater: updater)
+        }
     }
 }
