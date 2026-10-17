@@ -14,7 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct ChorusApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var engine = Engine()
-    @StateObject private var updater = Updater()
+    @StateObject private var updater = Updater.shared
 
     var body: some Scene {
         WindowGroup("Chorus") {

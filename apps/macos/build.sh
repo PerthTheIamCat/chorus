@@ -17,7 +17,10 @@ set -euo pipefail
 cd "$(dirname "$0")"
 MODE="${1:-debug}"
 RUN="${2:-run}"
-VERSION="${CHORUS_VERSION:-0.1.0}"
+# Defaults to the latest git tag, never a fixed string: a hardcoded fallback
+# goes stale silently (every local build reported 0.1.0 after 0.1.3 shipped).
+VERSION="${CHORUS_VERSION:-$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')}"
+VERSION="${VERSION:-0.0.0}"
 BUNDLE_ID="dev.chorus.app"
 FEED_URL="https://github.com/PerthTheIamCat/chorus/releases/latest/download/appcast.xml"
 SPARKLE_PUBLIC_KEY="E5axgieMsKgEtIIFf18pp0kcfcR0U3MLahF4QqB0ejc="
@@ -46,6 +49,8 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Chorus"
 cp -R "$(dirname "$BIN")/Chorus_Chorus.bundle" "$APP/Contents/Resources/"
+# Settings › มีอะไรใหม่ reads this.
+cp ../../CHANGELOG.md "$APP/Contents/Resources/CHANGELOG.md"
 if [ "$MODE" = "release" ]; then
     cp ../../target/release/antigravity-acp "$APP/Contents/MacOS/antigravity-acp"
     cp ../../target/release/chorusd "$APP/Contents/MacOS/chorusd"

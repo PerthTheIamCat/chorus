@@ -23,13 +23,27 @@ DMG="$DIST/Chorus-$VERSION.dmg"
 FEED_DIR="$DIST/appcast"
 rm -rf "$FEED_DIR" && mkdir -p "$FEED_DIR"
 cp "$DMG" "$FEED_DIR/"
+
+# Release notes = this version's section of CHANGELOG.md. Saved next to the
+# DMG with the same name so generate_appcast embeds it (Sparkle shows it in
+# the update window), and reused for the GitHub Release body.
+NOTES="$FEED_DIR/Chorus-$VERSION.md"
+awk -v heading="## [$VERSION]" '
+    index($0, heading) == 1 { in_section = 1; next }
+    in_section && /^## \[/ { exit }
+    in_section { print }
+' ../../CHANGELOG.md > "$NOTES"
+if ! grep -q '[^[:space:]]' "$NOTES"; then
+    echo "CHANGELOG.md has no '## [$VERSION]' section — add one before releasing" >&2
+    exit 1
+fi
 # CI passes the private key via SPARKLE_ED_KEY (a repo secret) on stdin so it
 # never touches disk or argv; locally it is read from the login Keychain.
 if [ -n "${SPARKLE_ED_KEY:-}" ]; then
-    printf '%s' "$SPARKLE_ED_KEY" | "$BIN/generate_appcast" --ed-key-file - \
+    printf '%s' "$SPARKLE_ED_KEY" | "$BIN/generate_appcast" --ed-key-file - --embed-release-notes \
         --download-url-prefix "https://github.com/$REPO/releases/download/v$VERSION/" "$FEED_DIR"
 else
-"$BIN/generate_appcast" --account chorus \
+"$BIN/generate_appcast" --account chorus --embed-release-notes \
     --download-url-prefix "https://github.com/$REPO/releases/download/v$VERSION/" \
     "$FEED_DIR"
 fi
@@ -38,5 +52,8 @@ echo "appcast: $FEED_DIR/appcast.xml"
 if [ "$PUBLISH" = "publish" ]; then
     gh release create "v$VERSION" "$DMG" "$FEED_DIR/appcast.xml" \
         --repo "$REPO" --title "Chorus $VERSION" \
-        --notes "Chorus $VERSION. ไม่ได้ notarize: ครั้งแรกให้คลิกขวา → Open (หรือ xattr -dr com.apple.quarantine Chorus.app) การอัปเดตหลังจากนั้นทำในแอปได้เลย (Chorus → Check for Updates…)"
+        --notes "$(cat "$NOTES")
+
+---
+ไม่ได้ notarize: ครั้งแรกให้คลิกขวา → Open (หรือ xattr -dr com.apple.quarantine Chorus.app) การอัปเดตหลังจากนั้นทำในแอปได้เลย (Chorus → Check for Updates…)"
 fi

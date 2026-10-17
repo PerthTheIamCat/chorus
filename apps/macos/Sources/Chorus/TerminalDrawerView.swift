@@ -8,7 +8,7 @@ struct TerminalDrawerView: View {
     let workspace: String
     var onClose: () -> Void
 
-    @State private var outputText: String = "Chorus Terminal Shell v0.1.0 (zsh)\nWorkspace: "
+    @State private var outputText: String = "Chorus Terminal Shell v\(Updater.appVersion) (zsh)\nWorkspace: "
     @State private var commandInput: String = ""
     @State private var commandHistory: [String] = []
     @State private var historyIndex: Int = -1
@@ -71,7 +71,7 @@ struct TerminalDrawerView: View {
                 .frame(maxWidth: 380)
 
                 Button {
-                    outputText = "Chorus Terminal Shell v0.1.0 (zsh)\n"
+                    outputText = "Chorus Terminal Shell v\(Updater.appVersion) (zsh)\n"
                 } label: {
                     Image(systemName: "trash")
                         .font(.caption2)

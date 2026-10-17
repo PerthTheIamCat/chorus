@@ -15,7 +15,7 @@ struct SettingsSheet: View {
         case general, accounts, routing, orchestration
         case agents, safety, integrations, skills
         case review, cost, storage
-        case companion, about
+        case companion, about, changelog
         var id: String { rawValue }
 
         var title: String {
@@ -33,6 +33,7 @@ struct SettingsSheet: View {
             case .storage: "พื้นที่และประสิทธิภาพ"
             case .companion: "Mobile Companion"
             case .about: "เกี่ยวกับ"
+            case .changelog: "มีอะไรใหม่"
             }
         }
 
@@ -51,6 +52,7 @@ struct SettingsSheet: View {
             case .storage: "โมเดลในเครื่อง หน่วยความจำ และข้อมูล"
             case .companion: "สั่งงานจาก iPhone"
             case .about: "เวอร์ชันและสัญญาอนุญาต"
+            case .changelog: "สิ่งที่เปลี่ยนในแต่ละเวอร์ชัน"
             }
         }
 
@@ -69,12 +71,13 @@ struct SettingsSheet: View {
             case .storage: "internaldrive"
             case .companion: "iphone"
             case .about: "info.circle"
+            case .changelog: "clock.arrow.circlepath"
             }
         }
 
         var tint: Color {
             switch self {
-            case .general, .about: .gray
+            case .general, .about, .changelog: .gray
             case .accounts: .teal
             case .routing: .blue
             case .orchestration: .purple
@@ -93,7 +96,7 @@ struct SettingsSheet: View {
             ("ใช้งาน", [.general, .accounts, .routing, .orchestration]),
             ("Agent", [.agents, .safety, .integrations, .skills]),
             ("ข้อมูล", [.review, .cost, .storage]),
-            ("ระบบ", [.companion, .about]),
+            ("ระบบ", [.companion, .about, .changelog]),
         ]
     }
 
@@ -178,7 +181,8 @@ struct SettingsSheet: View {
         case .cost: CostSettings()
         case .storage: StorageSettings()
         case .companion: RemotePairingView()
-        case .about: AboutSettings()
+        case .about: AboutSettings(showChangelog: { section = .changelog })
+        case .changelog: ChangelogSettings()
         }
     }
 
@@ -713,19 +717,26 @@ struct StorageSettings: View {
 // MARK: เกี่ยวกับ
 
 struct AboutSettings: View {
-    private var version: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
-    }
+    @ObservedObject private var updater = Updater.shared
+    var showChangelog: () -> Void = {}
 
     var body: some View {
         SettingsGroup(title: "Chorus") {
             SettingsRow(title: "เวอร์ชัน") {
-                Text("v\(version)").font(.callout.monospaced()).foregroundStyle(.secondary)
+                Text(Updater.appVersion == "dev" ? "dev build" : "v\(Updater.appVersion)")
+                    .font(.callout.monospaced()).foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
             RowDivider()
-            SettingsRow(title: "ตรวจหาอัปเดต", info: "Sparkle ตรวจลายเซ็นของไฟล์อัปเดตก่อนติดตั้งทุกครั้ง") {
-                Text("เมนู Chorus › Check for Updates…").font(.caption).foregroundStyle(.secondary)
+            SettingsRow(title: "ตรวจหาอัปเดต",
+                        detail: updater.lastCheck.map { "ตรวจล่าสุด " + $0.formatted(.relative(presentation: .named).locale(Locale(identifier: "th"))) },
+                        info: "Sparkle ตรวจลายเซ็นของไฟล์อัปเดตก่อนติดตั้งทุกครั้ง") {
+                Button("Check for Updates…") { updater.checkForUpdates() }
+                    .disabled(!updater.canCheck)
+            }
+            RowDivider()
+            SettingsRow(title: "มีอะไรใหม่", detail: "สิ่งที่เปลี่ยนในแต่ละเวอร์ชัน") {
+                Button("ดู changelog", action: showChangelog)
             }
         }
         SettingsGroup(title: "สัญญาอนุญาต") {
