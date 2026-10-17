@@ -10,6 +10,7 @@ pub mod http;
 pub mod interaction;
 pub mod ipc;
 pub mod lifecycle;
+pub mod monitor;
 pub mod pairing;
 pub mod server;
 

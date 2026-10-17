@@ -453,6 +453,12 @@ impl Session {
         self.sess
     }
 
+    /// The checkpoint sha this session diffs against. The system monitor's
+    /// checkpoint prune must never drop it while the session is open.
+    pub fn checkpoint_base(&self) -> &str {
+        &self.base_ckpt
+    }
+
     /// The workspace diff since the session's base checkpoint — what the
     /// agents have changed. Empty when there's no shadow repo or no change.
     pub fn working_diff(&self) -> String {

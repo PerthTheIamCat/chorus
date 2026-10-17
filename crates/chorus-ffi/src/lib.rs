@@ -1278,6 +1278,31 @@ pub extern "C" fn chorus_shutdown() {
     chorus_cli::shutdown();
 }
 
+/// System monitor: one typed JSON request in, JSON out (see
+/// `chorus_daemon::monitor::Request`): `snapshot`, `stop`, `wait_exit`,
+/// `disk`, `preview`, `apply`. `e` may be NULL; when given, its session's
+/// checkpoint base is protected from a checkpoint prune. Blocking — the
+/// shell calls it off the main thread, never on the turn queue's engine
+/// work (snapshots touch no SQLite).
+///
+/// # Safety
+/// `e` must be NULL or a live engine; `request` a valid UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_monitor_json(e: *const ChorusEngine, request: *const c_char) -> *mut c_char {
+    let Some(request) = borrow(request) else {
+        return err("request must be valid UTF-8");
+    };
+    let protect: Vec<String> = e.as_ref().map(|e| vec![e.session.checkpoint_base().to_string()]).unwrap_or_default();
+    match catch_unwind(AssertUnwindSafe(|| {
+        let req: chorus_daemon::monitor::Request = serde_json::from_str(request).map_err(|e| e.to_string())?;
+        chorus_daemon::monitor::handle(req, &protect)
+    })) {
+        Ok(Ok(v)) => out(serde_json::json!({ "ok": true, "result": v }).to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in monitor"),
+    }
+}
+
 /// Stop the turn that is running right now (the shell's Stop button).
 /// Safe to call from any thread, with or without a live engine.
 /// JSON: {"ok":true,"was_running":bool}

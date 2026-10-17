@@ -1305,6 +1305,8 @@ struct ContentView: View {
 
                 Spacer(minLength: 4)
 
+                ChorusRAMLabel()
+
                 Button {
                     settingsSection = .accounts
                     showSettings = true
@@ -1953,6 +1955,8 @@ struct ContentView: View {
             engine.cancel(); queued.removeAll()
         case .chooseModel, .nextEffort, .sendReview, .openInEditor:
             break // handled by ModelPicker / DiffReviewerView / CodeViewerView
+        case .systemMonitor:
+            break // the menu item opens its own window
         }
     }
 

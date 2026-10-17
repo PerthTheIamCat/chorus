@@ -100,13 +100,25 @@ pub fn set_token_count(c: &Connection, id: &BlobId, n: i64) -> Result<()> {
 /// Returns how many rows were deleted.
 pub fn gc(c: &Connection, older_than_ms: i64) -> Result<usize> {
     let n = c.execute(
-        "DELETE FROM blob
-         WHERE created_ms < ?1
-           AND id NOT IN (SELECT DISTINCT blob FROM event WHERE blob IS NOT NULL)
-           AND id NOT IN (SELECT hash FROM attachment WHERE status != 'deleted'
-                          UNION SELECT prepared_hash FROM attachment
-                                WHERE status != 'deleted' AND prepared_hash IS NOT NULL)",
+        &format!("DELETE FROM blob WHERE {GC_WHERE}"),
         [older_than_ms],
     )?;
     Ok(n)
 }
+
+/// What [`gc`] would delete right now: `(rows, stored bytes)`. Same predicate,
+/// so the system monitor's preview cannot drift from the real sweep.
+pub fn gc_preview(c: &Connection, older_than_ms: i64) -> Result<(usize, u64)> {
+    let (n, bytes): (i64, i64) = c.query_row(
+        &format!("SELECT COUNT(*), COALESCE(SUM(length(bytes)), 0) FROM blob WHERE {GC_WHERE}"),
+        [older_than_ms],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok((n.max(0) as usize, bytes.max(0) as u64))
+}
+
+const GC_WHERE: &str = "created_ms < ?1
+           AND id NOT IN (SELECT DISTINCT blob FROM event WHERE blob IS NOT NULL)
+           AND id NOT IN (SELECT hash FROM attachment WHERE status != 'deleted'
+                          UNION SELECT prepared_hash FROM attachment
+                                WHERE status != 'deleted' AND prepared_hash IS NOT NULL)";
