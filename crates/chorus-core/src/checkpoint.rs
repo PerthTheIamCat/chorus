@@ -154,6 +154,40 @@ impl Checkpoint {
         ])
     }
 
+    /// [`diff_since_user`] without writing the shared index: stages into a
+    /// private index file seeded from the real one (so it stays stat-only).
+    ///
+    /// The live diff pane runs this while a turn is still going. The turn
+    /// takes snapshots through the shared index, and two `git add -A` on one
+    /// index race for `index.lock` — the loser fails, and if the loser is the
+    /// turn's snapshot, the read-only revert has nothing to restore to.
+    pub fn peek_diff_since_user(&self, since: &str) -> Result<String> {
+        let private = self.git_dir.join("index.peek");
+        // Atomic renames on the writer side mean a copy is the old index or
+        // the new one, never a torn one. Missing is fine: git builds one.
+        let _ = std::fs::copy(self.git_dir.join("index"), &private);
+        let index = Some(private.as_path());
+        self.git_with(&["add", "-A"], index)?;
+        let base = if since.trim().is_empty() {
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
+        } else {
+            since.trim().to_string()
+        };
+        self.git_with(
+            &[
+                "diff",
+                "--staged",
+                &base,
+                "--",
+                ".",
+                ":(exclude,top)CLAUDE.md",
+                ":(exclude,top)AGENTS.md",
+                ":(exclude,top)GEMINI.md",
+            ],
+            index,
+        )
+    }
+
     /// Which files changed since `since`, without staging anything.
     ///
     /// [`diff_since`] runs `git add -A` so new files show up in the patch. That
@@ -227,12 +261,21 @@ impl Checkpoint {
     }
 
     fn git(&self, args: &[&str]) -> Result<String> {
-        let out = Command::new("git")
-            .arg("--git-dir")
+        self.git_with(args, None)
+    }
+
+    /// `index`: a private index file instead of the repo's own.
+    fn git_with(&self, args: &[&str], index: Option<&Path>) -> Result<String> {
+        let mut cmd = Command::new("git");
+        cmd.arg("--git-dir")
             .arg(&self.git_dir)
             .arg("--work-tree")
             .arg(&self.work_tree)
-            .args(args)
+            .args(args);
+        if let Some(index) = index {
+            cmd.env("GIT_INDEX_FILE", index);
+        }
+        let out = cmd
             .output()
             .map_err(|e| ChorusError::Invalid(format!("run git: {e}")))?;
         if !out.status.success() {

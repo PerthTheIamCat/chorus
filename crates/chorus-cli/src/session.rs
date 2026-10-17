@@ -634,6 +634,7 @@ impl Session {
         } else {
             attachments::link_to_event(self.store.conn_mut(), self.sess, &event, attachment_ids)?
         };
+        self.announce(user_seq);
         let bridge = self.resolve_bridge(agent_name, &[]);
         let outcome = self.one_turn(agent_name, &bridge, &prompt, policy, attachment_ids)?;
         let agent_seqs = self.persist_outcome(&outcome, agent_actor, user_seq)?;
@@ -703,6 +704,7 @@ impl Session {
             c,
             &NewEvent::new(self.sess, EventKind::Handoff, to_actor, brief.to_json()),
         )?;
+        self.announce(handoff_seq);
 
         // Verify + Resume: the incoming agent's first turn is the brief.
         let bridge = self.resolve_bridge(to, &[]);
@@ -1302,7 +1304,28 @@ impl Session {
         self
     }
 
+    /// Every streamed token, tool and usage signal of the turn is tagged with
+    /// this session, and the shell hears `status` when an agent starts and
+    /// stops answering here.
     fn one_turn_decide(
+        &self,
+        agent_name: &str,
+        bridge: &[String],
+        text: &str,
+        mode: &str,
+        attachment_ids: &[i64],
+        decide: &mut dyn FnMut(&PermissionAsk) -> Permission,
+    ) -> Result<TurnOutcome> {
+        let head = self.head_seq();
+        let _scope = chorus_acp::push_scope(self.sess, head);
+        chorus_acp::push(self.sess, head, "status", "running");
+        let out = self.one_turn_decide_inner(agent_name, bridge, text, mode, attachment_ids, decide);
+        let status = if out.is_ok() { "idle" } else { "failed" };
+        chorus_acp::push(self.sess, head, "status", status);
+        out
+    }
+
+    fn one_turn_decide_inner(
         &self,
         agent_name: &str,
         bridge: &[String],
@@ -1544,6 +1567,7 @@ impl Session {
         } else {
             attachments::link_to_event(self.store.conn_mut(), self.sess, &event, attachment_ids)?
         };
+        self.announce(user_seq);
         let bridge = self.resolve_bridge(agent_name, &[]);
 
         // A dialog the agent never opens protects nothing. Codex writes files
@@ -1743,7 +1767,40 @@ impl Session {
             0,
             outcome.cost_usd,
         )?;
+        if let Some(&last) = seqs.last() {
+            self.announce(last);
+        }
         Ok(seqs)
+    }
+
+    /// Tell the shell this session's ledger now reaches `seq`. A hint only:
+    /// the shell pulls the rows itself on its read-only handle.
+    fn announce(&self, seq: i64) {
+        chorus_acp::push(self.sess, seq, "events", "");
+    }
+
+    /// Newest seq written in this session (0 = none).
+    fn head_seq(&self) -> i64 {
+        head_seq(&self.store, self.sess)
+    }
+
+    /// A read-only view of this session for the shell's second handle: it
+    /// pulls deltas, usage and the live diff while a turn holds this one.
+    /// Opening it touches nothing — no snapshot, no migration.
+    pub fn reader(&self) -> Result<SessionReader> {
+        let path = self
+            .store
+            .conn()
+            .path()
+            .filter(|p| !p.is_empty())
+            .context("reader needs a file-backed store")?
+            .to_string();
+        Ok(SessionReader {
+            store: Store::open_read_only(Path::new(&path)).context("open read-only store")?,
+            sess: self.sess,
+            checkpoint: Checkpoint::open(&self.cwd).ok(),
+            base_ckpt: self.base_ckpt.clone(),
+        })
     }
 
     /// The actor name of the most recent non-user event, if any.
@@ -1759,23 +1816,14 @@ impl Session {
 
     /// The whole session, oldest first, as `(seq, kind name, actor name,
     /// body)` — the shape the FFI/UI wants without exposing core types.
-    pub fn transcript_labeled(&self) -> Result<Vec<(i64, &'static str, String, String, Option<String>)>> {
+    pub fn transcript_labeled(&self) -> Result<Vec<LabeledEvent>> {
         self.events_since(0)
     }
 
     /// Labeled events with `seq > after` — the delta a UI polls for so it
     /// only ever pulls what it hasn't seen.
-    pub fn events_since(&self, after: i64) -> Result<Vec<(i64, &'static str, String, String, Option<String>)>> {
-        let c = self.store.conn();
-        let mut out = Vec::new();
-        for (e, body) in self.transcript()? {
-            if e.seq <= after {
-                continue;
-            }
-            let actor = actor::name(c, e.actor).unwrap_or_else(|_| "?".into());
-            out.push((e.seq, kind_name(e.kind), actor, body, e.model_id));
-        }
-        Ok(out)
+    pub fn events_since(&self, after: i64) -> Result<Vec<LabeledEvent>> {
+        labeled_since(&self.store, self.sess, after)
     }
 
     /// The whole session so far, oldest first, with bodies resolved.
@@ -1824,6 +1872,77 @@ impl Session {
 /// onward. A `cancelled` (a denied permission) is a real outcome, not this.
 fn is_transient_stop(stop: &str) -> bool {
     matches!(stop, "max_tokens" | "context_exhausted" | "error")
+}
+
+/// `(seq, kind name, actor name, body, model id)` — the row shape the FFI
+/// and UI want without exposing core types.
+pub type LabeledEvent = (i64, &'static str, String, String, Option<String>);
+
+/// Events in `sess`'s history (fork chain included) with `seq > after`.
+/// Filters before resolving bodies, so a delta pull never decompresses the
+/// blobs of rows the caller already has.
+fn labeled_since(store: &Store, sess: i64, after: i64) -> Result<Vec<LabeledEvent>> {
+    let c = store.conn();
+    let mut out = Vec::new();
+    for e in ledger::history(c, sess, 10_000)? {
+        if e.seq <= after {
+            continue;
+        }
+        let body = ledger::body(c, &e)?;
+        let actor = actor::name(c, e.actor).unwrap_or_else(|_| "?".into());
+        out.push((e.seq, kind_name(e.kind), actor, body, e.model_id));
+    }
+    Ok(out)
+}
+
+fn head_seq(store: &Store, sess: i64) -> i64 {
+    store
+        .conn()
+        .query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM event WHERE sess = ?1",
+            [sess],
+            |r| r.get::<_, i64>(0),
+        )
+    .unwrap_or(0)
+}
+
+/// The shell's second handle onto one session: read-only SQLite (WAL lets it
+/// read while the turn writes on the [`Session`]'s connection) plus the shadow
+/// repo for a diff that never writes the shared index. Nothing here writes,
+/// so it can live on its own thread beside a running turn (CLAUDE.md 7.7).
+pub struct SessionReader {
+    store: Store,
+    sess: i64,
+    checkpoint: Option<Checkpoint>,
+    base_ckpt: String,
+}
+
+impl SessionReader {
+    pub fn session_id(&self) -> i64 {
+        self.sess
+    }
+
+    /// The delta since `after` — what a push said is waiting.
+    pub fn events_since(&self, after: i64) -> Result<Vec<LabeledEvent>> {
+        labeled_since(&self.store, self.sess, after)
+    }
+
+    /// Newest seq in this session (0 = none).
+    pub fn head_seq(&self) -> i64 {
+        head_seq(&self.store, self.sess)
+    }
+
+    pub fn usage(&self) -> Result<Option<usage::SessionUsage>> {
+        Ok(usage::get(self.store.conn(), self.sess)?)
+    }
+
+    /// Same patch as [`Session::working_diff`], staged in a private index.
+    pub fn working_diff(&self) -> String {
+        self.checkpoint
+            .as_ref()
+            .and_then(|ck| ck.peek_diff_since_user(&self.base_ckpt).ok())
+            .unwrap_or_default()
+    }
 }
 
 fn kind_name(k: EventKind) -> &'static str {

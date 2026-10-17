@@ -844,6 +844,12 @@ struct EventJson {
     model_id: Option<String>,
 }
 
+fn events_json(rows: Vec<chorus_cli::session::LabeledEvent>) -> Vec<EventJson> {
+    rows.into_iter()
+        .map(|(seq, kind, actor, body, model_id)| EventJson { seq, kind, actor, body, model_id })
+        .collect()
+}
+
 /// The whole session so far as a JSON array of events.
 ///
 /// # Safety
@@ -865,19 +871,7 @@ pub unsafe extern "C" fn chorus_events_since(e: *const ChorusEngine, after: i64)
     };
     let r = catch_unwind(AssertUnwindSafe(|| engine.session.events_since(after)));
     match r {
-        Ok(Ok(rows)) => {
-            let events: Vec<EventJson> = rows
-                .into_iter()
-                .map(|(seq, kind, actor, body, model_id)| EventJson {
-                    seq,
-                    kind,
-                    actor,
-                    body,
-                    model_id,
-                })
-                .collect();
-            out(serde_json::to_string(&events).unwrap())
-        }
+        Ok(Ok(rows)) => out(serde_json::to_string(&events_json(rows)).unwrap()),
         Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in transcript"),
     }
@@ -1359,29 +1353,124 @@ pub unsafe extern "C" fn chorus_set_memory_db(
     }
 }
 
-/// Live view of the running turn. `cb(ctx, kind, text)` is called from the
-/// turn's thread for each update: kind is `thought` | `message` | `tool` |
-/// `tool_done`. Both strings are only valid during the call. Pass a null `cb`
-/// to stop. Display only: the ledger is unaffected.
+/// Live signals from every running turn. `cb(ctx, json)` is called on the
+/// turn's own thread with one push:
+/// `{"session_id":N,"seq":N,"kind":"…","text":"…"}` where kind is
+/// `thought` | `message` | `tool` | `tool_done` (`status\ttitle`) | `usage`
+/// (`used\tsize`) | `events` (the ledger reaches `seq`; pull the delta) |
+/// `status` (`running` | `idle` | `failed`). `seq` is the newest ledger seq
+/// the session is known to have. The string is valid only during the call.
+/// Pass a null `cb` to stop. Signals only: the ledger is the record, and a
+/// dropped push is recovered by the next `chorus_reader_events_since`.
 ///
 /// # Safety
 /// `ctx` must stay valid until the callback is replaced or cleared.
 #[no_mangle]
-pub unsafe extern "C" fn chorus_set_progress_callback(
-    cb: Option<extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char)>,
+pub unsafe extern "C" fn chorus_set_push_callback(
+    cb: Option<extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
     ctx: *mut std::ffi::c_void,
 ) {
     let Some(cb) = cb else {
-        chorus_cli::set_progress_sink(None);
+        chorus_cli::set_push_sink(None);
         return;
     };
     let ctx = ctx as usize;
-    chorus_cli::set_progress_sink(Some(Box::new(move |kind: &str, text: &str| {
-        let (Ok(k), Ok(t)) = (CString::new(kind), CString::new(text.replace('\0', ""))) else {
-            return;
-        };
-        cb(ctx as *mut std::ffi::c_void, k.as_ptr(), t.as_ptr());
+    chorus_cli::set_push_sink(Some(Box::new(move |p: &chorus_cli::Push| {
+        let json = push_json(p);
+        let Ok(c) = CString::new(json) else { return };
+        cb(ctx as *mut std::ffi::c_void, c.as_ptr());
     })));
+}
+
+fn push_json(p: &chorus_cli::Push) -> String {
+    serde_json::json!({
+        "session_id": p.session_id,
+        "seq": p.seq,
+        "kind": p.kind,
+        "text": p.text,
+    })
+    .to_string()
+}
+
+// ---- read-only second handle ------------------------------------------
+
+/// A read-only handle onto one session. The shell keeps it beside the engine
+/// handle and uses it on its own thread: it never writes, so it never needs
+/// the engine's serial queue that a running turn holds (CLAUDE.md 7.7).
+pub struct ChorusReader {
+    reader: chorus_cli::session::SessionReader,
+}
+
+/// Open the read-only twin of `e`'s session. Call it on the engine's queue
+/// right after opening `e` (it reads the session's paths); afterwards the
+/// reader is independent. Returns `NULL` on failure (e.g. in-memory store).
+///
+/// # Safety
+/// `e` must be a live engine handle.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_reader_open(e: *const ChorusEngine) -> *mut ChorusReader {
+    let Some(engine) = e.as_ref() else {
+        return std::ptr::null_mut();
+    };
+    match catch_unwind(AssertUnwindSafe(|| engine.session.reader())) {
+        Ok(Ok(reader)) => Box::into_raw(Box::new(ChorusReader { reader })),
+        _ => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// `r` must come from `chorus_reader_open` and not be freed before.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_reader_free(r: *mut ChorusReader) {
+    if !r.is_null() {
+        drop(Box::from_raw(r));
+    }
+}
+
+/// Events with seq > `after`; same JSON array as `chorus_events_since`.
+///
+/// # Safety
+/// `r` must be a live reader.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_reader_events_since(r: *const ChorusReader, after: i64) -> *mut c_char {
+    let Some(r) = r.as_ref() else {
+        return err("null reader");
+    };
+    match catch_unwind(AssertUnwindSafe(|| r.reader.events_since(after))) {
+        Ok(Ok(rows)) => out(serde_json::to_string(&events_json(rows)).unwrap()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in reader_events_since"),
+    }
+}
+
+/// Same JSON as `chorus_session_usage`, read mid-turn.
+///
+/// # Safety
+/// `r` must be a live reader.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_reader_usage(r: *const ChorusReader) -> *mut c_char {
+    let Some(r) = r.as_ref() else {
+        return err("null reader");
+    };
+    match catch_unwind(AssertUnwindSafe(|| r.reader.usage())) {
+        Ok(Ok(u)) => out(serde_json::json!({ "ok": true, "usage": u }).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in reader_usage"),
+    }
+}
+
+/// Same JSON as `chorus_working_diff`, staged in a private index so it can
+/// run while the turn snapshots. JSON: {"ok":true,"diff":"..."}
+///
+/// # Safety
+/// `r` must be a live reader.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_reader_working_diff(r: *const ChorusReader) -> *mut c_char {
+    let Some(r) = r.as_ref() else {
+        return err("null reader");
+    };
+    let diff = catch_unwind(AssertUnwindSafe(|| r.reader.working_diff())).unwrap_or_default();
+    out(serde_json::json!({ "ok": true, "diff": diff }).to_string())
 }
 
 /// How many events still have no stored summary rungs. The shell polls this

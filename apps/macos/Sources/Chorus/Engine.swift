@@ -175,6 +175,17 @@ final class Engine: ObservableObject {
 
     private var handle: Handle?
     private let queue = DispatchQueue(label: "chorus.engine")
+    /// The read-only twin of `handle` (`chorus_reader_open`). Used only on
+    /// `readQueue`, never on `queue`: SQLite WAL lets it read while a turn on
+    /// `queue` writes, so the thread and diff move mid-turn without breaking
+    /// the one-writer rule above (CLAUDE.md 7.7). It never writes.
+    private var reader: Handle?
+    private let readQueue = DispatchQueue(label: "chorus.reader", qos: .userInitiated)
+    /// Highest real ledger seq on screen; the delta pull starts after it.
+    private var lastSeq: Int64 = 0
+    /// `running` | `idle` | `failed` per session id, from `status` pushes —
+    /// every session, not only the open one (sidebar badges).
+    @Published private(set) var sessionStatus: [Int64: String] = [:]
     /// For FFI calls that take no engine handle (agent/session/skill lists).
     /// They used to sit on `queue` behind a running turn, so the sidebar and
     /// pickers stayed empty or stale until the agent finished — the main
@@ -226,9 +237,11 @@ final class Engine: ObservableObject {
     private func swap(_ make: @escaping @Sendable () -> OpaquePointer?) {
         guard !busy, !switching else { return }
         let old = handle
+        let oldReader = reader
         // Nothing may enqueue work against the old handle from here on: it
         // is freed on `queue` once the new one is up.
         handle = nil
+        reader = nil
         switching = true
         lastError = nil
         queue.async { [weak self] in
@@ -237,7 +250,9 @@ final class Engine: ObservableObject {
             let presetJSON = h.map { Self.initialRoutePreset($0) } ?? ""
             let attachmentsJSON = h.map { Self.string(from: chorus_list_attachments($0)) } ?? ""
             let usageJSON = h.map { Self.string(from: chorus_session_usage($0)) } ?? ""
+            let r = h.flatMap { chorus_reader_open($0) }.map(Handle.init)
             if let old { chorus_engine_free(old.raw) }
+            if let oldReader { self?.readQueue.async { chorus_reader_free(oldReader.raw) } }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.switching = false
@@ -256,8 +271,10 @@ final class Engine: ObservableObject {
                     return
                 }
                 self.handle = Handle(raw: h)
+                self.reader = r
                 self.sessionID = chorus_engine_session_id(h)
                 self.events = Self.decode([LedgerEvent].self, eventsJSON) ?? []
+                self.lastSeq = self.events.last(where: { $0.seq > 0 })?.seq ?? 0
                 self.attachments = Self.decode(SessionAttachmentList.self, attachmentsJSON)?.attachments ?? []
                 self.applyRoutePreset(presetJSON)
                 self.refresh()
@@ -270,10 +287,15 @@ final class Engine: ObservableObject {
 
     func close() {
         memoryScope = nil
+        if let oldReader = reader {
+            reader = nil
+            readQueue.async { chorus_reader_free(oldReader.raw) }
+        }
         guard let old = handle else { return }
         handle = nil
         sessionID = -1
         events = []
+        lastSeq = 0
         attachments = []
         queue.async { chorus_engine_free(old.raw) }
     }
@@ -454,39 +476,99 @@ final class Engine: ObservableObject {
     /// the ledger, so it lives here until the next turn starts.
     @Published var lastThoughts = ""
 
-    private var progressRegistered = false
+    private var pushRegistered = false
+    private lazy var pushes = PushCoalescer { [weak self] batch in self?.absorb(batch) }
+
+    /// Subscribe to every session's pushes. The callback runs on the turn's
+    /// thread; it only decodes and queues — the window hears at most one
+    /// batch per frame.
     func registerProgress() {
-        guard !progressRegistered else { return }
-        progressRegistered = true
-        let cb: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, UnsafePointer<CChar>?) -> Void = { ctx, k, t in
-            guard let ctx, let k, let t else { return }
-            let kind = String(cString: k), text = String(cString: t)
-            let engine = Unmanaged<Engine>.fromOpaque(ctx).takeUnretainedValue()
-            DispatchQueue.main.async { engine.absorb(kind, text) }
+        guard !pushRegistered else { return }
+        pushRegistered = true
+        // The context is the coalescer, not the engine: it is the one thing
+        // here that may be touched off the main actor. `self` keeps it alive.
+        let cb: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void = { ctx, json in
+            guard let ctx, let json else { return }
+            guard let p = try? JSONDecoder().decode(LivePush.self, from: Data(String(cString: json).utf8)) else { return }
+            Unmanaged<PushCoalescer>.fromOpaque(ctx).takeUnretainedValue().enqueue(p)
         }
-        chorus_set_progress_callback(cb, Unmanaged.passUnretained(self).toOpaque())
+        chorus_set_push_callback(cb, Unmanaged.passUnretained(pushes).toOpaque())
     }
 
-    private func absorb(_ kind: String, _ text: String) {
-        switch kind {
-        case "thought": liveStream.turn.thoughts += text
-        case "message": liveStream.turn.message += text
-        case "tool": liveStream.turn.tools.append(.init(title: text))
-        case "tool_done":
-            let parts = text.split(separator: "\t", maxSplits: 1).map(String.init)
-            let state = parts.first ?? "completed"
-            let title = parts.count > 1 ? parts[1] : ""
-            if let i = live.tools.lastIndex(where: { $0.state == "running" && (title.isEmpty || $0.title == title) })
-                ?? live.tools.lastIndex(where: { $0.state == "running" }) {
-                liveStream.turn.tools[i].state = state
+    private func absorb(_ batch: [LivePush]) {
+        let f = LiveFold.apply(batch, session: sessionID, lastSeq: lastSeq, turn: live,
+                               contextUsed: contextUsed, contextWindow: contextWindow)
+        // One assignment per frame, and only when something on screen moved.
+        // Not after the turn: a batch still in flight when it ended would
+        // put the finished reply back as a ghost live row.
+        if busy, f.turn.thoughts != live.thoughts || f.turn.message != live.message
+            || f.turn.tools.map(\.state) != live.tools.map(\.state) || f.turn.tools.count != live.tools.count {
+            live = f.turn
+        }
+        if f.contextUsed != contextUsed { contextUsed = f.contextUsed }
+        if f.contextWindow != contextWindow { contextWindow = f.contextWindow }
+        for (id, status) in f.statuses where sessionStatus[id] != status { sessionStatus[id] = status }
+        if f.pull { pullDelta() }
+        if f.diffChanged { scheduleLiveDiff() }
+    }
+
+    private var pulling = false
+    private var pullAgain = false
+    /// Fetch rows past `lastSeq` on the read-only handle and append them.
+    /// One pull in flight at a time; pushes that land meanwhile ask for one
+    /// more, so a burst becomes at most two reads.
+    private func pullDelta() {
+        guard let r = reader else { return }
+        if pulling { pullAgain = true; return }
+        pulling = true
+        let after = lastSeq, sid = sessionID
+        readQueue.async { [weak self] in
+            let json = Self.string(from: chorus_reader_events_since(r.raw, after))
+            let rows = Self.decode([LedgerEvent].self, json)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.pulling = false
+                if sid == self.sessionID, let rows { self.merge(rows) }
+                if self.pullAgain { self.pullAgain = false; self.pullDelta() }
             }
-        case "usage":
-            // `used\tsize` from the bridge's usage_update, so the context
-            // meter moves while the reply streams, not only after it lands.
-            let parts = text.split(separator: "\t", omittingEmptySubsequences: false)
-            if let used = parts.first.flatMap({ Int64($0) }), used != contextUsed { contextUsed = used }
-            if parts.count > 1, let size = Int64(parts[1]), size != contextWindow { contextWindow = size }
-        default: break
+        }
+    }
+
+    /// Append a delta. The echoed user row (negative seq) goes once the real
+    /// one lands — or once the turn is over, if it never did.
+    private func merge(_ rows: [LedgerEvent]) {
+        let fresh = rows.filter { $0.seq > lastSeq }
+        let dropEcho = !busy || fresh.contains { $0.actor == "user" }
+        guard !fresh.isEmpty || (dropEcho && events.contains { $0.seq < 0 }) else { return }
+        var next = dropEcho ? events.filter { $0.seq >= 0 } : events
+        next.append(contentsOf: fresh)
+        events = next
+        if let top = fresh.last?.seq { lastSeq = max(lastSeq, top) }
+    }
+
+    private var liveDiffPending = false
+    private var liveDiffAt = Date.distantPast
+    /// Recompute the diff on the read-only handle, at most once a second
+    /// (it shells out to git). Feeds the Changes pane and the tree badges.
+    private func scheduleLiveDiff() {
+        guard !liveDiffPending, reader != nil else { return }
+        liveDiffPending = true
+        let wait = max(0, 1 - Date().timeIntervalSince(liveDiffAt))
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+            guard let self, let r = self.reader else { self?.liveDiffPending = false; return }
+            let sid = self.sessionID
+            self.readQueue.async { [weak self] in
+                let diff = Self.decode(DiffResult.self, Self.string(from: chorus_reader_working_diff(r.raw)))?.diff
+                let hunks = diff.map(parseHunks)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.liveDiffPending = false
+                    self.liveDiffAt = Date()
+                    if sid == self.sessionID, let diff, let hunks, diff != self.workingDiff {
+                        self.setWorkingDiff(diff, hunks: hunks)
+                    }
+                }
+            }
         }
     }
 
@@ -1360,8 +1442,12 @@ final class Engine: ObservableObject {
 
     func refresh() {
         guard let h = handle else { return }
+        // The thread comes from the delta pull on the read-only handle; only
+        // without one (no file-backed store) does it fall back to a full read.
+        if reader != nil { pullDelta() }
+        let full = reader == nil
         queue.async { [weak self] in
-            let eventsJSON = Self.string(from: chorus_transcript_json(h.raw))
+            let eventsJSON = full ? Self.string(from: chorus_transcript_json(h.raw)) : ""
             let attachmentsJSON = Self.string(from: chorus_list_attachments(h.raw))
             let diffJSON = Self.string(from: chorus_working_diff(h.raw))
             // Parse here, off the main thread, once per refresh — views read
@@ -1373,8 +1459,9 @@ final class Engine: ObservableObject {
             let warmJSON = Self.string(from: chorus_uncompacted(h.raw))
             DispatchQueue.main.async {
                 guard let self else { return }
-                if let rows = Self.decode([LedgerEvent].self, eventsJSON) {
+                if full, let rows = Self.decode([LedgerEvent].self, eventsJSON) {
                     self.events = rows
+                    self.lastSeq = rows.last(where: { $0.seq > 0 })?.seq ?? 0
                 }
                 if let rows = Self.decode(SessionAttachmentList.self, attachmentsJSON)?.attachments {
                     self.attachments = rows

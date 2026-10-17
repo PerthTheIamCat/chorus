@@ -147,3 +147,28 @@ fn user_diff_leaves_out_files_chorus_generates() {
     // the revert guard still sees everything
     assert!(ck.diff_since(&base).unwrap().contains("AGENTS.md"));
 }
+
+#[test]
+fn peek_diff_matches_the_user_diff_without_touching_the_shared_index() {
+    if !have_git() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("chorus-ckpt-peek-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let ck = Checkpoint::open(&dir).unwrap();
+    std::fs::write(dir.join("old.txt"), "one\n").unwrap();
+    let base = ck.snapshot("base").unwrap();
+    std::fs::write(dir.join("old.txt"), "two\n").unwrap();
+    std::fs::write(dir.join("new.txt"), "fresh\n").unwrap();
+    std::fs::write(dir.join("AGENTS.md"), "generated").unwrap();
+
+    let index = dir.join(".chorus/ckpt/index");
+    let before = std::fs::read(&index).unwrap();
+    let peek = ck.peek_diff_since_user(&base).unwrap();
+    assert_eq!(std::fs::read(&index).unwrap(), before, "shared index was written");
+    assert!(peek.contains("new.txt") && peek.contains("+two"), "{peek}");
+    assert!(!peek.contains("AGENTS.md"), "{peek}");
+    assert_eq!(peek, ck.diff_since_user(&base).unwrap());
+    let _ = std::fs::remove_dir_all(&dir);
+}

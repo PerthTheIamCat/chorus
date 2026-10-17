@@ -59,22 +59,8 @@ fn log_raw(log: &Log, dir: &str, text: &str) {
 static ACTIVE_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Where live `session/update`s go while a turn runs: `(kind, text)` with kind
-/// one of `thought`, `message`, `tool`, `tool_done`, `usage`. Process-global for the same
-/// reason as [`ACTIVE_PID`]: the shell wants a live view of the one running
-/// turn and has no other way in while that turn blocks its engine queue.
-/// Display only — nothing here is written to the ledger.
-pub type ProgressSink = Box<dyn Fn(&str, &str) + Send + Sync>;
-static PROGRESS: Mutex<Option<ProgressSink>> = Mutex::new(None);
-
-pub fn set_progress_sink(sink: Option<ProgressSink>) {
-    if let Ok(mut p) = PROGRESS.lock() {
-        *p = sink;
-    }
-}
-
 /// Called with `(context_used, context_window)` on every `usage_update`, on
-/// the thread running the turn. Thread-local, unlike [`ProgressSink`]: the
+/// the thread running the turn. Thread-local, unlike [`PushSink`]: the
 /// session that owns the turn installs it around its own `prompt` call to
 /// persist the numbers, and must not see another thread's turn.
 pub type UsageObserver = Box<dyn FnMut(Option<i64>, Option<i64>)>;
@@ -96,10 +82,99 @@ pub(crate) fn observe_usage(used: Option<i64>, size: Option<i64>) {
     });
 }
 
-pub fn emit_progress(kind: &str, text: &str) {
-    if let Ok(p) = PROGRESS.lock() {
-        if let Some(f) = p.as_ref() {
-            f(kind, text);
+/// Live signals from a running turn, tagged with the session they belong to.
+pub use push::{emit_progress, push, push_scope, set_push_sink, Push, PushScope, PushSink};
+
+pub mod push {
+    //! The one way out of a running turn while it holds its engine queue.
+    //!
+    //! Every signal names its `session_id` and the newest ledger `seq` that
+    //! session is known to have, so a shell watching several sessions (Orchestra
+    //! runs children side by side) can route each one, and can tell from `seq`
+    //! alone whether it has fallen behind the ledger. Signals are hints, never
+    //! the record: a dropped one is recovered by the next delta pull, and
+    //! nothing here is written anywhere.
+    //!
+    //! Kinds: `thought` · `message` · `tool` · `tool_done` (`status\ttitle`) ·
+    //! `usage` (`used\tsize`) · `events` (new rows up to `seq`) · `status`
+    //! (`running` | `idle` | `failed`).
+
+    use std::cell::Cell;
+    use std::sync::Mutex;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Push<'a> {
+        pub session_id: i64,
+        pub seq: i64,
+        pub kind: &'a str,
+        pub text: &'a str,
+    }
+
+    /// Process-global: there is one shell, and it wants every session's
+    /// signals (sidebar badges need background ones too). Called on whatever
+    /// thread the turn runs on.
+    pub type PushSink = Box<dyn Fn(&Push) + Send + Sync>;
+    static SINK: Mutex<Option<PushSink>> = Mutex::new(None);
+
+    thread_local! {
+        /// `(session_id, seq)` of the turn this thread is running. Thread-local
+        /// so concurrent turns on different threads never tag each other's
+        /// tokens — the ACP reader has no idea which Chorus session it serves.
+        static SCOPE: Cell<Option<(i64, i64)>> = const { Cell::new(None) };
+    }
+
+    pub fn set_push_sink(sink: Option<PushSink>) {
+        if let Ok(mut s) = SINK.lock() {
+            *s = sink;
+        }
+    }
+
+    /// While the guard lives, [`emit_progress`] on this thread is tagged with
+    /// `session_id`. Restores the previous tag on drop, so nesting is safe.
+    #[must_use = "the scope ends when the guard is dropped"]
+    pub struct PushScope {
+        prev: Option<(i64, i64)>,
+    }
+
+    pub fn push_scope(session_id: i64, seq: i64) -> PushScope {
+        PushScope {
+            prev: SCOPE.with(|s| s.replace(Some((session_id, seq)))),
+        }
+    }
+
+    impl Drop for PushScope {
+        fn drop(&mut self) {
+            SCOPE.with(|s| s.set(self.prev));
+        }
+    }
+
+    /// Send one signal for an explicit session. Also moves this thread's
+    /// scope forward when it is the same session, so later tokens carry the
+    /// newer `seq`.
+    pub fn push(session_id: i64, seq: i64, kind: &str, text: &str) {
+        SCOPE.with(|s| {
+            if let Some((sid, old)) = s.get() {
+                if sid == session_id && seq > old {
+                    s.set(Some((sid, seq)));
+                }
+            }
+        });
+        deliver(&Push { session_id, seq, kind, text });
+    }
+
+    /// Send one signal for the session this thread is running. Outside a
+    /// [`push_scope`] there is no session to name, so nothing is sent.
+    pub fn emit_progress(kind: &str, text: &str) {
+        if let Some((session_id, seq)) = SCOPE.with(Cell::get) {
+            deliver(&Push { session_id, seq, kind, text });
+        }
+    }
+
+    fn deliver(p: &Push) {
+        if let Ok(s) = SINK.lock() {
+            if let Some(f) = s.as_ref() {
+                f(p);
+            }
         }
     }
 }

@@ -162,10 +162,29 @@ char *chorus_refresh_models(const char *agent_id, const char *cwd);
 /* Share memory across a project: facts/approve queue/MCP go to `path`. {"ok":true} */
 char *chorus_set_memory_db(ChorusEngine *e, const char *path);
 
-/* Live updates of the running turn: kind = thought|message|tool|tool_done.
-   Strings valid only during the call. NULL cb clears. Display only. */
-typedef void (*chorus_progress_cb)(void *ctx, const char *kind, const char *text);
-void chorus_set_progress_callback(chorus_progress_cb cb, void *ctx);
+/* Live signals from every running turn, one JSON push per call, on the
+ * turn's thread: {"session_id":N,"seq":N,"kind":"...","text":"..."}.
+ * kind = thought|message|tool|tool_done ("status\ttitle")|usage ("used\tsize")
+ *      |events (ledger reaches seq: pull the delta)|status (running|idle|failed).
+ * `seq` = newest ledger seq known for that session. String valid only during
+ * the call. NULL cb clears. Signals only; a dropped push is recovered by the
+ * next chorus_reader_events_since. */
+typedef void (*chorus_push_cb)(void *ctx, const char *json);
+void chorus_set_push_callback(chorus_push_cb cb, void *ctx);
+
+/* Read-only second handle onto one session (SQLite WAL reads while a turn
+ * writes). Never touches the engine handle's serial queue (CLAUDE.md 7.7).
+ * Open on the engine queue right after opening `e`; then use it on its own
+ * thread. NULL on failure. */
+typedef struct ChorusReader ChorusReader;
+ChorusReader *chorus_reader_open(const ChorusEngine *e);
+void chorus_reader_free(ChorusReader *r);
+/* Same JSON array as chorus_events_since. */
+char *chorus_reader_events_since(const ChorusReader *r, int64_t after);
+/* Same JSON as chorus_session_usage. */
+char *chorus_reader_usage(const ChorusReader *r);
+/* Same JSON as chorus_working_diff, staged in a private index. */
+char *chorus_reader_working_diff(const ChorusReader *r);
 
 char *chorus_snapshot(const ChorusEngine *e, const char *message);
 

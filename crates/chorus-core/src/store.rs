@@ -20,6 +20,20 @@ impl Store {
         Ok(Self { conn })
     }
 
+    /// Open an existing database for reading only, with no pragmas and no
+    /// migration. This is the shell's second handle: in WAL mode it reads
+    /// while a turn on the main handle writes, so panels can pull deltas
+    /// mid-turn without touching the queue that turn holds (CLAUDE.md 7.7).
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        use rusqlite::OpenFlags;
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI,
+        )?;
+        conn.busy_timeout(std::time::Duration::from_millis(250))?;
+        Ok(Self { conn })
+    }
+
     /// Open a private, in-memory database. Useful for tests.
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
