@@ -12,17 +12,17 @@ public enum ScrollbarStyle: String, CaseIterable, Identifiable {
 
     public var label: String {
         switch self {
-        case .hidden: return "ซ่อนแถบเลื่อน (Hidden)"
-        case .overlay: return "กึ่งโปร่งใส (Overlay)"
-        case .system: return "ตามระบบ macOS"
+        case .hidden: return "ซ่อน"
+        case .overlay: return "ลอยโปร่งใส"
+        case .system: return "ตามระบบ"
         }
     }
 
     public var hint: String {
         switch self {
-        case .hidden: return "ซ่อนแถบเลื่อนทั้งหมด ไร้พื้นหลังเกะกะตา เลื่อนด้วย Trackpad หรือ Mouse Wheel ได้ลื่นไหลเหมือนเดิม"
-        case .overlay: return "แสดงแถบเลื่อนลอยแบบโปร่งใส เฉพาะเวลาเลื่อน ไม่มีรางพื้นหลังทึบ"
-        case .system: return "ใช้การตั้งค่ามาตรฐานของระบบ macOS (หากต่อเมาส์อาจมีรางพื้นหลัง)"
+        case .hidden: return "ไม่แสดงแถบเลื่อน เลื่อนด้วย trackpad หรือเมาส์ได้ตามเดิม"
+        case .overlay: return "แสดงแถบเลื่อนลอยเฉพาะตอนเลื่อน ไม่มีราง"
+        case .system: return "ตาม System Settings ถ้าต่อเมาส์อาจมีราง"
         }
     }
 
@@ -249,6 +249,6 @@ public struct PanelMaximizeButton: View {
                 .clipShape(RoundedRectangle(cornerRadius: 5))
         }
         .buttonStyle(.plain)
-        .help(isMaximized ? "ย่อขนาดกลับ (Restore) [Esc]" : "ขยายเต็มจอ (Maximize Panel)")
+        .help(isMaximized ? "ย่อกลับ (Esc)" : "ขยายเต็มจอ")
     }
 }

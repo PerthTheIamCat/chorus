@@ -36,7 +36,7 @@ struct TerminalDrawerView: View {
                     .font(.caption)
                     .foregroundStyle(.teal)
 
-                Text("เทอร์มินัล (Terminal Shell)")
+                Text("เทอร์มินัล")
                     .font(.caption.weight(.semibold))
 
                 if !workspace.isEmpty {
@@ -78,7 +78,7 @@ struct TerminalDrawerView: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
-                .help("ล้างหน้าจอ (Clear)")
+                .help("ล้างหน้าจอ")
 
                 Button {
                     if let proc = activeProcess, proc.isRunning {

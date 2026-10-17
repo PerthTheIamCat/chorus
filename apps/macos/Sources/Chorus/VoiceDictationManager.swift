@@ -52,9 +52,9 @@ public final class VoiceDictationManager: ObservableObject {
                 case .authorized:
                     self.beginAudioCapture(onTranscript: onTranscript)
                 case .denied:
-                    self.errorMessage = "ไม่ได้รับอนุญาตให้ใช้การรู้จำเสียง (Speech Recognition Denied)"
+                    self.errorMessage = "ยังไม่ได้อนุญาตให้ถอดเสียง — เปิดได้ที่ System Settings › Privacy › Speech Recognition"
                 case .restricted:
-                    self.errorMessage = "ระบบจำกัดการเข้าถึงการรู้จำเสียง (Restricted)"
+                    self.errorMessage = "เครื่องนี้ถูกจำกัดไม่ให้ถอดเสียง"
                 case .notDetermined:
                     self.errorMessage = "ยังไม่ได้ระบุสิทธิ์การใช้งานไมโครโฟน"
                 @unknown default:

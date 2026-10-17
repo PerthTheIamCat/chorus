@@ -57,7 +57,7 @@ struct ToolPage: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 HStack {
-                    Button(action: onClose) { Label("กลับไปที่เซสชัน", systemImage: "chevron.left") }
+                    Button(action: onClose) { Label("กลับไปที่ session", systemImage: "chevron.left") }
                         .buttonStyle(.plain).foregroundStyle(.secondary)
                     Spacer()
                 }

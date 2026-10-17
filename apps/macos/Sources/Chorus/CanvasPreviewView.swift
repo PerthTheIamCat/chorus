@@ -68,9 +68,9 @@ struct CanvasPreviewView: View {
 
     private var titleForLanguage: String {
         switch language {
-        case "mermaid": return "แคนวาสแผนภาพ (Mermaid Diagram)"
-        case "svg": return "พรีวิวรูปภาพเวกเตอร์ (SVG Canvas)"
-        default: return "พรีวิวคอมโพเนนต์ (HTML Sandbox)"
+        case "mermaid": return "แผนภาพ Mermaid"
+        case "svg": return "พรีวิว SVG"
+        default: return "พรีวิว HTML (sandbox)"
         }
     }
 

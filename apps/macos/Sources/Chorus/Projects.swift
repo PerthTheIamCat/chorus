@@ -100,7 +100,7 @@ struct ProjectEditor: View {
                     .controlSize(.small)
                 }
                 if project.folders.isEmpty {
-                    Text("ยังไม่มีโฟลเดอร์ — เพิ่มอย่างน้อยหนึ่งอันเพื่อเริ่มเซสชัน")
+                    Text("ยังไม่มีโฟลเดอร์ — เพิ่มอย่างน้อยหนึ่งอันเพื่อเริ่ม session")
                         .font(.caption).foregroundStyle(.tertiary)
                         .frame(maxWidth: .infinity, minHeight: 60)
                         .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
@@ -128,7 +128,7 @@ struct ProjectEditor: View {
             HStack {
                 if let onDelete {
                     Button("ลบโปรเจกต์", role: .destructive) { onDelete(); dismiss() }
-                        .help("ลบแค่รายการในแอป ไฟล์และเซสชันในโฟลเดอร์ยังอยู่ครบ")
+                        .help("ลบแค่รายการในแอป ไฟล์และ session ในโฟลเดอร์ยังอยู่ครบ")
                 }
                 Spacer()
                 Button("ยกเลิก") { dismiss() }.keyboardShortcut(.cancelAction)
