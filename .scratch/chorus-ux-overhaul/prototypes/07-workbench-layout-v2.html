@@ -1,0 +1,242 @@
+<!doctype html>
+<!-- PROTOTYPE — throwaway. Ticket: Workbench layout v2 (.scratch/chorus-ux-overhaul/issues/07-workbench-layout-v2.md)
+     Question: how should the window look when the file viewer sits on the left next to the file tree,
+     files have type icons, and sub sessions sit under their session in the sidebar?
+     Three structurally different variants, switch with ?variant=A|B|C (or ← →). Width with ?w=1024|1440|1800 (or 1/2/3).
+     Assumption: an HTML mock instead of SwiftUI variants, because ContentView.swift is being edited by another session. -->
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workbench layout v2</title>
+<style>
+:root{
+  --bg:#f5f5f7; --win:#ffffff; --side:#ececef; --line:#d9d9de; --text:#1d1d1f; --muted:#6e6e73;
+  --accent:#0a66ff; --sel:#dbe7ff; --hover:rgba(0,0,0,.05); --code-bg:#ffffff;
+  --kw:#9b2393; --str:#c41a16; --num:#1c00cf; --com:#5d6c79; --type:#0b4f79; --fn:#326d74;
+  --run:#0a66ff; --wait:#c76b00; --ok:#248a3d; --bad:#d70015;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#1c1c1e; --win:#232325; --side:#2a2a2d; --line:#3a3a3d; --text:#f2f2f7; --muted:#98989f;
+  --accent:#4c8dff; --sel:#2f4166; --hover:rgba(255,255,255,.06); --code-bg:#1f1f24;
+  --kw:#fc5fa3; --str:#fc6a5d; --num:#d0bf69; --com:#7f8c98; --type:#5dd8ff; --fn:#67b7a4;
+  --run:#4c8dff; --wait:#ffb340; --ok:#30d158; --bad:#ff453a; } }
+:root[data-theme="dark"]{
+  --bg:#1c1c1e; --win:#232325; --side:#2a2a2d; --line:#3a3a3d; --text:#f2f2f7; --muted:#98989f;
+  --accent:#4c8dff; --sel:#2f4166; --hover:rgba(255,255,255,.06); --code-bg:#1f1f24;
+  --kw:#fc5fa3; --str:#fc6a5d; --num:#d0bf69; --com:#7f8c98; --type:#5dd8ff; --fn:#67b7a4;
+  --run:#4c8dff; --wait:#ffb340; --ok:#30d158; --bad:#ff453a; }
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:13px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","Sukhumvit Set",sans-serif;padding:24px 16px 90px;overflow-x:auto}
+.window{margin:0 auto;height:720px;background:var(--win);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 10px 40px rgba(0,0,0,.18)}
+.titlebar{height:38px;display:flex;align-items:center;gap:10px;padding:0 12px;border-bottom:1px solid var(--line);background:var(--side)}
+.lights{display:flex;gap:7px}.lights i{width:12px;height:12px;border-radius:50%;display:block}
+.lights i:nth-child(1){background:#ff5f57}.lights i:nth-child(2){background:#febc2e}.lights i:nth-child(3){background:#28c840}
+.ttl{font-weight:600}.ttl small{font-weight:400;color:var(--muted);margin-left:6px}
+.tb-btn{border:0;background:transparent;color:var(--muted);font-size:12px;padding:3px 8px;border-radius:6px;cursor:pointer}
+.tb-btn:hover{background:var(--hover);color:var(--text)} .tb-btn.on{background:var(--sel);color:var(--text)}
+.spacer{flex:1}
+.body{flex:1;display:flex;min-height:0}
+.col{display:flex;flex-direction:column;min-width:0;border-right:1px solid var(--line)}
+.col:last-child{border-right:0}
+.hdr{height:30px;display:flex;align-items:center;gap:6px;padding:0 10px;font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--line);flex:none}
+.scroll{overflow:auto;flex:1;min-height:0}
+.side{background:var(--side)}
+/* sessions */
+.sec{font-size:11px;font-weight:600;color:var(--muted);padding:10px 10px 4px}
+.row{display:flex;align-items:center;gap:6px;padding:4px 10px;border-radius:6px;margin:0 6px;cursor:default;white-space:nowrap;overflow:hidden}
+.row:hover{background:var(--hover)} .row.sel{background:var(--sel)}
+.row .nm{overflow:hidden;text-overflow:ellipsis;flex:1}
+.row .meta{color:var(--muted);font-size:11px}
+.sub{padding-left:26px;position:relative}
+.sub::before{content:"";position:absolute;left:17px;top:0;bottom:50%;border-left:1px solid var(--line);border-bottom:1px solid var(--line);width:7px}
+.dot{width:8px;height:8px;border-radius:50%;flex:none}
+.dot.run{background:var(--run);animation:pulse 1.2s infinite}.dot.wait{background:var(--wait);box-shadow:0 0 0 3px color-mix(in srgb,var(--wait) 30%,transparent)}
+.dot.ok{background:var(--ok)}.dot.bad{background:var(--bad)}
+@keyframes pulse{50%{opacity:.35}}
+@media (prefers-reduced-motion:reduce){.dot.run{animation:none}}
+.chip{font-size:10px;padding:1px 5px;border-radius:4px;background:var(--hover);color:var(--muted)}
+.chip.wait{color:var(--wait)} .chip.prov{border:1px dashed var(--line)}
+.count{font-size:10px;color:var(--run);font-weight:600}
+/* file tree */
+.ft{font-size:12.5px}
+.ft .row{padding:2px 8px;margin:0 4px}
+.ico{width:16px;height:16px;flex:none;border-radius:3px;display:inline-flex;align-items:center;justify-content:center;font:700 7.5px/1 ui-monospace,Menlo,monospace;color:#fff}
+.i-dir{background:none;color:var(--accent);font-size:13px}
+.i-rs{background:#e26a2c}.i-md{background:#3b7ddd}.i-swift{background:#f05138}.i-toml{background:#7a7a85}
+.i-json{background:#c99a00}.i-lock{background:#8a8a8a}.i-sh{background:#3aa655}.i-py{background:#3572a5}
+.badge{font-size:10px;font-weight:700;margin-left:auto}.badge.M{color:var(--wait)}.badge.A{color:var(--ok)}
+.agentfocus{color:var(--run);font-size:9px}
+/* code */
+.code{background:var(--code-bg);font:12px/1.55 "SF Mono",ui-monospace,Menlo,monospace;padding:6px 0;white-space:pre}
+.ln{display:inline-block;width:38px;text-align:right;padding-right:12px;color:var(--muted);opacity:.7;user-select:none}
+.k{color:var(--kw);font-weight:600}.s{color:var(--str)}.n{color:var(--num)}.c{color:var(--com);font-style:italic}.t{color:var(--type)}.f{color:var(--fn)}
+.hl{background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.crumb{display:flex;align-items:center;gap:6px;padding:0 10px;height:30px;border-bottom:1px solid var(--line);font-size:12px;color:var(--muted);flex:none}
+.crumb b{color:var(--text);font-weight:500}
+.x{margin-left:auto;cursor:pointer;color:var(--muted);border:0;background:none;font-size:13px}
+/* chat */
+.msg{padding:10px 14px;max-width:720px}
+.who{font-size:11px;color:var(--muted);margin-bottom:2px}.who b{color:var(--text)}
+.bubble.user{background:var(--sel);border-radius:10px;padding:8px 10px;display:inline-block}
+.tool{font:11.5px "SF Mono",ui-monospace,monospace;color:var(--muted);padding:2px 0}
+.composer{border-top:1px solid var(--line);padding:10px;flex:none}
+.cbox{border:1px solid var(--line);border-radius:10px;padding:8px 10px;color:var(--muted);min-height:58px;display:flex;flex-direction:column;justify-content:space-between}
+.cbar{display:flex;gap:6px;align-items:center;font-size:11px}
+.send{margin-left:auto;background:var(--accent);color:#fff;border-radius:6px;padding:3px 10px}
+.empty{color:var(--muted);text-align:center;padding:40px 16px;font-size:12px}
+.seg{display:flex;margin:8px 8px 4px;background:var(--hover);border-radius:7px;padding:2px}
+.seg span{flex:1;text-align:center;padding:3px 0;border-radius:5px;font-size:12px;cursor:pointer}
+.seg span.on{background:var(--win);box-shadow:0 1px 2px rgba(0,0,0,.15)}
+.splitv{display:flex;flex-direction:column;min-height:0;flex:1}
+.handle{height:5px;background:var(--line);cursor:row-resize;flex:none}
+.rail{width:40px;background:var(--side);display:flex;flex-direction:column;align-items:center;gap:10px;padding-top:10px;border-right:1px solid var(--line);flex:none}
+.rail span{width:26px;height:26px;border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--muted)}
+.rail span.on{background:var(--sel);color:var(--text)}
+.note{max-width:1800px;margin:12px auto 0;color:var(--muted);font-size:12px}
+.note b{color:var(--text)}
+/* switcher */
+.sw{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:#111;color:#fff;border-radius:999px;display:flex;align-items:center;gap:6px;padding:6px 8px;box-shadow:0 6px 24px rgba(0,0,0,.35);font:12px -apple-system,sans-serif;z-index:9;white-space:nowrap}
+.sw button{background:#333;color:#fff;border:0;border-radius:999px;padding:5px 10px;cursor:pointer;font:inherit}
+.sw button.on{background:#fff;color:#111}
+.sw .lab{padding:0 8px;min-width:230px;text-align:center}
+@media (max-width:700px){.sw .lab{min-width:0}}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<p class="note" id="note"></p>
+<div class="sw" role="toolbar" aria-label="Prototype switcher">
+  <button id="prev" aria-label="Previous variant">←</button>
+  <span class="lab" id="lab"></span>
+  <button id="next" aria-label="Next variant">→</button>
+  <span style="width:8px"></span>
+  <button data-w="1024">1024</button><button data-w="1440">1440</button><button data-w="1800">1800</button>
+  <button id="file" title="Toggle open file">ไฟล์</button>
+</div>
+<script>
+const V = { A:"Four columns", B:"Sidebar mode switch", C:"Navigator stack" };
+const NOTES = {
+  A:"<b>A · สี่คอลัมน์</b> — sessions | file tree | viewer | chat ทุกอย่างเห็นพร้อมกัน · 1024: tree หดเป็น rail ไอคอน, viewer แทนที่ chat ชั่วคราว (ปิดไฟล์ = chat กลับมา)",
+  B:"<b>B · สลับโหมดใน sidebar</b> — sidebar มีปุ่ม Sessions | Files · โหมด Files: tree อยู่ใน sidebar และ viewer เปิดติดขวาของ tree, chat ยังอยู่ขวาสุด · sub session เห็นเสมอเพราะ badge จำนวนบนปุ่ม Sessions · 1024: viewer แทน chat",
+  C:"<b>C · Navigator ซ้อนแนวตั้ง</b> — คอลัมน์ซ้ายเดียว: sessions บน, file tree ล่าง (ลากแบ่งได้) · viewer เปิดเป็นคอลัมน์ถัดไปทางซ้ายของ chat · ใกล้ Xcode navigator ที่สุด · 1024: ซ่อน sessions เหลือ tree, กด ⌘1/⌘2 สลับ"
+};
+const q = new URLSearchParams(location.search);
+let state = { v: (q.get("variant")||"A").toUpperCase(), w: +(q.get("w")||1440), file: q.get("file")!=="0" };
+if(!V[state.v]) state.v="A";
+
+const ico = (t)=>{const m={rs:"RS",md:"MD",swift:"SW",toml:"TM",json:"{}",lock:"LK",sh:"SH",py:"PY"};return t==="dir"?`<span class="ico i-dir">▸</span>`:`<span class="ico i-${t}">${m[t]}</span>`};
+const tree = [
+  ["dir","crates",0],["dir","chorus-core",1],["dir","src",2],
+  ["rs","router.rs",3,"M",true],["rs","ledger.rs",3],["rs","highlight.rs",3,"A"],["rs","file_icons.rs",3,"A"],
+  ["toml","Cargo.toml",2],["dir","chorus-ffi",1],["dir","apps/macos",0],["swift","ContentView.swift",1,"M"],["swift","Engine.swift",1],
+  ["md","CLAUDE.md",0],["md","CONTEXT.md",0,"M"],["toml","Cargo.toml",0],["lock","Cargo.lock",0],["sh","build.sh",0],["json","mcp.json",0]
+];
+const treeHTML = (compact)=> `<div class="ft">${tree.map(([t,n,d,b,f])=>`<div class="row ${n==="router.rs"&&state.file?"sel":""}" style="padding-left:${8+d*14}px">${ico(t)}<span class="nm">${compact?"":n}</span>${f?'<span class="agentfocus" title="agent กำลังดูไฟล์นี้">●</span>':""}${b&&!compact?`<span class="badge ${b}">${b}</span>`:""}</div>`).join("")}</div>`;
+
+const sessions = (compact)=>`
+  <div class="sec">Chorus</div>
+  <div class="row"><span class="dot ok"></span><span class="nm">ทำ icon ตามประเภทไฟล์</span><span class="meta">2ชม.</span></div>
+  <div class="row sel"><span class="dot run"></span><span class="nm">แก้ N+1 query หน้า order list</span><span class="count">3 กำลังทำ</span></div>
+  <div class="row sub" title="reviewer · ตรวจ eager-load ใน findAll — gpt-5.6-luna low"><span class="dot run"></span><span class="nm">reviewer · ตรวจ findAll</span><span class="chip">luna</span></div>
+  <div class="row sub" title="tester · รัน pnpm test:order"><span class="dot wait"></span><span class="nm">tester · test:order</span><span class="chip wait">รอ permission</span></div>
+  <div class="row sub" title="provider subagent (Claude Task) — ดูได้อย่างเดียว"><span class="dot run"></span><span class="nm">Explore repo layout</span><span class="chip prov">Task</span></div>
+  <div class="row sub" style="color:var(--muted)"><span class="nm">เสร็จแล้ว 2 ▸</span></div>
+  <div class="row"><span class="dot ok"></span><span class="nm">Security fixes P1 + P2</span><span class="meta">เมื่อวาน</span></div>
+  <div class="sec">Chats</div>
+  <div class="row"><span class="nm">ถามเรื่อง SQLite WAL</span></div>`;
+
+const codeLines = [
+ `<span class="c">/// Closest candidate to what the task needs; ties go to the cheaper one.</span>`,
+ `<span class="k">fn</span> <span class="f">pick_candidate</span>&lt;<span class="k">'a</span>&gt;(candidates: &amp;[&amp;<span class="k">'a</span> <span class="t">Candidate</span>], want: <span class="t">Want</span>) -&gt; <span class="t">Option</span>&lt;&amp;<span class="k">'a</span> <span class="t">Candidate</span>&gt; {`,
+ `    candidates.<span class="f">iter</span>().<span class="f">copied</span>().<span class="f">min_by_key</span>(|c| {`,
+ `        (`,
+ `            <span class="f">distance</span>(c, want),`,
+ `            <span class="f">model_tier</span>(&amp;c.model) + <span class="f">effort_rank</span>(&amp;c.effort),`,
+ `            c.id.<span class="f">clone</span>(),`,
+ `        )`,
+ `    })`,
+ `}`,
+ ``,
+ `<span class="k">const</span> SMALL_MODELS: &amp;[&amp;<span class="t">str</span>] = &amp;[<span class="s">"mini"</span>, <span class="s">"haiku"</span>, <span class="s">"nano"</span>, <span class="s">"luna"</span>];`,
+ `<span class="k">fn</span> <span class="f">effort_rank</span>(effort: &amp;<span class="t">str</span>) -&gt; <span class="t">u8</span> {`,
+ `    <span class="k">match</span> effort.<span class="f">trim</span>() { <span class="s">"low"</span> =&gt; <span class="n">1</span>, <span class="s">"high"</span> =&gt; <span class="n">3</span>, _ =&gt; <span class="n">2</span> }`,
+ `}`
+];
+const viewer = ()=> state.file ? `
+  <div class="crumb">${ico("rs")} crates › chorus-core › src › <b>router.rs</b> <span class="chip">อ่านอย่างเดียว</span><button class="x" onclick="toggleFile()" aria-label="Close file">✕</button></div>
+  <div class="scroll code">${codeLines.map((l,i)=>`<div class="${i===1?"hl":""}"><span class="ln">${1106+i}</span>${l}</div>`).join("")}</div>`
+  : `<div class="empty">เลือกไฟล์จาก tree เพื่อดู<br>หรือกด ⌘P เพื่อค้นหาไฟล์</div>`;
+
+const chat = ()=>`
+  <div class="crumb">Chorus › <b>แก้ N+1 query หน้า order list</b><span class="chip" style="margin-left:auto">Orchestra · Opus 5.5</span></div>
+  <div class="scroll">
+    <div class="msg"><div class="who"><b>Perth</b></div><div class="bubble user">หน้า order list ช้า ทำให้ต่ำกว่า 200ms</div></div>
+    <div class="msg"><div class="who"><b>Claude Opus 5.5</b> · orchestrator</div>
+      แผน: ① ตรวจ findAll (reviewer) ② เขียน eager-load (implementer) ③ รัน test:order (tester)
+      <div class="tool">→ chorus_spawn_agent reviewer · weight light</div>
+      <div class="tool">→ chorus_spawn_agent tester · weight normal</div></div>
+    <div class="msg"><div class="who"><b>tester</b> · รอ permission</div><div class="tool">⚠ ขอรัน <code>pnpm test:order</code> — อนุญาต / ปฏิเสธ</div></div>
+  </div>
+  <div class="composer"><div class="cbox">ถาม หรือสั่งงานต่อ…<div class="cbar"><span>＋</span><span class="chip">Orchestra</span><span class="chip">สมดุล</span><span class="send">ส่ง ⌘↩</span></div></div></div>`;
+
+const titlebar = (extra="")=>`<div class="titlebar"><div class="lights"><i></i><i></i><i></i></div><span class="ttl">Chorus<small>~/work/shop-api</small></span>${extra}<span class="spacer"></span><button class="tb-btn">⌥⌘M Monitor</button><button class="tb-btn">⌥⌘I Inspector</button></div>`;
+
+function VariantA(w){
+  const narrow = w<1200;
+  if(narrow) return titlebar()+`<div class="body">
+    <div class="col side" style="width:230px">${sessions()}</div>
+    <div class="rail">${["▤","⌕","⎇"].map((s,i)=>`<span class="${i===0?"on":""}">${s}</span>`).join("")}</div>
+    ${state.file?`<div class="col" style="flex:1">${viewer()}</div>`:`<div class="col" style="flex:1">${chat()}</div>`}
+  </div>`;
+  return titlebar()+`<div class="body">
+    <div class="col side" style="width:${w>1600?260:230}px">${sessions()}</div>
+    <div class="col side" style="width:${w>1600?240:210}px"><div class="hdr">Files</div><div class="scroll">${treeHTML()}</div></div>
+    ${state.file?`<div class="col" style="flex:1.2">${viewer()}</div>`:""}
+    <div class="col" style="flex:1;min-width:380px">${chat()}</div>
+  </div>`;
+}
+function VariantB(w){
+  const narrow = w<1200, mode = state.file?"files":"sessions";
+  const sideInner = mode==="files"
+    ? `<div class="seg"><span onclick="toggleFile()">Sessions <span class="count">3</span></span><span class="on">Files</span></div><div class="scroll">${treeHTML()}</div>`
+    : `<div class="seg"><span class="on">Sessions</span><span onclick="toggleFile()">Files</span></div><div class="scroll">${sessions()}</div>`;
+  return titlebar()+`<div class="body">
+    <div class="col side" style="width:${w>1600?280:250}px">${sideInner}</div>
+    ${state.file?`<div class="col" style="flex:${narrow?1:1.1}">${viewer()}</div>`:""}
+    ${narrow&&state.file?"":`<div class="col" style="flex:1;min-width:380px">${chat()}</div>`}
+  </div>`;
+}
+function VariantC(w){
+  const narrow = w<1200;
+  const nav = `<div class="col side" style="width:${w>1600?280:250}px"><div class="splitv">
+      ${narrow?"":`<div class="hdr">Sessions</div><div class="scroll" style="flex:.55">${sessions()}</div><div class="handle" title="ลากเพื่อแบ่ง"></div>`}
+      <div class="hdr">Files ${narrow?'<span style="margin-left:auto;font-weight:400;text-transform:none">⌘1 Sessions · ⌘2 Files</span>':""}</div><div class="scroll" style="flex:.45">${treeHTML()}</div>
+    </div></div>`;
+  return titlebar()+`<div class="body">${nav}
+    ${state.file?`<div class="col" style="flex:1.1">${viewer()}</div>`:""}
+    <div class="col" style="flex:1;min-width:${narrow?320:380}px">${chat()}</div>
+  </div>`;
+}
+const R = {A:VariantA,B:VariantB,C:VariantC};
+function render(){
+  document.getElementById("app").innerHTML = `<div class="window" style="width:${state.w}px">${R[state.v](state.w)}</div>`;
+  document.getElementById("lab").textContent = `${state.v} (${V[state.v]}) · ${state.w}px`;
+  document.getElementById("note").innerHTML = NOTES[state.v] + ` · <span>width ${state.w}px · ไฟล์ ${state.file?"เปิด":"ปิด"}</span>`;
+  document.querySelectorAll("[data-w]").forEach(b=>b.classList.toggle("on",+b.dataset.w===state.w));
+  document.getElementById("file").classList.toggle("on",state.file);
+  const p=new URLSearchParams({variant:state.v,w:state.w,file:state.file?1:0}); history.replaceState(null,"","?"+p);
+}
+function cycle(d){const k=Object.keys(V);state.v=k[(k.indexOf(state.v)+d+k.length)%k.length];render()}
+function toggleFile(){state.file=!state.file;render()}
+document.getElementById("prev").onclick=()=>cycle(-1);
+document.getElementById("next").onclick=()=>cycle(1);
+document.getElementById("file").onclick=toggleFile;
+document.querySelectorAll("[data-w]").forEach(b=>b.onclick=()=>{state.w=+b.dataset.w;render()});
+addEventListener("keydown",e=>{if(e.target.closest("input,textarea,[contenteditable]"))return;
+  if(e.key==="ArrowLeft")cycle(-1); if(e.key==="ArrowRight")cycle(1);
+  if(e.key==="1")state.w=1024,render(); if(e.key==="2")state.w=1440,render(); if(e.key==="3")state.w=1800,render(); if(e.key==="f")toggleFile();});
+render();
+</script>
+</body>
+</html>

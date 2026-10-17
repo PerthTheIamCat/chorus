@@ -56,3 +56,23 @@ _Avoid_: Package manager
 A repeatable task suite run through the real Chorus session engine to measure whether Chorus helps agents succeed, judged by outcome, tokens, time, and interventions rather than by model quality alone.
 _Avoid_: Bench, which measures storage and context assembly
 
+
+**Orchestra mode**:
+A session setting in which each user turn goes to one orchestrating agent instead of the router. It cannot be on at the same time as auto routing for the user's turn; the work the orchestrating agent hands out is still routed.
+_Avoid_: Orchestrator, when the setting rather than the agent is meant
+
+**Role**:
+A named job, such as reviewer or tester, that an orchestrating agent gives to an agent it starts. Roles come from a role library the user can edit; the orchestrating agent may add a new one when none fits, and that new role is shown to the user.
+_Avoid_: Agent or model, which the router picks for the role
+
+**Sub session**:
+A child listed under its parent session: either a subagent the provider started or an agent Chorus started for an orchestrating agent. Only the second kind can be stopped or messaged.
+_Avoid_: Subagent, when both kinds are meant
+
+**Route preset**:
+The user's choice of how the router weighs cost against capability: Economy, Balanced (default), or Max.
+_Avoid_: Effort, which is a property of one model choice
+
+**Review baseline**:
+The point a diff is measured from: the commit the session started on, moved forward when the user marks changes reviewed or commits between turns. A commit an agent makes during its turn does not move it, so the agent's work stays in review.
+_Avoid_: Checkpoint, which is a restore point taken around each turn

@@ -1,0 +1,126 @@
+<!doctype html>
+<!-- PROTOTYPE — throwaway. Ticket: Settings layout (.scratch/chorus-ux-overhaul/issues/09-settings-layout.md)
+     Question: how is Settings split into categories, with short labels and an (i) hover for detail?
+     Three structurally different variants: ?variant=A|B|C (← →). Pane: ?p=routing|orchestra|safety (buttons or 1/2/3).
+     Settings listed come from the 25 existing @AppStorage keys plus the ones decided on this map. -->
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings layout</title>
+<style>
+:root{--bg:#f5f5f7;--win:#fff;--side:#ececef;--line:#d9d9de;--text:#1d1d1f;--muted:#6e6e73;--accent:#0a66ff;--sel:#dbe7ff;--hover:rgba(0,0,0,.05);--group:#f6f6f8}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#1c1c1e;--win:#232325;--side:#2a2a2d;--line:#3a3a3d;--text:#f2f2f7;--muted:#98989f;--accent:#4c8dff;--sel:#2f4166;--hover:rgba(255,255,255,.06);--group:#2b2b2e}}
+:root[data-theme="dark"]{--bg:#1c1c1e;--win:#232325;--side:#2a2a2d;--line:#3a3a3d;--text:#f2f2f7;--muted:#98989f;--accent:#4c8dff;--sel:#2f4166;--hover:rgba(255,255,255,.06);--group:#2b2b2e}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:13px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","Sukhumvit Set",sans-serif;padding:24px 16px 90px}
+.window{max-width:820px;margin:0 auto;background:var(--win);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.18);height:600px;display:flex;flex-direction:column}
+.tbar{height:38px;display:flex;align-items:center;padding:0 12px;gap:10px;background:var(--side);border-bottom:1px solid var(--line);flex:none}
+.lights{display:flex;gap:7px}.lights i{width:12px;height:12px;border-radius:50%;display:block}.lights i:nth-child(1){background:#ff5f57}.lights i:nth-child(2){background:#febc2e}.lights i:nth-child(3){background:#28c840}
+.ttl{font-weight:600;flex:1;text-align:center;margin-right:50px}
+.body{flex:1;display:flex;min-height:0}
+.nav{width:210px;background:var(--side);border-right:1px solid var(--line);overflow:auto;padding:8px 6px;flex:none}
+.nav .gh{font-size:11px;color:var(--muted);font-weight:600;padding:10px 8px 3px}
+.nav .it{display:flex;gap:8px;align-items:center;padding:4px 8px;border-radius:6px;cursor:pointer;white-space:nowrap}
+.nav .it:hover{background:var(--hover)}.nav .it.on{background:var(--accent);color:#fff}
+.ic{width:20px;height:20px;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;color:#fff;font-size:11px;flex:none}
+.pane{flex:1;overflow:auto;padding:18px 22px}
+.pane h2{font-size:17px;margin:0 0 2px}.pane .sub{color:var(--muted);margin:0 0 14px;font-size:12px}
+.grp{background:var(--group);border:1px solid var(--line);border-radius:10px;margin-bottom:16px}
+.grp-t{font-size:11px;color:var(--muted);font-weight:600;margin:0 0 6px 4px}
+.r{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--line);min-height:38px}
+.r:last-child{border-bottom:0}
+.r .l{flex:1;display:flex;align-items:center;gap:6px}
+.r .d{color:var(--muted);font-size:11px}
+.info{position:relative;width:15px;height:15px;border-radius:50%;border:1px solid var(--muted);color:var(--muted);font:600 10px/13px Georgia,serif;text-align:center;cursor:help;flex:none}
+.info:hover{color:var(--accent);border-color:var(--accent)}
+.info .tip{display:none;position:absolute;left:20px;top:-6px;width:260px;background:var(--win);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font:12px/1.45 -apple-system,sans-serif;text-align:left;box-shadow:0 8px 24px rgba(0,0,0,.18);z-index:5}
+.info:hover .tip,.info:focus .tip{display:block}
+.tg{width:32px;height:19px;border-radius:10px;background:#c7c7cc;position:relative;flex:none}.tg::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.3)}
+.tg.on{background:#34c759}.tg.on::after{left:15px}
+.sel{border:1px solid var(--line);border-radius:6px;padding:3px 8px;background:var(--win);font-size:12px;white-space:nowrap}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}.seg span{padding:3px 10px;font-size:12px;border-right:1px solid var(--line)}.seg span:last-child{border-right:0}.seg span.on{background:var(--accent);color:#fff}
+.step{display:inline-flex;align-items:center;gap:6px;font-size:12px}.step b{border:1px solid var(--line);border-radius:5px;padding:0 6px;font-weight:400}
+.warn{color:#c76b00;font-size:11px}
+.tabs{display:flex;justify-content:center;gap:2px;padding:6px;background:var(--side);border-bottom:1px solid var(--line);flex:none;flex-wrap:wrap}
+.tabs .t{display:flex;flex-direction:column;align-items:center;gap:3px;padding:5px 9px;border-radius:7px;font-size:11px;cursor:pointer;min-width:66px}
+.tabs .t:hover{background:var(--hover)}.tabs .t.on{background:var(--hover);color:var(--accent)}
+.tabs .t .ic{width:24px;height:24px;font-size:13px}
+.subtabs{display:flex;justify-content:center;margin:0 0 14px}
+.search{margin:10px 16px;border:1px solid var(--line);border-radius:8px;padding:6px 10px;color:var(--muted);background:var(--win);flex:none}
+.flat .sec{font-size:15px;font-weight:600;margin:18px 0 6px;padding-top:6px;border-top:1px solid var(--line)}
+.flat .sec:first-child{border-top:0;margin-top:0}
+.flat .r{border:0;padding:6px 2px;min-height:30px}
+.toc{width:170px;border-right:1px solid var(--line);padding:6px;overflow:auto;flex:none;font-size:12px}
+.toc div{padding:3px 8px;border-radius:5px;cursor:pointer;color:var(--muted)}.toc div.on{color:var(--text);background:var(--hover)}
+.note{max-width:820px;margin:12px auto 0;color:var(--muted);font-size:12px}.note b{color:var(--text)}
+.sw{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:#111;color:#fff;border-radius:999px;display:flex;align-items:center;gap:6px;padding:6px 8px;box-shadow:0 6px 24px rgba(0,0,0,.35);font:12px -apple-system,sans-serif;z-index:9;white-space:nowrap}
+.sw button{background:#333;color:#fff;border:0;border-radius:999px;padding:5px 10px;cursor:pointer;font:inherit}.sw button.on{background:#fff;color:#111}
+.sw .lab{padding:0 8px;min-width:200px;text-align:center}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<p class="note" id="note"></p>
+<div class="sw" role="toolbar" aria-label="Prototype switcher">
+ <button id="prev" aria-label="Previous variant">←</button><span class="lab" id="lab"></span><button id="next" aria-label="Next variant">→</button>
+ <span style="width:8px"></span><button data-p="routing">การส่งงาน</button><button data-p="orchestra">Orchestra</button><button data-p="safety">ความปลอดภัย</button>
+</div>
+<script>
+const V={A:"Sidebar, 13 categories",B:"Toolbar tabs + sub-tabs",C:"One searchable page"};
+const NOTES={
+ A:"<b>A · Sidebar แบบ System Settings</b> — 13 หมวด แบ่ง 4 กลุ่ม (ใช้งาน / Agent / ข้อมูล / ระบบ) · แต่ละหมวดสั้น ไม่มีหน้าไหนเกินหนึ่งจอ · คำอธิบายยาวอยู่ใน (i)",
+ B:"<b>B · Toolbar tabs แบบ Mac คลาสสิก</b> — 6 แท็บใหญ่ด้านบน แต่ละแท็บมี segmented sub-tab (เช่น Agent › การส่งงาน | Orchestra | โมเดล) · หน้าต่างแคบกว่า แต่ต้องคลิกสองชั้น",
+ C:"<b>C · หน้าเดียวค้นหาได้</b> — ทุกการตั้งค่าอยู่หน้าเดียว มีสารบัญซ้ายและช่องค้นหาด้านบน (แบบ VS Code) · หาของเร็วที่สุด แต่แบ่งหมวดน้อยที่สุด"
+};
+const q=new URLSearchParams(location.search);
+let st={v:(q.get("variant")||"A").toUpperCase(),p:q.get("p")||"orchestra"};if(!V[st.v])st.v="A";
+const i=(t)=>`<span class="info" tabindex="0" aria-label="ข้อมูลเพิ่มเติม">i<span class="tip">${t}</span></span>`;
+const row=(l,ctl,tip,d)=>`<div class="r"><div class="l">${l}${tip?i(tip):""}${d?`<span class="d">${d}</span>`:""}</div>${ctl}</div>`;
+const tg=(on)=>`<span class="tg ${on?"on":""}"></span>`;
+const sel=(t)=>`<span class="sel">${t} ▾</span>`;
+const seg=(a,on)=>`<span class="seg">${a.map((x,k)=>`<span class="${k===on?"on":""}">${x}</span>`).join("")}</span>`;
+const step=(n)=>`<span class="step"><b>−</b>${n}<b>+</b></span>`;
+const G=(t,rows)=>`<div class="grp-t">${t}</div><div class="grp">${rows.join("")}</div>`;
+const PANES={
+ routing:{t:"การส่งงาน",s:"เทิร์นของคุณถูกส่งไปที่ไหน",ic:["#0a66ff","⇢"],body:()=>
+  G("ค่าเริ่มต้นของ session ใหม่",[row("โหมด",seg(["Auto route","Orchestra"],0),"Auto route: router เลือกโมเดลให้ทุกเทิร์น · Orchestra: โมเดลหลักวางแผนแล้วแจกงานให้ agent ย่อย เปิดพร้อมกันไม่ได้ เปลี่ยนรายเทิร์นได้ที่ช่องพิมพ์"),
+   row("Route preset",seg(["ประหยัด","สมดุล","เต็มกำลัง"],1),"ประหยัด: เลือกโมเดลเล็กลงหนึ่งขั้น · สมดุล: ตามความยากของงาน · เต็มกำลัง: ใหญ่ขึ้นหนึ่งขั้น")])+
+  G("เมื่อชนลิมิต",[row("สลับไปเจ้าอื่นอัตโนมัติ",tg(true),"เมื่อเจอ 429 / quota หมด ส่ง handoff brief ให้เจ้าถัดไปทำต่อทันที"),row("ลำดับ",sel("Claude → Codex → Gemini"))])+
+  G("Router",[row("ตัวตัดสิน",sel("ในเครื่อง (in-process)"),"โมเดลเล็กในเครื่อง ไม่ใช้โควตา ไม่ส่งข้อมูลออก"),row("ประหยัดแบตตอนถอดสาย",tg(true))])},
+ orchestra:{t:"Orchestra",s:"โมเดลหลักที่วางแผนและแจกงาน",ic:["#7a4cff","⌘"],body:()=>
+  G("โมเดลหลัก",[row("Orchestrator",sel("Claude Opus 5.5 · medium"),"วางแผน ตอบคำถามง่าย และแจกงาน แต่ไม่เขียนไฟล์เอง"),row("ตัวสำรอง",sel("อัตโนมัติ (แรงสุดของเจ้าอื่น)"),"ใช้เมื่อตัวหลักชนลิมิต")])+
+  G("ขีดจำกัด",[row("ทำงานพร้อมกัน",step("3 ตัว")),row("agent ย่อยต่อครั้ง",step("10 ตัว")),row("เวลาสูงสุด",step("30 นาที"),"ถึงเพดานแล้วจะหยุดรอถาม ไม่ตัดทิ้ง")])+
+  G("การรวมงาน",[row("ถามก่อนเริ่มแผน",tg(false)),row("Merge อัตโนมัติเมื่อไม่มี conflict",tg(false),"ปิด = ต้องกดอนุมัติใน Review ทุกครั้ง"),row("คัดลอก .env ไป worktree",tg(false),"ปิดไว้เพื่อไม่ให้ secret กระจายไปทุก worktree")])},
+ safety:{t:"สิทธิ์และความปลอดภัย",s:"agent ทำอะไรได้บ้าง",ic:["#d70015","⛨"],body:()=>
+  G("สิทธิ์",[row("ค่าเริ่มต้น",seg(["ถามก่อน","ให้ทำเลย"],0),"ทั้งสองโหมดยังอยู่ใน sandbox เขียนได้เฉพาะ workspace")])+
+  G("โปรเจกต์ที่เชื่อถือ",[row("chorus",`<span class="d">ตรวจโค้ดหลังเทิร์น · hooks</span> ${tg(true)}`,"เปิดแล้ว Chorus จะรัน cargo check / linter / .chorus/hooks หลังทุกเทิร์น ภายใน sandbox"),row("shop-api",tg(false)),row(`<span class="warn">repo ใหม่จะไม่รันอะไรจนกว่าคุณเปิดเอง</span>`,"")])+
+  G("ความเป็นส่วนตัว",[row("ให้ Spotlight ค้นหา session",tg(false),"เปิดแล้วชื่องานจะไปอยู่ใน index ของระบบ"),row("พิมพ์ด้วยเสียงในเครื่องเท่านั้น",tg(true))])}
+};
+const CATS=[["ใช้งาน",[["general","ทั่วไป","#8e8e93","⚙"],["accounts","บัญชี","#30b0c7","◉"],["routing","การส่งงาน","#0a66ff","⇢"],["orchestra","Orchestra","#7a4cff","⌘"]]],
+ ["Agent",[["models","โมเดล","#5856d6","◈"],["safety","สิทธิ์และความปลอดภัย","#d70015","⛨"],["integrations","เครื่องมือเสริม (MCP)","#ff9500","⧉"],["skills","Skills","#ffcc00","✦"]]],
+ ["ข้อมูล",[["review","Review และ checkpoint","#34c759","±"],["cost","การใช้งานและค่าใช้จ่าย","#248a3d","฿"],["storage","พื้นที่และประสิทธิภาพ","#636366","▤"]]],
+ ["ระบบ",[["mobile","Mobile Companion","#007aff","▯"],["about","เกี่ยวกับ","#8e8e93","ⓘ"]]]];
+const pane=()=>{const P=PANES[st.p];return `<h2>${P.t}</h2><p class="sub">${P.s}</p>${P.body()}`};
+function A(){return `<div class="body"><div class="nav">${CATS.map(([g,its])=>`<div class="gh">${g}</div>`+its.map(([k,n,c,s])=>`<div class="it ${k===st.p?"on":""}" onclick="go('${k}')"><span class="ic" style="background:${c}">${s}</span>${n}</div>`).join("")).join("")}</div><div class="pane">${pane()}</div></div>`}
+function B(){const tabs=[["general","ทั่วไป","#8e8e93","⚙"],["accounts","บัญชี","#30b0c7","◉"],["agent","Agent","#7a4cff","⌘"],["safety","ความปลอดภัย","#d70015","⛨"],["data","ข้อมูล","#34c759","±"],["system","ระบบ","#636366","▤"]];
+ const top=st.p==="safety"?"safety":"agent";
+ return `<div class="tabs">${tabs.map(([k,n,c,s])=>`<div class="t ${k===top?"on":""}"><span class="ic" style="background:${c}">${s}</span>${n}</div>`).join("")}</div>
+ <div class="pane" style="max-width:600px;margin:0 auto;width:100%">${top==="agent"?`<div class="subtabs">${seg(["การส่งงาน","Orchestra","โมเดล","MCP","Skills"],st.p==="routing"?0:1)}</div>`:`<div class="subtabs">${seg(["สิทธิ์","โปรเจกต์","ความเป็นส่วนตัว"],0)}</div>`}${PANES[st.p].body()}</div>`}
+function C(){const order=["routing","orchestra","safety"];return `<div class="search">⌕ ค้นหาการตั้งค่า เช่น "merge", "บาท", "sandbox"</div><div class="body">
+ <div class="toc">${CATS.flatMap(([,its])=>its).map(([k,n])=>`<div class="${k===st.p?"on":""}" onclick="go('${k}')">${n}</div>`).join("")}</div>
+ <div class="pane flat">${order.map(k=>`<div class="sec">${PANES[k].t}</div>${PANES[k].body().replace(/<div class="grp-t">/g,'<div class="grp-t" style="margin-top:8px">').replace(/class="grp"/g,'class="g2"')}`).join("")}</div></div>`}
+const R={A,B,C};
+function go(k){if(PANES[k]){st.p=k;render()}}
+function render(){document.getElementById("app").innerHTML=`<div class="window"><div class="tbar"><div class="lights"><i></i><i></i><i></i></div><span class="ttl">${st.v==="B"?"Settings":PANES[st.p].t}</span></div>${R[st.v]()}</div>`;
+ document.getElementById("lab").textContent=`${st.v} (${V[st.v]})`;document.getElementById("note").innerHTML=NOTES[st.v]+" · hover ที่ (i) เพื่ออ่านเพิ่ม";
+ document.querySelectorAll("[data-p]").forEach(b=>b.classList.toggle("on",b.dataset.p===st.p));
+ history.replaceState(null,"","?"+new URLSearchParams({variant:st.v,p:st.p}))}
+function cycle(d){const k=Object.keys(V);st.v=k[(k.indexOf(st.v)+d+k.length)%k.length];render()}
+document.getElementById("prev").onclick=()=>cycle(-1);document.getElementById("next").onclick=()=>cycle(1);
+document.querySelectorAll("[data-p]").forEach(b=>b.onclick=()=>go(b.dataset.p));
+addEventListener("keydown",e=>{if(e.key==="ArrowLeft")cycle(-1);if(e.key==="ArrowRight")cycle(1);const m={"1":"routing","2":"orchestra","3":"safety"}[e.key];if(m)go(m)});
+render();
+</script>
+</body>
+</html>

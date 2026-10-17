@@ -38,3 +38,7 @@ Produce an evidence-backed security report and remediation plan for public distr
 ## Status
 
 Audit completed and release readiness verified. Ready for release packaging.
+
+## Reopened (2026-10-17)
+
+- **Gate 2 (credential storage and pairing)** is reopened. Ticket 10 says `KeychainManager` is wired up, but nothing calls it. Pairing revoke and the device list fail open in the UI. See [security delta scan](../chorus-ux-overhaul/research/03-security-delta-scan.md) P2-2 and P3-8.

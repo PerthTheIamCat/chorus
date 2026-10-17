@@ -1,0 +1,154 @@
+<!doctype html>
+<!-- PROTOTYPE — throwaway. Ticket: Composer layout (.scratch/chorus-ux-overhaul/issues/08-composer-layout.md)
+     Question: where do text, attachment thumbnails, mode / route preset / permission / model controls and Send go,
+     how does pasted Markdown look, how does the box grow?
+     Three structurally different variants: ?variant=A|B|C (← →). State: ?s=empty|paste|stream (buttons or E/P/S).
+     Hosted inside the chat column of Workbench layout v2 (variant A) so density is realistic. -->
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Composer layout</title>
+<style>
+:root{--bg:#f5f5f7;--win:#fff;--side:#ececef;--line:#d9d9de;--text:#1d1d1f;--muted:#6e6e73;--accent:#0a66ff;--sel:#dbe7ff;--hover:rgba(0,0,0,.05);
+  --kw:#9b2393;--str:#c41a16;--wait:#c76b00;--bad:#d70015;--ok:#248a3d;--codebg:#f3f3f5}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#1c1c1e;--win:#232325;--side:#2a2a2d;--line:#3a3a3d;--text:#f2f2f7;--muted:#98989f;--accent:#4c8dff;--sel:#2f4166;--hover:rgba(255,255,255,.06);--kw:#fc5fa3;--str:#fc6a5d;--wait:#ffb340;--bad:#ff453a;--ok:#30d158;--codebg:#1b1b1f}}
+:root[data-theme="dark"]{--bg:#1c1c1e;--win:#232325;--side:#2a2a2d;--line:#3a3a3d;--text:#f2f2f7;--muted:#98989f;--accent:#4c8dff;--sel:#2f4166;--hover:rgba(255,255,255,.06);--kw:#fc5fa3;--str:#fc6a5d;--wait:#ffb340;--bad:#ff453a;--ok:#30d158;--codebg:#1b1b1f}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:13px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text","Sukhumvit Set",sans-serif;padding:24px 16px 90px}
+.window{max-width:760px;margin:0 auto;background:var(--win);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.18);display:flex;flex-direction:column;height:640px}
+.crumb{height:30px;display:flex;align-items:center;gap:6px;padding:0 12px;border-bottom:1px solid var(--line);font-size:12px;color:var(--muted)}
+.crumb b{color:var(--text);font-weight:500}
+.thread{flex:1;overflow:auto;padding:8px 0}
+.msg{padding:8px 16px}.who{font-size:11px;color:var(--muted)}.who b{color:var(--text)}
+.user{background:var(--sel);border-radius:10px;padding:7px 10px;display:inline-block}
+.tool{font:11.5px "SF Mono",ui-monospace,monospace;color:var(--muted)}
+.cursor{display:inline-block;width:7px;height:14px;background:var(--text);vertical-align:-2px;animation:b 1s steps(1) infinite}@keyframes b{50%{opacity:0}}
+.zone{border-top:1px solid var(--line);padding:10px 12px 12px}
+.box{border:1px solid var(--line);border-radius:12px;background:var(--win)}
+.box:focus-within,.box.focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
+.txt{padding:9px 12px;min-height:22px;max-height:220px;overflow:auto;outline:none}
+.ph{color:var(--muted)}
+.md h3{font-size:14px;margin:2px 0 4px}.md ul{margin:2px 0 6px;padding-left:20px}.md p{margin:0 0 6px}
+.md code{font:12px "SF Mono",ui-monospace,monospace;background:var(--codebg);padding:1px 4px;border-radius:4px}
+.md pre{font:12px/1.5 "SF Mono",ui-monospace,monospace;background:var(--codebg);border-radius:8px;padding:8px 10px;margin:4px 0;overflow:auto}
+.md .mk{color:var(--muted);opacity:.55}
+.k{color:var(--kw);font-weight:600}.s{color:var(--str)}
+.bar{display:flex;align-items:center;gap:4px;padding:4px 6px 6px}
+.ib{width:28px;height:28px;border:0;border-radius:7px;background:transparent;color:var(--muted);cursor:pointer;font-size:15px;display:inline-flex;align-items:center;justify-content:center}
+.ib:hover{background:var(--hover);color:var(--text)}
+.pill{border:0;background:var(--hover);color:var(--text);border-radius:7px;padding:4px 8px;font:12px -apple-system,sans-serif;cursor:pointer;white-space:nowrap}
+.pill:hover{background:color-mix(in srgb,var(--text) 10%,transparent)}
+.pill .dim{color:var(--muted)}
+.pill.orch{background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent)}
+.send{margin-left:auto;width:30px;height:30px;border-radius:8px;border:0;background:var(--accent);color:#fff;font-size:15px;cursor:pointer}
+.send:disabled{opacity:.35;cursor:default}
+.send.stop{background:var(--text);color:var(--win)}
+.sp{flex:1}
+.atts{display:flex;gap:8px;padding:8px 10px 0;flex-wrap:wrap}
+.att{position:relative;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--hover)}
+.att.img{width:64px;height:64px}
+.att.img .ph-img{width:100%;height:100%;background:linear-gradient(135deg,#7aa7ff,#b9d0ff 45%,#ffd38a);display:block}
+.att.pdf{width:52px;height:64px;background:#fff}
+.att.pdf .pg{position:absolute;inset:6px 6px 16px;background:repeating-linear-gradient(#ccd 0 1px,transparent 1px 6px)}
+.att.pdf .tag{position:absolute;left:0;right:0;bottom:0;font:700 9px/14px -apple-system;text-align:center;background:#d70015;color:#fff}
+.att.file{height:64px;display:flex;align-items:center;gap:8px;padding:0 10px 0 8px;font-size:12px}
+.att.file .ic{width:22px;height:22px;border-radius:4px;background:#e26a2c;color:#fff;font:700 8px/22px ui-monospace,monospace;text-align:center}
+.att .meta{color:var(--muted);font-size:11px}
+.att .x{position:absolute;top:2px;right:2px;width:16px;height:16px;border-radius:50%;background:rgba(0,0,0,.6);color:#fff;font-size:10px;line-height:16px;text-align:center;opacity:0}
+.att:hover .x{opacity:1}
+.att.err{border-color:var(--bad)}
+.warn{font-size:11px;color:var(--wait);padding:4px 12px 0}
+.err-t{font-size:11px;color:var(--bad);padding:4px 12px 0}
+.hint{font-size:11px;color:var(--muted);padding:6px 4px 0;display:flex;gap:10px}
+.hint kbd{font:10px -apple-system;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 4px}
+.summary{display:flex;align-items:center;gap:6px;padding:6px 10px;border-bottom:1px solid var(--line);font-size:12px;color:var(--muted)}
+.summary b{color:var(--text);font-weight:500}
+.slash{position:relative}
+.pop{position:absolute;bottom:40px;right:6px;width:250px;background:var(--win);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.2);padding:6px;font-size:12px;z-index:3}
+.pop .h{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;padding:6px 8px 2px}
+.pop .o{padding:4px 8px;border-radius:6px;display:flex;justify-content:space-between}.pop .o:hover,.pop .o.on{background:var(--sel)}
+.pop .o span{color:var(--muted)}
+.row{display:flex;gap:8px;align-items:flex-end}
+.inline-atts{display:flex;gap:6px;padding:8px 0 8px 10px}
+.inline-atts .att.img{width:40px;height:40px}.inline-atts .att.pdf{width:32px;height:40px}
+.inline-atts .att.file{height:40px;padding:0 8px;font-size:11px}
+.note{max-width:760px;margin:12px auto 0;color:var(--muted);font-size:12px}.note b{color:var(--text)}
+.sw{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:#111;color:#fff;border-radius:999px;display:flex;align-items:center;gap:6px;padding:6px 8px;box-shadow:0 6px 24px rgba(0,0,0,.35);font:12px -apple-system,sans-serif;z-index:9;white-space:nowrap}
+.sw button{background:#333;color:#fff;border:0;border-radius:999px;padding:5px 10px;cursor:pointer;font:inherit}.sw button.on{background:#fff;color:#111}
+.sw .lab{padding:0 8px;min-width:200px;text-align:center}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<p class="note" id="note"></p>
+<div class="sw" role="toolbar" aria-label="Prototype switcher">
+  <button id="prev" aria-label="Previous variant">←</button><span class="lab" id="lab"></span><button id="next" aria-label="Next variant">→</button>
+  <span style="width:8px"></span><button data-s="empty">ว่าง</button><button data-s="paste">วาง + แนบ</button><button data-s="stream">กำลังตอบ</button>
+</div>
+<script>
+const V={A:"One control row",B:"Summary strip + minimal bar",C:"Inline, command menu"};
+const NOTES={
+ A:"<b>A · แถวควบคุมเดียวใต้ข้อความ</b> — ไฟล์แนบอยู่บนสุด (รูปจริง) · ข้อความ · แถวล่าง: ซ้าย = ＋ แนบ · โหมด · preset · สิทธิ์ / ขวา = 🎙 · โมเดล · ส่ง — ตามแบบ Claude/ChatGPT ที่ research 04 เจอ",
+ B:"<b>B · แถบสรุปบนกล่อง + แถวล่างเหลือน้อย</b> — การตั้งค่าทั้งหมดรวมเป็นบรรทัดสรุปเดียว (Orchestra · สมดุล · ถามก่อน) คลิกแล้วเปิด popover · แถวล่างมีแค่ ＋ 🎙 ส่ง · เห็นว่า turn นี้จะวิ่งยังไงก่อนพิมพ์",
+ C:"<b>C · ไฟล์แนบอยู่ในบรรทัด + เมนูคำสั่ง</b> — thumbnail เล็กอยู่ซ้ายของข้อความในกล่องเดียว · ตัวเลือกทั้งหมดซ่อนหลังปุ่ม ⚙ หรือพิมพ์ / · กล่องเตี้ยที่สุด เหลือที่ให้ thread มากที่สุด"
+};
+const q=new URLSearchParams(location.search);
+let st={v:(q.get("variant")||"A").toUpperCase(),s:q.get("s")||"paste",pop:false};
+if(!V[st.v])st.v="A";
+
+const thread=()=>`<div class="msg"><div class="who"><b>Perth</b></div><div class="user">หน้า order list ช้า ทำให้ต่ำกว่า 200ms</div></div>
+<div class="msg"><div class="who"><b>Claude Opus 5.5</b> · orchestrator</div>แผน: ① ตรวจ findAll ② เขียน eager-load ③ รัน test:order<div class="tool">→ chorus_spawn_agent reviewer · light</div>
+${st.s==="stream"?`<div style="margin-top:4px">กำลังตรวจผลจาก reviewer<span class="cursor"></span></div>`:""}</div>`;
+
+const pasted=`<div class="md"><h3><span class="mk">### </span>Slow query log</h3>
+<ul><li><span class="mk">- </span><code>OrderRepo.findAll</code> → 412 ms (N+1, 87 queries)</li><li><span class="mk">- </span>index <code>orders_user_id</code> มีแล้ว</li></ul>
+<pre><span class="mk">\`\`\`sql</span>
+<span class="k">SELECT</span> * <span class="k">FROM</span> order_items <span class="k">WHERE</span> order_id = <span class="s">$1</span>;
+<span class="mk">\`\`\`</span></pre><p>ช่วยดูว่าควร eager-load ตรงไหน</p></div>`;
+const text=()=>st.s==="paste"?pasted:`<span class="ph">${st.s==="stream"?"พิมพ์ข้อความถัดไป หรือ steer ระหว่างตอบ…":"ถาม หรือสั่งงาน… (วางข้อความจากเว็บได้ จะแปลงเป็น Markdown ให้)"}</span>`;
+const big=()=>`<div class="atts">
+  <div class="att img" title="screenshot.png · 1.2 MB"><span class="ph-img"></span><span class="x">✕</span></div>
+  <div class="att pdf" title="spec.pdf · 3 หน้า"><span class="pg"></span><span class="tag">PDF</span><span class="x">✕</span></div>
+  <div class="att file"><span class="ic">RS</span><div>repo.rs<div class="meta">4 KB</div></div><span class="x">✕</span></div>
+  <div class="att file err"><span class="ic" style="background:#8a8a8a">ZIP</span><div>dump.zip<div class="meta" style="color:var(--bad)">48 MB · เกิน 20 MB</div></div><span class="x">✕</span></div></div>
+  <div class="warn">ⓘ มีรูปแนบ — router จะเลือกเฉพาะโมเดลที่อ่านรูปได้ (ข้าม codex)</div>`;
+const small=()=>`<div class="inline-atts"><div class="att img" title="screenshot.png"><span class="ph-img"></span></div><div class="att pdf"><span class="pg"></span><span class="tag">PDF</span></div><div class="att file"><span class="ic">RS</span>repo.rs</div><div class="att file err" title="48 MB · เกิน 20 MB"><span class="ic" style="background:#8a8a8a">ZIP</span>✕</div></div>`;
+const sendBtn=()=>st.s==="stream"?`<button class="send stop" title="หยุด (⌘.)" aria-label="Stop">■</button>`:`<button class="send" ${st.s==="empty"?"disabled":""} title="ส่ง (↩)" aria-label="Send">↑</button>`;
+const hint=()=>`<div class="hint"><span><kbd>↩</kbd> ส่ง</span><span><kbd>⇧↩</kbd> ขึ้นบรรทัด</span><span><kbd>⌘V</kbd> วางรูป/ไฟล์</span>${st.s==="stream"?"<span><kbd>⌘.</kbd> หยุด</span>":""}<span style="margin-left:auto">กดส่งระหว่างพิมพ์ไทย (IME) จะไม่ส่ง</span></div>`;
+const pop=()=>st.pop?`<div class="pop"><div class="h">โหมด</div><div class="o on">Orchestra <span>Opus 5.5</span></div><div class="o">Auto route <span>router เลือก</span></div>
+  <div class="h">Route preset</div><div class="o">ประหยัด</div><div class="o on">สมดุล</div><div class="o">เต็มกำลัง</div>
+  <div class="h">สิทธิ์</div><div class="o on">ถามก่อน</div><div class="o">ให้ทำเลย</div></div>`:"";
+
+function A(){return `<div class="box ${st.s!=="stream"?"focus":""}">${st.s==="paste"?big():""}
+ <div class="txt" contenteditable>${text()}</div>
+ <div class="bar"><button class="ib" title="แนบไฟล์ (⇧⌘A)" aria-label="Attach">＋</button>
+  <button class="pill orch">Orchestra ▾</button><button class="pill">สมดุล <span class="dim">▾</span></button><button class="pill">ถามก่อน <span class="dim">▾</span></button>
+  <span class="sp"></span><button class="ib" title="พิมพ์ด้วยเสียง" aria-label="Dictation">🎙</button><button class="pill"><span class="dim">นำโดย</span> Opus 5.5 · medium ▾</button>${sendBtn()}</div></div>${hint()}`}
+function B(){return `<div class="box ${st.s!=="stream"?"focus":""} slash">
+ <div class="summary" onclick="st.pop=!st.pop;render()" style="cursor:pointer">เทิร์นนี้: <b>Orchestra</b> นำโดย Opus 5.5 · ลูกใช้ <b>สมดุล</b> · <b>ถามก่อน</b> เขียนไฟล์ <span style="margin-left:auto">เปลี่ยน ▾</span></div>
+ ${st.s==="paste"?big():""}<div class="txt" contenteditable>${text()}</div>
+ <div class="bar"><button class="ib" title="แนบไฟล์" aria-label="Attach">＋</button><button class="ib" title="พิมพ์ด้วยเสียง" aria-label="Dictation">🎙</button><span class="sp"></span>${sendBtn()}</div>${pop()}</div>${hint()}`}
+function C(){return `<div class="box ${st.s!=="stream"?"focus":""} slash"><div class="row">${st.s==="paste"?small():""}
+ <div class="txt" contenteditable style="flex:1">${text()}</div>
+ <div class="bar" style="padding:6px"><button class="ib" title="ตัวเลือก (/)" aria-label="Options" onclick="st.pop=!st.pop;render()">⚙</button><button class="ib" aria-label="Attach">＋</button>${sendBtn()}</div></div>${pop()}</div>
+ ${st.s==="paste"?`<div class="err-t">dump.zip 48 MB เกิน 20 MB — ไม่ถูกส่ง</div>`:""}
+ <div class="hint"><span>Orchestra · สมดุล · ถามก่อน</span><span><kbd>/</kbd> ตัวเลือก</span><span><kbd>↩</kbd> ส่ง</span></div>`}
+const R={A,B,C};
+function render(){
+ document.getElementById("app").innerHTML=`<div class="window"><div class="crumb">Chorus › <b>แก้ N+1 query หน้า order list</b></div><div class="thread">${thread()}</div><div class="zone">${R[st.v]()}</div></div>`;
+ document.getElementById("lab").textContent=`${st.v} (${V[st.v]})`;
+ document.getElementById("note").innerHTML=NOTES[st.v];
+ document.querySelectorAll("[data-s]").forEach(b=>b.classList.toggle("on",b.dataset.s===st.s));
+ history.replaceState(null,"","?"+new URLSearchParams({variant:st.v,s:st.s}));
+}
+function cycle(d){const k=Object.keys(V);st.v=k[(k.indexOf(st.v)+d+k.length)%k.length];st.pop=false;render()}
+document.getElementById("prev").onclick=()=>cycle(-1);document.getElementById("next").onclick=()=>cycle(1);
+document.querySelectorAll("[data-s]").forEach(b=>b.onclick=()=>{st.s=b.dataset.s;render()});
+addEventListener("keydown",e=>{if(e.target.closest("input,textarea,[contenteditable]"))return;
+ if(e.key==="ArrowLeft")cycle(-1);if(e.key==="ArrowRight")cycle(1);
+ const m={e:"empty",p:"paste",s:"stream"}[e.key.toLowerCase()];if(m){st.s=m;render()}});
+render();
+</script>
+</body>
+</html>

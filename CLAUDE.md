@@ -49,7 +49,7 @@ Swift ทำแค่วาดกับรับ input เพื่อให้�
 
 | crate | ทำอะไร |
 |---|---|
-| `chorus-core` | ledger (+ fork-chain `history()`), blob store, memory + approve queue (v2), token counter, render, context assembler, handoff brief, projector, checkpoint (shadow git + `apply_reverse`), compaction (Extractive + **Ollama**) — **รังส์ L1/L2 เก็บลงตาราง `summary` (schema v3) ไม่ generate ตอน assemble**, **mcp (Streamable-HTTP: `memory_propose` — ทำงานกับ Codex)** |
+| `chorus-core` | ledger (+ fork-chain `history()`), blob store, memory + approve queue (v2), token counter, render, context assembler, handoff brief, projector, checkpoint (shadow git + `apply_reverse`), compaction (Extractive + **Ollama**) — **รังส์ L1/L2 เก็บลงตาราง `summary` (เพิ่มใน schema v3 · ตอนนี้ `SCHEMA_VERSION` = 6) ไม่ generate ตอน assemble**, **mcp (Streamable-HTTP: `memory_propose` — ทำงานกับ Codex)** |
 | `chorus-acp` | ACP client + `acp-probe` + mock (`--fail`) + `CodexAgent` + `bridge_for` (codex/claude/gemini) · strip `CLAUDECODE` |
 | `chorus-cli` | lib+bin · `bench`/`run`(+`--chain`/`--read-only`)/`handoff`/`memory`/`compare` · `Session` engine |
 | `chorus-ffi` | C ABI (`chorus.h`) — engine/run_turn(+interactive callback)/run_relay/compare/handoff/events_since/working_diff/snapshot/restore/reject_hunks/memory_state+review/**compact/uncompacted/task_state** · JSON ล้วน · panic-guarded |
@@ -65,7 +65,7 @@ relay auto-failover 429/quota · compare (fork ต่อ agent) · projector เ
 - **Ollama compaction** — ใช้ได้จริงแล้วผ่าน `chorus compact` (ไม่อยู่บน turn path อีกต่อไป) · `brew install ollama && ollama pull qwen2.5:3b` แล้วตั้ง `CHORUS_SUMMARY_MODEL`
 - **embedding + sqlite-vec** — ต้องตัดสิน dep (MLX / `NLEmbedding` / sqlite-vec)
 - **Seatbelt sandbox · notarize · .app bundle** — ต้อง Apple Developer account
-- **event push** — shell ยัง poll `events_since` (ทำงานได้ดี · push เป็น optimization)
+- **event push** — shell ยัง**ไม่ poll และไม่มี push**: panel อัปเดตตอนจบเทิร์นเท่านั้น (ยกเว้น context meter ที่วิ่งผ่าน progress callback) · ตัดสินวิธีแล้วใน `.scratch/chorus-ux-overhaul/issues/19-live-updates.md` (push สัญญาณ + pull delta ผ่าน handle อ่านอย่างเดียว)
 
 ### ตัวเลขจาก `chorus bench` (78 events) — baseline ที่ห้ามถอยหลัง
 
@@ -105,7 +105,7 @@ cargo install --path crates/chorus-acp    # ได้ acp-probe ซึ่ง `ch
 
 ```bash
 cargo test                              # 76 tests
-cargo run -p chorus-cli -- bench        # วัด invariant ทั้ง 3
+cargo run -p chorus-cli --bin chorus -- bench   # วัด invariant (ต้องใส่ --bin chorus เพราะ crate มีหลาย binary)
 cargo run --bin acp-probe -- --cwd /tmp/acp-scratch --mock         # ลอง ACP กับ agent ปลอม
 cargo run -p chorus-acp --example codex_smoke -- /tmp/codex-smoke   # CodexAgent กับ bridge จริง (ต้อง codex login)
 
