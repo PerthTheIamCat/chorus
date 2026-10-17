@@ -22,6 +22,8 @@ use std::ffi::{c_char, c_int, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
+mod composer;
+
 /// Curated catalog and user/project state, without reading any secret values.
 /// A project path is used only to scope enabled integrations.
 ///

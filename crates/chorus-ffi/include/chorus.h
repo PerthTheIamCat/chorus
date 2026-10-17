@@ -365,6 +365,16 @@ char *chorus_structural_diff_json(const char *old_code, const char *new_code);
  * 5 function · 6 attribute/macro/key · 7 constant. */
 char *chorus_highlight(const char *path, const char *text);
 
+/* Composer (pure, no engine). Pasted HTML -> Markdown, capped; past a cap the
+ * plain flavour is returned. {"ok","markdown","fallback":null|reason}.
+ * Spans: {"ok","spans":[{"start","end","kind"}]} in UTF-16 units; kind is
+ * heading1/2/3, strong, emphasis, strike, inline_code, code_block, link,
+ * quote, list_item, marker. */
+char *chorus_html_to_markdown(const char *html, const char *plain);
+char *chorus_markdown_spans(const char *text);
+/* media_types: JSON array. {"ok","note":null|"..."} — shown when attachments narrow the router. */
+char *chorus_attachment_route_note(const char *media_types);
+
 /* Remote Companion & Pairing Management (Phase 6) */
 char *chorus_pairing_initiate_json(void);
 char *chorus_pairing_devices_json(void);
