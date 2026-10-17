@@ -59,7 +59,7 @@ static ACTIVE_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::
 static CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Where live `session/update`s go while a turn runs: `(kind, text)` with kind
-/// one of `thought`, `message`, `tool`, `tool_done`. Process-global for the same
+/// one of `thought`, `message`, `tool`, `tool_done`, `usage`. Process-global for the same
 /// reason as [`ACTIVE_PID`]: the shell wants a live view of the one running
 /// turn and has no other way in while that turn blocks its engine queue.
 /// Display only — nothing here is written to the ledger.
@@ -563,6 +563,10 @@ pub fn serve() -> Result<()> {
                     "sessionUpdate": "agent_message_chunk",
                     "content": {"type":"text","text":"กำลังดูไฟล์ให้ครับ"}
                 }))?;
+                // Context pressure mid-turn, the way both real bridges report it.
+                update(session, json!({
+                    "sessionUpdate": "usage_update", "used": 12_000, "size": 200_000
+                }))?;
                 update(session, json!({
                     "sessionUpdate": "tool_call",
                     "toolCallId": "t1",
@@ -609,6 +613,10 @@ pub fn serve() -> Result<()> {
                 update(session, json!({
                     "sessionUpdate": "plan",
                     "entries": [{"content":"อ่านไฟล์","priority":"high","status":"completed"}]
+                }))?;
+                update(session, json!({
+                    "sessionUpdate": "usage_update", "used": 14_500, "size": 200_000,
+                    "cost": {"amount": 0.0125, "currency": "USD"}
                 }))?;
 
                 send(json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}))?;

@@ -15,7 +15,13 @@ struct DiffReviewerView: View {
     @State private var scope: DiffScope = .session
     @State private var selectedFile: String = ""
     @State private var pendingComments: [Engine.ReviewComment] = []
-    @State private var commentingLine: Int? = nil
+    /// (hunk index in `shown`, 1-based line in that hunk).
+    @State private var commentingAt: RowKey? = nil
+    /// What the list draws: the selected file's hunks, flattened into one
+    /// row per header and per line. Rebuilt only when the diff, the file
+    /// filter or the mode changes — never on a plain re-render.
+    @State private var shown: [DiffHunk] = []
+    @State private var rows: [Row] = []
     @State private var commentText: String = ""
     @State private var structuralAnalysis: Engine.StructuralDiffAnalysis? = nil
     @State private var isAnalyzingStructural: Bool = false
@@ -34,21 +40,35 @@ struct DiffReviewerView: View {
         case session = "Full Session"
     }
 
-    private var allHunks: [DiffHunk] {
-        parseHunks(engine.workingDiff)
+    struct RowKey: Hashable {
+        let hunk: Int
+        let line: Int
     }
 
-    private var filesWithDiffs: [String] {
-        let hunks = allHunks
-        return hunks.map(\.file).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+    /// `line == nil` is the hunk's header.
+    struct Row: Identifiable {
+        let id: Int
+        let hunk: Int
+        let line: Int?
     }
 
-    private var activeHunks: [DiffHunk] {
-        let hunks = allHunks
-        if selectedFile.isEmpty {
-            return hunks
+    private var allHunks: [DiffHunk] { engine.diffHunks }
+
+    private var filesWithDiffs: [String] { engine.diffFiles }
+
+    private func rebuildRows() {
+        let hunks = selectedFile.isEmpty ? allHunks : allHunks.filter { $0.file == selectedFile }
+        var out: [Row] = []
+        out.reserveCapacity(hunks.reduce(hunks.count) { $0 + $1.lines.count })
+        for (hi, h) in hunks.enumerated() {
+            out.append(Row(id: out.count, hunk: hi, line: nil))
+            for li in h.lines.indices {
+                out.append(Row(id: out.count, hunk: hi, line: li))
+            }
         }
-        return hunks.filter { $0.file == selectedFile }
+        shown = hunks
+        rows = out
+        commentingAt = nil
     }
 
     var body: some View {
@@ -82,8 +102,8 @@ struct DiffReviewerView: View {
 
                 // Row 2: Diff Stats Badge + AST Analysis + Verification Loop
                 HStack(spacing: 8) {
-                    let totalAdd = allHunks.map(\.addCount).reduce(0, +)
-                    let totalDel = allHunks.map(\.delCount).reduce(0, +)
+                    let totalAdd = allHunks.reduce(0) { $0 + $1.addCount }
+                    let totalDel = allHunks.reduce(0) { $0 + $1.delCount }
                     HStack(spacing: 4) {
                         Text("+\(totalAdd)")
                             .font(.system(size: 10, weight: .bold, design: .monospaced))
@@ -176,80 +196,13 @@ struct DiffReviewerView: View {
             Divider()
 
             // Diff Content Area
-            let hunks = activeHunks
-            if !hunks.isEmpty {
+            if !rows.isEmpty {
                 ScrollView([.vertical, .horizontal]) {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(hunks) { hunk in
-                            VStack(alignment: .leading, spacing: 0) {
-                                // Hunk Header
-                                HStack {
-                                    Text((hunk.file as NSString).lastPathComponent)
-                                        .font(.system(size: 10.5, weight: .bold, design: .monospaced))
-                                        .foregroundColor(.primary)
-                                    Text(hunk.header)
-                                        .font(.system(size: 9.5, design: .monospaced))
-                                        .foregroundColor(.secondary)
-                                    Spacer()
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(Color.primary.opacity(0.05))
-
-                                // Lines
-                                if viewMode == .unified {
-                                    ForEach(Array(hunk.lines.enumerated()), id: \.offset) { idx, line in
-                                        UnifiedLineRow(
-                                            line: line,
-                                            lineNum: idx + 1,
-                                            onAddComment: { l in
-                                                commentingLine = l
-                                            }
-                                        )
-
-                                        if let target = commentingLine, target == idx + 1 {
-                                            InlineCommentEditor(
-                                                line: target,
-                                                commentText: $commentText,
-                                                onSave: {
-                                                    saveComment(line: target, file: hunk.file)
-                                                },
-                                                onCancel: {
-                                                    commentingLine = nil
-                                                    commentText = ""
-                                                }
-                                            )
-                                        }
-                                    }
-                                } else {
-                                    // Split View Mode with wide columns
-                                    ForEach(Array(hunk.lines.enumerated()), id: \.offset) { idx, line in
-                                        SplitLineRow(
-                                            line: line,
-                                            lineNum: idx + 1,
-                                            onAddComment: { l in
-                                                commentingLine = l
-                                            }
-                                        )
-
-                                        if let target = commentingLine, target == idx + 1 {
-                                            InlineCommentEditor(
-                                                line: target,
-                                                commentText: $commentText,
-                                                onSave: {
-                                                    saveComment(line: target, file: hunk.file)
-                                                },
-                                                onCancel: {
-                                                    commentingLine = nil
-                                                    commentText = ""
-                                                }
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                            .background(Color.primary.opacity(0.02))
-                            .cornerRadius(6)
+                    // One lazy row per header/line: a hunk with thousands of
+                    // lines no longer builds every line to show the first few.
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(rows) { row in
+                            rowView(row)
                         }
                     }
                     .padding(8)
@@ -313,6 +266,55 @@ struct DiffReviewerView: View {
             if let first = filesWithDiffs.first {
                 selectedFile = first
             }
+            rebuildRows()
+        }
+        .onChange(of: engine.workingDiff) { _, _ in
+            if !selectedFile.isEmpty, !filesWithDiffs.contains(selectedFile) { selectedFile = "" }
+            rebuildRows()
+        }
+        .onChange(of: selectedFile) { _, _ in rebuildRows() }
+    }
+
+    @ViewBuilder
+    private func rowView(_ row: Row) -> some View {
+        let hunk = shown[row.hunk]
+        if let li = row.line {
+            let key = RowKey(hunk: row.hunk, line: li + 1)
+            Group {
+                if viewMode == .unified {
+                    UnifiedLineRow(line: hunk.lines[li], lineNum: li + 1,
+                                   onAddComment: { _ in commentingAt = key })
+                } else {
+                    SplitLineRow(line: hunk.lines[li], lineNum: li + 1,
+                                 onAddComment: { _ in commentingAt = key })
+                }
+            }
+            .background(Color.primary.opacity(0.02))
+            if commentingAt == key {
+                InlineCommentEditor(
+                    line: key.line,
+                    commentText: $commentText,
+                    onSave: { saveComment(line: key.line, file: hunk.file) },
+                    onCancel: {
+                        commentingAt = nil
+                        commentText = ""
+                    }
+                )
+            }
+        } else {
+            HStack {
+                Text((hunk.file as NSString).lastPathComponent)
+                    .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                    .foregroundColor(.primary)
+                Text(hunk.header)
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundColor(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color.primary.opacity(0.05))
+            .padding(.top, row.hunk == 0 ? 0 : 10)
         }
     }
 
@@ -330,7 +332,7 @@ struct DiffReviewerView: View {
             comment: commentText,
             snippet: nil
         )
-        commentingLine = nil
+        commentingAt = nil
         commentText = ""
         refreshComments()
     }

@@ -186,6 +186,9 @@ pub struct TurnOutcome {
     pub model: Option<String>,
     pub context_used: Option<i64>,
     pub context_window: Option<i64>,
+    /// Dollar cost the bridge reported for this turn (`usage_update.cost`,
+    /// USD only). Codex sends none; claude-agent-acp sends the SDK's total.
+    pub cost_usd: Option<f64>,
     pub stop_reason: String,
 }
 
@@ -776,6 +779,7 @@ struct Accumulator {
     titles: std::collections::HashMap<String, String>,
     context_used: Option<i64>,
     context_window: Option<i64>,
+    cost_usd: Option<f64>,
     stop_reason: String,
     open_message: bool,
 }
@@ -925,6 +929,20 @@ impl Accumulator {
                 if let Some(size) = update.get("size").and_then(Value::as_i64) {
                     self.context_window = Some(size);
                 }
+                let cost = update.get("cost");
+                if cost.and_then(|c| c.get("currency")).and_then(Value::as_str) == Some("USD") {
+                    if let Some(amount) = cost.and_then(|c| c.get("amount")).and_then(Value::as_f64) {
+                        self.cost_usd = Some(amount);
+                    }
+                }
+                // Live context meter: `used\tsize`, either side may be empty.
+                if self.context_used.is_some() || self.context_window.is_some() {
+                    let fmt = |v: Option<i64>| v.map(|n| n.to_string()).unwrap_or_default();
+                    crate::emit_progress(
+                        "usage",
+                        &format!("{}\t{}", fmt(self.context_used), fmt(self.context_window)),
+                    );
+                }
             }
             _ => {}
         }
@@ -962,6 +980,7 @@ impl Accumulator {
             model: None,
             context_used: self.context_used,
             context_window: self.context_window,
+            cost_usd: self.cost_usd,
             stop_reason: self.stop_reason,
         }
     }
@@ -998,4 +1017,31 @@ fn chunk_text(update: &Value) -> Option<String> {
 pub fn file_log(path: &Path) -> Result<Log> {
     let f = std::fs::File::create(path)?;
     Ok(Arc::new(Mutex::new(Box::new(f))))
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn usage_update_keeps_context_and_usd_cost() {
+        let mut acc = Accumulator::default();
+        // Shape claude-agent-acp sends; Codex omits `cost`.
+        acc.absorb(&json!({"update": {"sessionUpdate": "usage_update", "used": 1200, "size": 200000,
+                                      "cost": {"amount": 0.042, "currency": "USD"}}}));
+        acc.absorb(&json!({"update": {"sessionUpdate": "usage_update", "used": 1500, "size": 200000}}));
+        let out = acc.finish();
+        assert_eq!(out.context_used, Some(1500));
+        assert_eq!(out.context_window, Some(200000));
+        assert_eq!(out.cost_usd, Some(0.042));
+    }
+
+    #[test]
+    fn non_usd_cost_is_ignored() {
+        let mut acc = Accumulator::default();
+        acc.absorb(&json!({"update": {"sessionUpdate": "usage_update", "used": 10,
+                                      "cost": {"amount": 5.0, "currency": "EUR"}}}));
+        assert_eq!(acc.finish().cost_usd, None);
+    }
 }

@@ -461,6 +461,12 @@ final class Engine: ObservableObject {
                 ?? live.tools.lastIndex(where: { $0.state == "running" }) {
                 live.tools[i].state = state
             }
+        case "usage":
+            // `used\tsize` from the bridge's usage_update, so the context
+            // meter moves while the reply streams, not only after it lands.
+            let parts = text.split(separator: "\t", omittingEmptySubsequences: false)
+            if let used = parts.first.flatMap({ Int64($0) }), used != contextUsed { contextUsed = used }
+            if parts.count > 1, let size = Int64(parts[1]), size != contextWindow { contextWindow = size }
         default: break
         }
     }
@@ -1162,12 +1168,17 @@ final class Engine: ObservableObject {
                     }
                 }
             }
-            let obj = Self.decode(SimpleResult.self, json)
+            let obj = Self.decode(TurnResult.self, json)
             DispatchQueue.main.async {
                 PowerManager.shared.endActivity()
                 self?.busy = false
                 self?.endLive()
-                if obj?.ok != true, !Self.isStop(obj?.error) { self?.lastError = obj?.error ?? "relay failed" }
+                if let r = obj, r.ok {
+                    // Every composer turn goes through relay; dropping these
+                    // left the context pane stuck on "no turn yet".
+                    if let u = r.context_used { self?.contextUsed = u }
+                    if let w = r.context_window { self?.contextWindow = w }
+                } else if !Self.isStop(obj?.error) { self?.lastError = obj?.error ?? "relay failed" }
                 self?.refresh()
                 self?.compactIfIdle()
             }
@@ -1240,6 +1251,10 @@ final class Engine: ObservableObject {
             let eventsJSON = Self.string(from: chorus_transcript_json(h.raw))
             let attachmentsJSON = Self.string(from: chorus_list_attachments(h.raw))
             let diffJSON = Self.string(from: chorus_working_diff(h.raw))
+            // Parse here, off the main thread, once per refresh — views read
+            // `diffHunks` instead of re-parsing the diff on every render.
+            let diff = Self.decode(DiffResult.self, diffJSON).map { $0.diff ?? "" }
+            let hunks = diff.map(parseHunks)
             let memJSON = Self.string(from: chorus_memory_state(h.raw))
             let taskJSON = Self.string(from: chorus_task_state(h.raw))
             let warmJSON = Self.string(from: chorus_uncompacted(h.raw))
@@ -1257,8 +1272,8 @@ final class Engine: ObservableObject {
                 if let w = Self.decode(WarmTierResult.self, warmJSON) {
                     self.uncompacted = w.pending ?? 0
                 }
-                if let obj = Self.decode(DiffResult.self, diffJSON) {
-                    self.workingDiff = obj.diff ?? ""
+                if let diff, let hunks, diff != self.workingDiff {
+                    self.setWorkingDiff(diff, hunks: hunks)
                 }
                 if let s = Self.decode(MemoryState.self, memJSON) {
                     self.facts = s.facts ?? []
@@ -1579,7 +1594,17 @@ final class Engine: ObservableObject {
         }
     }
 
-    @Published var workingDiff = ""
+    /// Set together through `setWorkingDiff` so they never disagree.
+    @Published private(set) var workingDiff = ""
+    @Published private(set) var diffHunks: [DiffHunk] = []
+    /// Files in `diffHunks`, in diff order.
+    @Published private(set) var diffFiles: [String] = []
+
+    func setWorkingDiff(_ diff: String, hunks: [DiffHunk]) {
+        workingDiff = diff
+        diffHunks = hunks
+        diffFiles = hunks.map(\.file).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+    }
     @Published var facts: [String] = []
     @Published var pending: [Proposal] = []
 
@@ -2198,7 +2223,7 @@ final class Engine: ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 if res?.ok == true {
                     self?.reopen(db: db, sessionID: sessionID)
-                    self?.workingDiff = ""
+                    self?.setWorkingDiff("", hunks: [])
                     completion(true, nil)
                 } else {
                     completion(false, res?.error ?? "ย้อนเวลาไม่สำเร็จ")
@@ -2246,6 +2271,15 @@ final class Engine: ObservableObject {
     @Published public var lastVerification: VerificationData? = nil
     @Published public var isVerifyingWorkspace: Bool = false
     public var isVerifying: Bool { isVerifyingWorkspace }
+
+    /// Syntax spans per line from the core (`chorus_highlight`): each span
+    /// is `[start, len, kind]` in UTF-8 bytes within its line. Blocking —
+    /// call off the main thread.
+    nonisolated static func highlightSpans(path: String, text: String) -> [[[Int]]]? {
+        struct Res: Decodable { let ok: Bool; let lines: [[[Int]]]? }
+        let json = path.withCString { p in text.withCString { t in string(from: chorus_highlight(p, t)) } }
+        return decode(Res.self, json)?.lines
+    }
 
     func verifyWorkspace(ws: String, completion: ((VerificationData?, String?) -> Void)? = nil) {
         guard !ws.isEmpty else { return }
