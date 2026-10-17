@@ -21,6 +21,14 @@ struct CodeViewerView: View {
     @State private var selectedLine: Int? = nil
     @State private var detectedEditor: String = "VS Code"
     @State private var copiedToClipboard: Bool = false
+    /// Width of the longest line plus gutter. A lazy stack only measures the
+    /// rows it has built, so without this a long line further down is
+    /// clipped instead of scrolling horizontally.
+    @State private var contentWidth: CGFloat = 0
+
+    /// Gutter (48 + 10 + 1) and the code's leading/trailing padding (12 + 24).
+    private static let rowChrome: CGFloat = 95
+    static let codeFont = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
 
     private var fileExtension: String {
         (filePath as NSString).pathExtension.lowercased()
@@ -58,6 +66,7 @@ struct CodeViewerView: View {
             Divider().opacity(0.6)
 
             // Code Content with Gutter & Monospace Text
+            GeometryReader { viewport in
             ScrollView([.vertical, .horizontal]) {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(lines.enumerated()), id: \.offset) { idx, rawLine in
@@ -79,6 +88,8 @@ struct CodeViewerView: View {
                     }
                 }
                 .padding(.vertical, 8)
+                .frame(width: max(viewport.size.width, contentWidth), alignment: .leading)
+            }
             }
             .chorusScrollIndicators()
             .background(Color.primary.opacity(0.02))
@@ -93,50 +104,79 @@ struct CodeViewerView: View {
     }
 
     // MARK: - Header Bar
+    /// One line at every width: the breadcrumb truncates from the head (the
+    /// file name stays), and the controls shed their text before anything
+    /// wraps — full labels, then no badges, then icon-only with tooltips.
     private var headerBar: some View {
+        ViewThatFits(in: .horizontal) {
+            headerRow(badges: true, editorLabel: .full)
+            headerRow(badges: false, editorLabel: .short)
+            headerRow(badges: false, editorLabel: .iconOnly)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+    }
+
+    private enum EditorLabel { case full, short, iconOnly }
+
+    private var breadcrumb: Text {
+        let parts = breadcrumbParts
+        var text = Text("")
+        for (i, part) in parts.enumerated() {
+            if i == parts.count - 1 {
+                text = text + Text(part)
+                    .font(.system(size: 11.5, weight: .bold, design: .monospaced))
+                    .foregroundColor(.primary)
+            } else {
+                text = text + Text(part)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    + Text(" › ")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary.opacity(0.4))
+            }
+        }
+        return text
+    }
+
+    private func headerRow(badges: Bool, editorLabel: EditorLabel) -> some View {
         HStack(spacing: 8) {
             // File Icon & Breadcrumb
             HStack(spacing: 6) {
                 FileTypeIcon(key: (filePath as NSString).pathExtension.lowercased(), size: 14)
+                breadcrumb
+                    .lineLimit(1)
+                    .truncationMode(.head)
+                    .help(filePath)
+            }
+            .layoutPriority(1)
 
-                HStack(spacing: 4) {
-                    let parts = breadcrumbParts
-                    ForEach(Array(parts.enumerated()), id: \.offset) { i, part in
-                        if i == parts.count - 1 {
-                            Text(part)
-                                .font(.system(size: 11.5, weight: .bold, design: .monospaced))
-                                .foregroundColor(.primary)
-                        } else {
-                            Text(part)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundColor(.secondary)
-                            Text("›")
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(.secondary.opacity(0.4))
-                        }
-                    }
-                }
+            if badges {
+                // Read-only badge
+                Text("อ่านอย่างเดียว")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.04))
+                    .clipShape(Capsule())
+
+                // Stats pill (lines count)
+                Text("\(lines.count) lines")
+                    .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.04))
+                    .clipShape(Capsule())
             }
 
-            // Read-only badge
-            Text("อ่านอย่างเดียว")
-                .font(.system(size: 9.5, weight: .semibold))
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.primary.opacity(0.04))
-                .clipShape(Capsule())
-
-            // Stats pill (lines count)
-            Text("\(lines.count) lines")
-                .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.primary.opacity(0.04))
-                .clipShape(Capsule())
-
-            Spacer()
+            Spacer(minLength: 0)
 
             // Copy Content Button
             Button(action: copyContent) {
@@ -144,10 +184,12 @@ struct CodeViewerView: View {
                     Image(systemName: copiedToClipboard ? "checkmark" : "doc.on.doc")
                         .font(.system(size: 10))
                         .foregroundColor(copiedToClipboard ? .green : .secondary)
-                    if copiedToClipboard {
+                    if copiedToClipboard, editorLabel != .iconOnly {
                         Text("Copied")
                             .font(.system(size: 10, weight: .medium))
                             .foregroundColor(.green)
+                            .lineLimit(1)
+                            .fixedSize()
                     }
                 }
                 .padding(4)
@@ -163,19 +205,27 @@ struct CodeViewerView: View {
                     Image(systemName: "arrow.up.forward.app")
                         .font(.system(size: 10.5))
                         .foregroundColor(.accentColor)
-                    Text("Open in \(detectedEditor)")
-                        .font(.system(size: 11, weight: .medium))
-                    Text("⌥⌘E")
-                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.secondary)
+                    if editorLabel != .iconOnly {
+                        Text(editorLabel == .full ? "Open in \(detectedEditor)" : detectedEditor)
+                            .font(.system(size: 11, weight: .medium))
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                    if editorLabel == .full {
+                        Text("⌥⌘E")
+                            .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
                 }
-                .padding(.horizontal, 8)
+                .padding(.horizontal, editorLabel == .iconOnly ? 5 : 8)
                 .padding(.vertical, 4)
                 .background(Color.accentColor.opacity(0.1))
                 .cornerRadius(5)
             }
             .buttonStyle(.plain)
-            .help("Open in \(detectedEditor) at line \(selectedLine ?? 1)")
+            .help("Open in \(detectedEditor) at line \(selectedLine ?? 1) (⌥⌘E)")
 
             // Maximize / Restore Button
             if let onToggleMaximize {
@@ -195,9 +245,6 @@ struct CodeViewerView: View {
             .keyboardShortcut(.escape, modifiers: [])
             .help("Close file viewer (Esc)")
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
     }
 
     private func copyContent() {
@@ -238,10 +285,13 @@ struct CodeViewerView: View {
             let lines = content?.components(separatedBy: "\n") ?? ["// Error: Unable to read file at \(path)"]
             let spans = content.flatMap { Engine.highlightSpans(path: path, text: $0) }
             let coloured = spans.map { CodeTheme.paint(lines: lines, spans: $0) } ?? []
+            let longest = lines.max(by: { $0.count < $1.count }) ?? ""
+            let width = ceil((longest as NSString).size(withAttributes: [.font: Self.codeFont]).width) + Self.rowChrome
             DispatchQueue.main.async {
                 guard token == loadToken else { return }   // another file was opened since
                 fileContent = content ?? ""
                 self.lines = lines
+                contentWidth = width
                 highlighted = coloured
             }
         }

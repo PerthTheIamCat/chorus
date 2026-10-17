@@ -71,6 +71,16 @@ public enum ResizeDirection {
 
 /// An AppKit-backed native splitter that tracks mouse coordinates with 1:1 precision, zero jitter,
 /// locked resize cursor, and double-click reset.
+/// Layout numbers from `07-workbench-layout-v2` (variant A).
+enum WorkbenchLayout {
+    /// Viewer : chat ≈ 1.2 : 1 of the space the fixed columns leave.
+    static let defaultViewerShare = 1.2 / 2.2
+    static let chatMinWidth: CGFloat = 380
+    static let viewerMinWidth: CGFloat = 360
+    static let gripWidth: CGFloat = 8
+    static let columnSpacing: CGFloat = 4
+}
+
 public struct PanelResizeGrip: View {
     @Binding var width: Double
     let minWidth: Double

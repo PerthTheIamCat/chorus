@@ -83,6 +83,7 @@ extension Engine {
 /// The two chips under the composer: model (agent + model) and effort.
 struct ModelPicker: View {
     @EnvironmentObject var engine: Engine
+    @Environment(\.compactControls) private var compact
     @Binding var model: String
     var onNeedsLogin: () -> Void
     /// Only the composer's picker answers ⇧⌘I / ⇧⌘E from the Chat menu; a
@@ -100,11 +101,13 @@ struct ModelPicker: View {
             Button { open.toggle() } label: {
                 HStack(spacing: 5) {
                     if let agent { ProviderIcon(provider: agent.id, size: 14) }
-                    Text(agent?.label ?? "เลือกโมเดล").fontWeight(.medium)
-                    if let a = agent, let l = a.baseModels.first(where: { $0.id == current.base })?.label {
-                        Text(l).foregroundStyle(.secondary)
-                    } else if agent == nil, !model.isEmpty {
-                        Text(current.base).foregroundStyle(.secondary)
+                    if !compact || agent == nil {
+                        Text(agent?.label ?? "เลือกโมเดล").fontWeight(.medium).lineLimit(1).fixedSize()
+                    }
+                    if !compact, let a = agent, let l = a.baseModels.first(where: { $0.id == current.base })?.label {
+                        Text(l).foregroundStyle(.secondary).lineLimit(1).fixedSize()
+                    } else if !compact, agent == nil, !model.isEmpty {
+                        Text(current.base).foregroundStyle(.secondary).lineLimit(1).fixedSize()
                     }
                     Image(systemName: "chevron.up.chevron.down").font(.system(size: 8))
                 }
@@ -112,7 +115,7 @@ struct ModelPicker: View {
             }
             .buttonStyle(InteractiveStyle(cornerRadius: 99, selected: open,
                                           padding: .init(top: 4, leading: 9, bottom: 4, trailing: 9)))
-            .help("เลือก agent และโมเดล (⌘⇧I)")
+            .help(compact ? "\(agent?.label ?? "เลือกโมเดล") · \(current.base) — เลือก agent และโมเดล (⌘⇧I)" : "เลือก agent และโมเดล (⌘⇧I)")
             .popover(isPresented: $open, arrowEdge: .top) { popover }
 
             if let a = agent {
@@ -199,10 +202,39 @@ struct ModelPicker: View {
     }
 }
 
+/// The composer row ran out of width: pills drop their text and keep the
+/// icon (the label moves to the tooltip). Set by `ComposerField`.
+private struct CompactControlsKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var compactControls: Bool {
+        get { self[CompactControlsKey.self] }
+        set { self[CompactControlsKey.self] = newValue }
+    }
+}
+
+/// Icon + one-line text that drops to the icon alone in a compact row.
+struct CompactLabel<Icon: View>: View {
+    @Environment(\.compactControls) private var compact
+    let text: String
+    var spacing: CGFloat = 4
+    @ViewBuilder var icon: () -> Icon
+
+    var body: some View {
+        HStack(spacing: spacing) {
+            icon()
+            if !compact { Text(text).lineLimit(1).fixedSize() }
+        }
+    }
+}
+
 /// A capsule chip that opens a small list of options — the effort and
 /// permission choices. A popover (not a `Menu`) so it gets the same
 /// hover/press/selected treatment as everything else.
 struct ChipPicker: View {
+    @Environment(\.compactControls) private var compact
     let icon: String
     let value: String
     let options: [String]
@@ -215,7 +247,7 @@ struct ChipPicker: View {
         Button { open.toggle() } label: {
             HStack(spacing: 4) {
                 Image(systemName: icon)
-                Text(labels[value] ?? value)
+                if !compact { Text(labels[value] ?? value).lineLimit(1).fixedSize() }
                 Image(systemName: "chevron.down").font(.system(size: 7, weight: .semibold))
             }
             .font(.caption)

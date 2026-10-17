@@ -137,7 +137,10 @@ struct ContentView: View {
     @AppStorage("chorus.sidebarWidth") private var sidebarWidth: Double = 260
     @AppStorage("chorus.explorerWidth") private var explorerWidth: Double = 260
     @AppStorage("chorus.inspectorWidth") private var inspectorWidth: Double = 330
-    @AppStorage("chorus.codeViewerWidth") private var codeViewerWidth: Double = 520
+    /// The viewer's share of the width the sidebar, tree and inspector leave
+    /// (the rest is chat). A share, not pixels, so resizing the window keeps
+    /// the 1.2 : 1 split the layout decision asks for.
+    @AppStorage("chorus.codeViewerShare") private var codeViewerShare: Double = WorkbenchLayout.defaultViewerShare
     @State private var maximizedPanel: MaximizedPanel = .none
 
     enum CenterStageMode: String, Equatable {
@@ -546,7 +549,7 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private func codeViewerPanel(for file: String, isCenterStage: Bool = false) -> some View {
+    private func codeViewerPanel(for file: String, isCenterStage: Bool = false, width: CGFloat? = nil) -> some View {
         CodeViewerView(
             filePath: file,
             cwd: workspace,
@@ -561,7 +564,7 @@ struct ContentView: View {
                 selectedFile = nil
             }
         )
-        .frame(width: (maximizedPanel == .codeViewer || isCenterStage) ? nil : codeViewerWidth)
+        .frame(width: (maximizedPanel == .codeViewer || isCenterStage) ? nil : width)
         .frame(maxWidth: isCenterStage ? .infinity : nil)
         .floatingPanel(cornerRadius: 20)
         .transition(.asymmetric(
@@ -683,10 +686,40 @@ struct ContentView: View {
         }
     }
 
+    /// Viewer (opens next to the tree, only while a file is open) and chat
+    /// (min 380 px), sharing `space` about 1.2 : 1. When both can't keep
+    /// their minimum, the file takes chat's place as in narrow windows.
+    @ViewBuilder
+    private func viewerAndChat(file: String, space: CGFloat) -> some View {
+        let gap = WorkbenchLayout.columnSpacing
+        let shared = space - WorkbenchLayout.gripWidth - gap * 2
+        let chatMin = WorkbenchLayout.chatMinWidth
+        let viewerMin = WorkbenchLayout.viewerMinWidth
+        if shared >= chatMin + viewerMin {
+            let viewerWidth = min(max(shared * codeViewerShare, viewerMin), shared - chatMin)
+            HStack(spacing: gap) {
+                codeViewerPanel(for: file, isCenterStage: false, width: viewerWidth)
+                PanelResizeGrip(
+                    width: Binding(
+                        get: { Double(viewerWidth) },
+                        set: { codeViewerShare = $0 / Double(shared) }
+                    ),
+                    minWidth: Double(viewerMin), maxWidth: Double(shared - chatMin), direction: .forward
+                ) {
+                    codeViewerShare = WorkbenchLayout.defaultViewerShare
+                }
+                centerStageView
+                    .frame(minWidth: chatMin)
+            }
+        } else {
+            codeViewerPanel(for: file, isCenterStage: true)
+        }
+    }
+
     @ViewBuilder
     private func multiPanelLayout(containerWidth: CGFloat) -> some View {
         let isNarrow = containerWidth < 1200
-        HStack(spacing: 4) {
+        HStack(spacing: WorkbenchLayout.columnSpacing) {
             // 1. Sidebar (Sessions: 230–260 px)
             if showSidebar {
                 sidebarPanel
@@ -705,21 +738,20 @@ struct ContentView: View {
                 }
             }
 
-            // 3. File viewer (opens next to tree, only while a file is open, in wide mode)
+            // 3–4. File viewer + chat share whatever the fixed columns leave,
+            // measured rather than summed so panel padding can't skew it.
             if !isNarrow, let file = selectedFile {
-                codeViewerPanel(for: file, isCenterStage: false)
-                PanelResizeGrip(width: $codeViewerWidth, minWidth: 320, maxWidth: 900, direction: .forward) {
-                    codeViewerWidth = 520
+                GeometryReader { g in
+                    viewerAndChat(file: file, space: g.size.width)
+                        .frame(width: g.size.width, height: g.size.height)
                 }
-            }
-
-            // 4. Center Stage / Chat (min 380 px)
-            // In narrow mode (< 1200 px), open file temporarily replaces chat.
-            if isNarrow, let file = selectedFile {
+                .frame(minWidth: WorkbenchLayout.chatMinWidth)
+            } else if let file = selectedFile {
+                // Narrow window: an open file temporarily replaces chat.
                 codeViewerPanel(for: file, isCenterStage: true)
             } else {
                 centerStageView
-                    .frame(minWidth: 380)
+                    .frame(minWidth: WorkbenchLayout.chatMinWidth)
             }
 
             // 5. Inspector (stays a toggled right panel ⌥⌘I)
@@ -2013,7 +2045,7 @@ struct ContentView: View {
                         labels: Dictionary(uniqueKeysWithValues: engine.routePresets.map { ($0.id, $0.label) }),
                         selected: engine.routePreset
                     ) { engine.setRoutePreset($0) }
-                    .help(engine.routePresets.first { $0.id == engine.routePreset }?.hint ?? "")
+                    .help(engine.routePresets.first { $0.id == engine.routePreset }.map { "\($0.label) — \($0.hint)" } ?? "")
                 }
                 ChipPicker(
                     icon: permission == .ask ? "hand.raised" : "bolt.fill",
@@ -2022,7 +2054,7 @@ struct ContentView: View {
                     labels: Dictionary(uniqueKeysWithValues: PermissionLevel.allCases.map { ("\($0.rawValue)", $0.label) }),
                     selected: "\(permission.rawValue)"
                 ) { v in if let p = PermissionLevel(rawValue: Int32(v) ?? 0) { permission = p } }
-                .help(permission.hint)
+                .help("\(permission.label) — \(permission.hint)")
             } trailing: {
                 if currentSessionMode == .orchestra {
                     let orchLabel = configuredOrchestrator.isEmpty ? "Claude Opus 5.5" : ModelID(configuredOrchestrator).base
@@ -2030,21 +2062,19 @@ struct ContentView: View {
                         settingsSection = .orchestration
                         showSettings = true
                     } label: {
-                        HStack(spacing: 4) {
+                        CompactLabel(text: "นำโดย \(orchLabel)") {
                             Image(systemName: "crown.fill")
                                 .font(.system(size: 9))
                                 .foregroundStyle(.yellow)
-                            Text("นำโดย \(orchLabel)")
-                                .font(.caption.weight(.medium))
                         }
+                        .font(.caption.weight(.medium))
                     }
                     .buttonStyle(InteractiveStyle(cornerRadius: 7, padding: .init(top: 4, leading: 8, bottom: 4, trailing: 8)))
-                    .help("Orchestra: วางแผนและแจกงานให้ agent ย่อย (คลิกเพื่อตั้งค่าโมเดล)")
+                    .help("นำโดย \(orchLabel) — Orchestra: วางแผนและแจกงานให้ agent ย่อย (คลิกเพื่อตั้งค่าโมเดล)")
                 } else if currentSessionMode == .autoRoute {
                     Button { currentSessionMode = .manual } label: {
-                        HStack(spacing: 3) {
+                        CompactLabel(text: "router เลือก", spacing: 3) {
                             Image(systemName: "arrow.triangle.branch")
-                            Text("router เลือก")
                         }
                         .font(.caption.weight(.medium))
                     }

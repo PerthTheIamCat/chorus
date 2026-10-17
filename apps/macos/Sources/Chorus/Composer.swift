@@ -230,7 +230,16 @@ struct ComposerField<Leading: View, Trailing: View>: View {
         .padding(.horizontal, 8).padding(.top, 7)
     }
 
+    /// Full labels when they fit on one line; otherwise the same row with
+    /// icon-only pills (labels move to tooltips) instead of wrapping.
     private var controlRow: some View {
+        ViewThatFits(in: .horizontal) {
+            controlRowContent
+            controlRowContent.environment(\.compactControls, true)
+        }
+    }
+
+    private var controlRowContent: some View {
         HStack(spacing: 4) {
             Button { showingImporter = true } label: {
                 Image(systemName: "plus").font(.system(size: 13, weight: .medium)).frame(width: 26, height: 26)
@@ -538,6 +547,7 @@ enum SessionMode: String, CaseIterable, Identifiable {
 /// Mode: `Auto route | Orchestra | manual`. Choosing a model by hand switches
 /// to `manual`. The composer mode is per session and takes effect from the next turn.
 struct ComposerModeMenu: View {
+    @Environment(\.compactControls) private var compact
     @Binding var mode: SessionMode
     var openOrchestraSettings: () -> Void = {}
 
@@ -573,7 +583,7 @@ struct ComposerModeMenu: View {
             HStack(spacing: 4) {
                 Image(systemName: mode == .orchestra ? "point.3.connected.trianglepath.dotted" : (mode == .autoRoute ? "arrow.triangle.branch" : "cpu"))
                     .font(.system(size: 9))
-                Text(mode.label).font(.caption.weight(.medium))
+                if !compact { Text(mode.label).font(.caption.weight(.medium)).lineLimit(1).fixedSize() }
             }
         }
         .menuStyle(.borderlessButton)
@@ -584,7 +594,7 @@ struct ComposerModeMenu: View {
             in: RoundedRectangle(cornerRadius: 7, style: .continuous)
         )
         .foregroundStyle(mode == .orchestra ? Color.purple : (mode == .autoRoute ? Color.accentColor : Color.primary))
-        .help(mode == .orchestra ? "Orchestra: โมเดลหลักวางแผนและแจกงานให้ agent ย่อย" : (mode == .autoRoute ? "Auto route: router เลือกโมเดลให้ทุกเทิร์น" : "เลือกโมเดลเอง"))
+        .help((compact ? "\(mode.label) — " : "") + (mode == .orchestra ? "Orchestra: โมเดลหลักวางแผนและแจกงานให้ agent ย่อย" : (mode == .autoRoute ? "Auto route: router เลือกโมเดลให้ทุกเทิร์น" : "เลือกโมเดลเอง")))
     }
 }
 

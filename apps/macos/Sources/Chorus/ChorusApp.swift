@@ -47,5 +47,6 @@ struct ChorusApp: App {
                 .environmentObject(engine)
         }
         .defaultSize(width: 1000, height: 560)
+        .keyboardShortcut(AppCommand.systemMonitor.shortcut)
     }
 }

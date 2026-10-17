@@ -92,14 +92,10 @@ final class AppCommandCenter: ObservableObject {
 
 struct ChorusCommands: Commands {
     @ObservedObject var center: AppCommandCenter
-    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
-        CommandGroup(before: .windowSize) {
-            Button("System Monitor") { openWindow(id: SystemMonitorView.windowID) }
-                .keyboardShortcut(AppCommand.systemMonitor.shortcut)
-            Divider()
-        }
+        // "System Monitor" in the Window menu comes from its `Window` scene
+        // (ChorusApp), which also carries ⌥⌘M — a button here listed it twice.
 
         CommandGroup(replacing: .appSettings) {
             Button("Settings…") { center.send(.settings) }

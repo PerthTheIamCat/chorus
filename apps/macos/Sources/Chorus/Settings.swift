@@ -369,7 +369,7 @@ struct GeneralSettings: View {
     @AppStorage("chorus.sidebarWidth") private var sidebarWidth: Double = 260
     @AppStorage("chorus.explorerWidth") private var explorerWidth: Double = 260
     @AppStorage("chorus.inspectorWidth") private var inspectorWidth: Double = 330
-    @AppStorage("chorus.codeViewerWidth") private var codeViewerWidth: Double = 520
+    @AppStorage("chorus.codeViewerShare") private var codeViewerShare: Double = WorkbenchLayout.defaultViewerShare
 
     var body: some View {
         SettingsGroup(title: "การพิมพ์") {
@@ -412,7 +412,7 @@ struct GeneralSettings: View {
                     sidebarWidth = 260
                     explorerWidth = 260
                     inspectorWidth = 330
-                    codeViewerWidth = 520
+                    codeViewerShare = WorkbenchLayout.defaultViewerShare
                 }
             }
         }
