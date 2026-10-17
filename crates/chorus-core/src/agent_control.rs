@@ -53,12 +53,38 @@ impl SubagentStatus {
     }
 }
 
+/// Who started a child session.
+///
+/// `Chorus` children are real sessions the orchestrator spawned and can steer.
+/// `Provider` children are a bridge's own subagents (Claude's `Task` tool,
+/// Codex `subagent_spawned`), recorded after the parent turn so their events
+/// live in their own session instead of the parent's transcript. They are
+/// read-only: no bridge lets a client cancel or message one on its own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentKind {
+    #[default]
+    Chorus,
+    Provider,
+}
+
+impl SubagentKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Chorus => "chorus",
+            Self::Provider => "provider",
+        }
+    }
+}
+
 /// A child agent session tracked by Chorus.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subagent {
     pub id: i64,
     pub parent_sess: Option<i64>,
     pub child_sess: Option<i64>,
+    #[serde(default)]
+    pub kind: SubagentKind,
     pub role: String,
     pub task: String,
     pub worktree: Option<String>,
@@ -154,6 +180,10 @@ fn row_to_subagent(r: &Row) -> rusqlite::Result<Subagent> {
         id: r.get("id")?,
         parent_sess: r.get("parent_sess")?,
         child_sess: r.get("child_sess")?,
+        kind: match r.get::<_, String>("kind")?.as_str() {
+            "provider" => SubagentKind::Provider,
+            _ => SubagentKind::Chorus,
+        },
         role: r.get("role")?,
         task: r.get("task")?,
         worktree: r.get("worktree")?,
@@ -208,10 +238,42 @@ pub fn spawn_agent(
     get_subagent(conn, id)
 }
 
+/// Record a provider subagent that already ran inside a parent turn.
+///
+/// Creates its child session (linked by `forked_from` with no fork point, so
+/// `ledger::history` of the child is its own events only) and the
+/// `kind = 'provider'` row, already in its final `status`. The caller appends
+/// the child's events to `child_sess`.
+pub fn record_provider_subagent(
+    conn: &Connection,
+    parent_sess: i64,
+    name: &str,
+    task: &str,
+    status: SubagentStatus,
+    summary: Option<&str>,
+) -> Result<Subagent> {
+    let now = now_ms();
+    let cwd: String =
+        conn.query_row("SELECT cwd FROM session WHERE id = ?1", [parent_sess], |r| r.get(0))?;
+    conn.execute(
+        "INSERT INTO session(title, cwd, started_ms, forked_from, fork_at_seq)
+         VALUES (?1, ?2, ?3, ?4, NULL)",
+        params![name, cwd, now, parent_sess],
+    )?;
+    let child_sess = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO subagent(parent_sess, child_sess, kind, role, task, worktree, status, \
+         summary, diff_stat, files_touched, created_ms, updated_ms)
+         VALUES (?1, ?2, 'provider', ?3, ?4, NULL, ?5, ?6, NULL, '[]', ?7, ?7)",
+        params![parent_sess, child_sess, name, task, status.as_str(), summary, now],
+    )?;
+    get_subagent(conn, conn.last_insert_rowid())
+}
+
 /// Fetch a single subagent by ID.
 pub fn get_subagent(conn: &Connection, id: i64) -> Result<Subagent> {
     conn.query_row(
-        "SELECT id, parent_sess, child_sess, role, task, worktree, status, \
+        "SELECT id, parent_sess, child_sess, kind, role, task, worktree, status, \
          summary, diff_stat, files_touched, created_ms, updated_ms \
          FROM subagent WHERE id = ?1",
         [id],
@@ -224,13 +286,13 @@ pub fn get_subagent(conn: &Connection, id: i64) -> Result<Subagent> {
 pub fn list_subagents(conn: &Connection, parent_sess: Option<i64>) -> Result<Vec<Subagent>> {
     let mut stmt = if parent_sess.is_some() {
         conn.prepare(
-            "SELECT id, parent_sess, child_sess, role, task, worktree, status, \
+            "SELECT id, parent_sess, child_sess, kind, role, task, worktree, status, \
              summary, diff_stat, files_touched, created_ms, updated_ms \
              FROM subagent WHERE parent_sess = ?1 ORDER BY id ASC",
         )?
     } else {
         conn.prepare(
-            "SELECT id, parent_sess, child_sess, role, task, worktree, status, \
+            "SELECT id, parent_sess, child_sess, kind, role, task, worktree, status, \
              summary, diff_stat, files_touched, created_ms, updated_ms \
              FROM subagent ORDER BY id ASC",
         )?
@@ -314,6 +376,13 @@ pub fn send_message(
     })
 }
 
+/// The children an orchestrator waits on and collects: its own Chorus
+/// children. A provider subagent finished inside some earlier turn and its
+/// result already reached the parent as that turn's tool result.
+fn orchestrated(agents: Vec<Subagent>) -> Vec<Subagent> {
+    agents.into_iter().filter(|a| a.kind == SubagentKind::Chorus).collect()
+}
+
 /// Wait on a specific child agent, or all child agents of `parent_sess`.
 pub fn wait_agent(
     conn: &Connection,
@@ -324,7 +393,7 @@ pub fn wait_agent(
     let agents = if let Some(id) = subagent_id {
         vec![get_subagent(conn, id)?]
     } else {
-        list_subagents(conn, parent_sess)?
+        orchestrated(list_subagents(conn, parent_sess)?)
     };
 
     let mut completed = Vec::new();
@@ -408,7 +477,7 @@ pub fn collect_results(
         }
         list
     } else {
-        list_subagents(conn, parent_sess)?
+        orchestrated(list_subagents(conn, parent_sess)?)
             .into_iter()
             .filter(|a| a.status != SubagentStatus::Running)
             .collect()

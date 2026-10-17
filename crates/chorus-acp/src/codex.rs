@@ -142,14 +142,16 @@ pub enum AgentEvent {
     ToolCall { title: String, kind: String },
     /// The resolution of a tool call.
     ToolResult { title: String, status: String },
-    /// A child session announced by the bridge, including nested children.
+    /// A provider subagent started (Codex `subagent_spawned`, Claude `Task`).
+    /// Its own events are in [`TurnOutcome::children`], not here.
     SubagentSpawned {
         session_id: String,
         parent_session_id: String,
         name: String,
         task: String,
     },
-    /// The child session's final state and any message it sent while running.
+    /// The child's terminal state and final result — the only part of the
+    /// child the parent's context ever sees.
     SubagentState {
         session_id: String,
         state: String,
@@ -174,6 +176,9 @@ pub struct TurnOutcome {
     pub message: String,
     pub thoughts: String,
     pub events: Vec<AgentEvent>,
+    /// Provider subagents that ran inside this turn, in spawn order (a
+    /// parent always before its nested children). See [`ChildOutcome`].
+    pub children: Vec<ChildOutcome>,
     /// The model selected and reported for this ACP session, when available.
     pub model: Option<String>,
     pub context_used: Option<i64>,
@@ -444,12 +449,21 @@ impl CodexAgent {
         let mut handle = |a: &Agent, inbound: Inbound| match inbound {
             Inbound::Notification { method, params } => {
                 if method == "session/update" {
-                    report_progress(&params);
                     acc.absorb(&params);
                 }
             }
             Inbound::Request { id, method, params } => {
+                // A child blocked on our answer shows as `waiting` meanwhile.
+                let child = (method == "session/request_permission")
+                    .then(|| acc.child_for_request(&params))
+                    .flatten();
+                if let Some(c) = &child {
+                    acc.set_waiting(c, true);
+                }
                 let reply = handle_request(&cwd, &method, &params, decide);
+                if let Some(c) = &child {
+                    acc.set_waiting(c, false);
+                }
                 let _ = match reply {
                     RequestReply::Result(v) => a.respond(&id, v),
                     RequestReply::Error(code, msg) => a.respond_err(&id, code, &msg),
@@ -727,9 +741,9 @@ fn resolve_inside(cwd: &Path, path: &str) -> Result<PathBuf> {
     Ok(canon)
 }
 
-/// Forward one `session/update` to the live progress sink, if any.
-fn report_progress(params: &Value) {
-    let Some(update) = params.get("update") else { return };
+/// Forward one parent-session `session/update` to the live progress sink.
+/// Child frames never come here: they would stream into the parent's bubble.
+fn report_progress(update: &Value) {
     let kind = update.get("sessionUpdate").and_then(Value::as_str).unwrap_or("");
     match kind {
         "agent_thought_chunk" => {
@@ -758,72 +772,114 @@ fn report_progress(params: &Value) {
     }
 }
 
-/// Folds a turn's `session/update` stream into a [`TurnOutcome`].
+/// The one seam where subagent state reaches the live push.
+///
+/// Kind `subagent`, text a JSON object: `child` / `parent` (provider keys —
+/// the parent is the root ACP session id for a top-level child), `name`,
+/// `task`, `state` (`running` · `waiting` · `completed` · `failed` ·
+/// `cancelled`) and, on child tool calls, `activity`. When issue 03's typed
+/// push lands this is the payload of its `status` kind; nothing else in the
+/// crate needs to change.
+fn push_subagent(child: &Child, activity: Option<&str>) {
+    let mut v = json!({
+        "child": child.out.session_id,
+        "parent": child.out.parent_session_id,
+        "name": child.out.name,
+        "task": child.out.task,
+        "state": child.out.state,
+    });
+    if let Some(a) = activity {
+        v["activity"] = json!(a);
+    }
+    crate::emit_progress("subagent", &v.to_string());
+}
+
+/// A provider subagent's own record of one parent turn: what it was asked,
+/// how it ended, and everything it said and did. Its events never appear in
+/// the parent's [`TurnOutcome::events`] — the parent gets one
+/// [`AgentEvent::SubagentSpawned`] and one [`AgentEvent::SubagentState`]
+/// carrying [`ChildOutcome::message`], the child's final result.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChildOutcome {
+    /// Codex: the child's ACP `sessionId`. Claude: the `toolCallId` of the
+    /// `Task` call that launched it (Claude children have no session id).
+    pub session_id: String,
+    /// The root session id, or another child's `session_id` when nested.
+    pub parent_session_id: String,
+    pub name: String,
+    pub task: String,
+    /// `completed` · `failed` · `cancelled` once the turn is over.
+    pub state: String,
+    /// The final result handed back to the parent.
+    pub message: String,
+    pub events: Vec<AgentEvent>,
+}
+
+/// Map each bridge's state words onto the `subagent.status` vocabulary.
+/// `idle` (ACP spec) is a reusable child between prompts: still alive.
+fn normalize_state(s: &str) -> &'static str {
+    match s {
+        "completed" | "complete" | "done" => "completed",
+        "failed" | "error" | "disconnected" => "failed",
+        "cancelled" | "canceled" => "cancelled",
+        "waiting" => "waiting",
+        _ => "running",
+    }
+}
+
+fn is_terminal(state: &str) -> bool {
+    matches!(state, "completed" | "failed" | "cancelled")
+}
+
+/// Claude's subagent launcher: a `Task` (or `Agent`) tool call. The title is
+/// the task description, so the tool name comes from `_meta`; a bare "Task"
+/// title is what the bridge shows when no description was given.
+fn is_task_tool(update: &Value) -> bool {
+    let name = update
+        .pointer("/_meta/claudeCode/toolName")
+        .and_then(Value::as_str);
+    matches!(name, Some("Task" | "Agent"))
+        || (name.is_none() && update.get("title").and_then(Value::as_str) == Some("Task"))
+}
+
+fn parent_tool_use_id(v: &Value) -> Option<&str> {
+    v.pointer("/_meta/claudeCode/parentToolUseId")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+}
+
+/// Every text block of a tool result, joined: the `Task` tool's result is the
+/// subagent's answer as the parent model received it.
+fn content_text(update: &Value) -> String {
+    let Some(arr) = update.get("content").and_then(Value::as_array) else {
+        return String::new();
+    };
+    arr.iter()
+        .filter_map(|c| {
+            c.pointer("/content/text")
+                .or_else(|| c.get("text"))
+                .and_then(Value::as_str)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// One agent's prose, thoughts and tool history — the parent's, or a child's.
 #[derive(Default)]
-struct Accumulator {
-    root_session_id: String,
+struct Transcript {
     message: String,
     thoughts: String,
     events: Vec<AgentEvent>,
-    child_messages: std::collections::HashMap<String, String>,
     /// `toolCallId` → title, so a `tool_call_update` (which carries only the
     /// id) can name the call it resolves.
     titles: std::collections::HashMap<String, String>,
-    context_used: Option<i64>,
-    context_window: Option<i64>,
-    cost_usd: Option<f64>,
-    stop_reason: String,
     open_message: bool,
 }
 
-impl Accumulator {
-    fn absorb(&mut self, params: &Value) {
-        let update = match params.get("update") {
-            Some(u) => u,
-            None => return,
-        };
-        let kind = update
-            .get("sessionUpdate")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let session_id = params.get("sessionId").and_then(Value::as_str).unwrap_or("");
-        match kind {
-            "subagent_spawned" => {
-                if let Some(child) = update.get("subagentSessionId").and_then(Value::as_str) {
-                    self.events.push(AgentEvent::SubagentSpawned {
-                        session_id: child.to_string(),
-                        parent_session_id: session_id.to_string(),
-                        name: update.get("name").and_then(Value::as_str).unwrap_or("Agent").to_string(),
-                        task: update.get("task").and_then(Value::as_str).unwrap_or("").to_string(),
-                    });
-                }
-                return;
-            }
-            "subagent_state_update" => {
-                if let (Some(child), Some(state)) = (
-                    update.get("subagentSessionId").and_then(Value::as_str),
-                    update.get("state").and_then(Value::as_str),
-                ) {
-                    self.events.push(AgentEvent::SubagentState {
-                        session_id: child.to_string(),
-                        state: state.to_string(),
-                        message: self.child_messages.remove(child).unwrap_or_default(),
-                    });
-                }
-                return;
-            }
-            _ => {}
-        }
-        // Child updates share the transport with the parent. Their prose and
-        // tools must not become the parent's answer or tool history.
-        if !session_id.is_empty() && session_id != self.root_session_id {
-            if kind == "agent_message_chunk" {
-                if let Some(text) = chunk_text(update) {
-                    self.child_messages.entry(session_id.to_string()).or_default().push_str(&text);
-                }
-            }
-            return;
-        }
+impl Transcript {
+    fn absorb(&mut self, kind: &str, update: &Value) {
         match kind {
             "agent_message_chunk" => {
                 if let Some(t) = chunk_text(update) {
@@ -852,20 +908,6 @@ impl Accumulator {
                 if !id.is_empty() {
                     self.titles.insert(id.to_string(), title.clone());
                 }
-                // Subagent Normalizer: Normalize Claude Task tool call into SubagentSpawned
-                if title == "Task" || kind == "task" {
-                    let task_desc = update.get("rawInput")
-                        .and_then(|v| v.get("description").or_else(|| v.get("prompt")))
-                        .and_then(Value::as_str)
-                        .unwrap_or("");
-                    let child_id = format!("task-{}", if id.is_empty() { "subagent" } else { id });
-                    self.events.push(AgentEvent::SubagentSpawned {
-                        session_id: child_id,
-                        parent_session_id: self.root_session_id.clone(),
-                        name: "Claude Task Subagent".to_string(),
-                        task: task_desc.to_string(),
-                    });
-                }
                 self.events.push(AgentEvent::ToolCall { title, kind });
             }
             "tool_call_update" => {
@@ -888,53 +930,19 @@ impl Accumulator {
                 if let Some(content) = update.get("content").and_then(Value::as_array) {
                     for c in content {
                         if c.get("type").and_then(Value::as_str) == Some("diff") {
+                            let field = |k: &str| {
+                                c.get(k).and_then(Value::as_str).unwrap_or("").to_string()
+                            };
                             self.events.push(AgentEvent::Diff {
-                                path: c
-                                    .get("path")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .to_string(),
-                                old: c
-                                    .get("oldText")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .to_string(),
-                                new: c
-                                    .get("newText")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .to_string(),
+                                path: field("path"),
+                                old: field("oldText"),
+                                new: field("newText"),
                             });
                         }
                     }
                 }
                 if !status.is_empty() {
                     self.events.push(AgentEvent::ToolResult { title, status });
-                }
-            }
-            "usage_update" => {
-                // Bridge sends `{used, size}` — cumulative context pressure.
-                // Last one in the turn wins.
-                if let Some(used) = update.get("used").and_then(Value::as_i64) {
-                    self.context_used = Some(used);
-                }
-                if let Some(size) = update.get("size").and_then(Value::as_i64) {
-                    self.context_window = Some(size);
-                }
-                let cost = update.get("cost");
-                if cost.and_then(|c| c.get("currency")).and_then(Value::as_str) == Some("USD") {
-                    if let Some(amount) = cost.and_then(|c| c.get("amount")).and_then(Value::as_f64) {
-                        self.cost_usd = Some(amount);
-                    }
-                }
-                // Live context meter: `used\tsize`, either side may be empty.
-                if self.context_used.is_some() || self.context_window.is_some() {
-                    crate::observe_usage(self.context_used, self.context_window);
-                    let fmt = |v: Option<i64>| v.map(|n| n.to_string()).unwrap_or_default();
-                    crate::emit_progress(
-                        "usage",
-                        &format!("{}\t{}", fmt(self.context_used), fmt(self.context_window)),
-                    );
                 }
             }
             _ => {}
@@ -950,26 +958,351 @@ impl Accumulator {
         }
     }
 
+    fn last_message(&self) -> Option<&str> {
+        self.events.iter().rev().find_map(|e| match e {
+            AgentEvent::Message(m) => Some(m.as_str()),
+            _ => None,
+        })
+    }
+}
+
+/// A child being followed during the turn.
+struct Child {
+    out: ChildOutcome,
+    t: Transcript,
+    /// The `Task` tool's own result text (Claude), preferred over the
+    /// child's last message as the final result.
+    result: String,
+}
+
+/// Folds a turn's `session/update` stream into a [`TurnOutcome`].
+///
+/// This is the subagent normalizer. Both bridges multiplex children onto the
+/// parent's stream, in different dialects:
+///
+/// - **Codex** sends each child on its own `sessionId`, announced by
+///   `subagent_spawned` / `subagent_state_update` on the parent (the ACP
+///   draft's `subagent_update` is the same idea, also handled).
+/// - **Claude** keeps the parent `sessionId` and tags every child frame with
+///   `_meta.claudeCode.parentToolUseId` — the id of the `Task` tool call
+///   that launched it. Nothing announces the child but that tool call.
+///
+/// Either way the frame lands in that child's own [`Transcript`], so child
+/// prose never becomes the parent's answer and child tool calls are kept
+/// instead of dropped.
+#[derive(Default)]
+struct Accumulator {
+    root_session_id: String,
+    main: Transcript,
+    children: Vec<Child>,
+    child_index: std::collections::HashMap<String, usize>,
+    /// `toolCallId` → the child that made the call, for a Claude
+    /// `tool_call_update` that arrives without its `_meta` tag.
+    tool_owner: std::collections::HashMap<String, String>,
+    context_used: Option<i64>,
+    context_window: Option<i64>,
+    cost_usd: Option<f64>,
+    stop_reason: String,
+}
+
+impl Accumulator {
+    fn absorb(&mut self, params: &Value) {
+        let update = match params.get("update") {
+            Some(u) => u,
+            None => return,
+        };
+        let kind = update
+            .get("sessionUpdate")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let session_id = params.get("sessionId").and_then(Value::as_str).unwrap_or("");
+        let str_of = |k: &str| update.get(k).and_then(Value::as_str);
+        match kind {
+            "subagent_spawned" => {
+                if let Some(child) = str_of("subagentSessionId") {
+                    let parent = self.owner_key(session_id);
+                    self.spawn(
+                        child,
+                        &parent,
+                        str_of("name").unwrap_or("Agent"),
+                        str_of("task").unwrap_or(""),
+                    );
+                }
+                return;
+            }
+            "subagent_state_update" => {
+                if let (Some(child), Some(state)) = (str_of("subagentSessionId"), str_of("state")) {
+                    self.ensure_child(child, session_id);
+                    self.set_state(child, normalize_state(state));
+                }
+                return;
+            }
+            // ACP draft: `update.sessionId` is the child, the envelope's is
+            // the parent; one notification both announces and updates.
+            "subagent_update" => {
+                if let Some(child) = str_of("sessionId") {
+                    if !self.child_index.contains_key(child) {
+                        let parent = self.owner_key(session_id);
+                        self.spawn(
+                            child,
+                            &parent,
+                            str_of("title").unwrap_or("Agent"),
+                            str_of("description").unwrap_or(""),
+                        );
+                    }
+                    let state = update
+                        .get("state")
+                        .and_then(|s| s.as_str().or_else(|| s.get("state").and_then(Value::as_str)));
+                    if let Some(state) = state {
+                        self.set_state(child, normalize_state(state));
+                    }
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        let tool_id = str_of("toolCallId").unwrap_or("");
+        let target = self.route(session_id, update, tool_id);
+
+        // Claude launches a child with a `Task` tool call; that call and its
+        // resolution are the child's lifecycle, not a tool in anyone's history.
+        if kind == "tool_call" && !tool_id.is_empty() && is_task_tool(update) {
+            let parent = target.unwrap_or_else(|| self.root_session_id.clone());
+            let raw = update.get("rawInput");
+            let name = raw
+                .and_then(|r| r.get("description"))
+                .and_then(Value::as_str)
+                .or(str_of("title"))
+                .unwrap_or("Task");
+            let task = raw
+                .and_then(|r| r.get("prompt"))
+                .and_then(Value::as_str)
+                .unwrap_or(name);
+            self.spawn(tool_id, &parent, name, task);
+            return;
+        }
+        if kind == "tool_call_update" && self.child_index.contains_key(tool_id) {
+            if let Some(st) = str_of("status") {
+                let state = normalize_state(st);
+                if is_terminal(state) {
+                    let text = content_text(update);
+                    let i = self.child_index[tool_id];
+                    if !text.is_empty() {
+                        self.children[i].result = text;
+                    }
+                    self.set_state(tool_id, state);
+                }
+            }
+            return;
+        }
+
+        match target {
+            Some(key) => {
+                let i = self.child_index[&key];
+                if kind == "tool_call" {
+                    if !tool_id.is_empty() {
+                        self.tool_owner.insert(tool_id.to_string(), key.clone());
+                    }
+                    let title = str_of("title").unwrap_or("tool");
+                    push_subagent(&self.children[i], Some(title));
+                }
+                // Child `usage_update`s are dropped: Codex copies the root's
+                // context into them, Claude sends none.
+                self.children[i].t.absorb(kind, update);
+            }
+            None => {
+                report_progress(update);
+                if kind == "usage_update" {
+                    self.absorb_usage(update);
+                } else {
+                    self.main.absorb(kind, update);
+                }
+            }
+        }
+    }
+
+    /// Which child (if any) a frame belongs to. Creates the child when its
+    /// frames arrive before (or without) an announcement, so nothing a child
+    /// says can fall through to the parent.
+    fn route(&mut self, session_id: &str, update: &Value, tool_id: &str) -> Option<String> {
+        if !session_id.is_empty() && session_id != self.root_session_id {
+            self.ensure_child(session_id, &self.root_session_id.clone());
+            return Some(session_id.to_string());
+        }
+        if let Some(p) = parent_tool_use_id(update) {
+            let p = p.to_string();
+            self.ensure_child(&p, &self.root_session_id.clone());
+            return Some(p);
+        }
+        if !tool_id.is_empty() {
+            if let Some(owner) = self.tool_owner.get(tool_id) {
+                return Some(owner.clone());
+            }
+        }
+        None
+    }
+
+    /// The key a notification's envelope `sessionId` stands for: the root
+    /// (normalized to `root_session_id`) or a child.
+    fn owner_key(&self, session_id: &str) -> String {
+        if session_id.is_empty() || !self.child_index.contains_key(session_id) {
+            self.root_session_id.clone()
+        } else {
+            session_id.to_string()
+        }
+    }
+
+    fn ensure_child(&mut self, key: &str, parent: &str) {
+        if !self.child_index.contains_key(key) {
+            let parent = self.owner_key(parent);
+            self.spawn(key, &parent, "Agent", "");
+        }
+    }
+
+    fn spawn(&mut self, key: &str, parent: &str, name: &str, task: &str) {
+        if let Some(&i) = self.child_index.get(key) {
+            // A late announcement for a child whose frames came first.
+            let c = &mut self.children[i];
+            if c.out.task.is_empty() {
+                c.out.name = name.to_string();
+                c.out.task = task.to_string();
+            }
+            return;
+        }
+        let out = ChildOutcome {
+            session_id: key.to_string(),
+            parent_session_id: parent.to_string(),
+            name: name.to_string(),
+            task: task.to_string(),
+            state: "running".into(),
+            ..Default::default()
+        };
+        let spawned = AgentEvent::SubagentSpawned {
+            session_id: out.session_id.clone(),
+            parent_session_id: out.parent_session_id.clone(),
+            name: out.name.clone(),
+            task: out.task.clone(),
+        };
+        let t = self.transcript_of(parent);
+        t.flush_message();
+        t.events.push(spawned);
+        self.child_index.insert(key.to_string(), self.children.len());
+        self.children.push(Child { out, t: Transcript::default(), result: String::new() });
+        push_subagent(self.children.last().expect("just pushed"), None);
+    }
+
+    /// Move a child to `state`. The first terminal state closes the child:
+    /// its final result goes into the parent's transcript as the tool result.
+    fn set_state(&mut self, key: &str, state: &str) {
+        let Some(&i) = self.child_index.get(key) else { return };
+        if is_terminal(&self.children[i].out.state) || self.children[i].out.state == state {
+            return;
+        }
+        let c = &mut self.children[i];
+        c.out.state = state.to_string();
+        push_subagent(c, None);
+        if !is_terminal(state) {
+            return;
+        }
+        c.t.flush_message();
+        let message = if c.result.is_empty() {
+            c.t.last_message().unwrap_or("").to_string()
+        } else {
+            c.result.clone()
+        };
+        c.out.message = message.clone();
+        let ev = AgentEvent::SubagentState {
+            session_id: key.to_string(),
+            state: state.to_string(),
+            message,
+        };
+        let parent = c.out.parent_session_id.clone();
+        let t = self.transcript_of(&parent);
+        t.flush_message();
+        t.events.push(ev);
+    }
+
+    fn transcript_of(&mut self, key: &str) -> &mut Transcript {
+        match self.child_index.get(key) {
+            Some(&i) => &mut self.children[i].t,
+            None => &mut self.main,
+        }
+    }
+
+    /// The child a `session/request_permission` is on behalf of, if any.
+    fn child_for_request(&self, params: &Value) -> Option<String> {
+        let sid = params.get("sessionId").and_then(Value::as_str).unwrap_or("");
+        if !sid.is_empty() && sid != self.root_session_id && self.child_index.contains_key(sid) {
+            return Some(sid.to_string());
+        }
+        let tc = params.get("toolCall");
+        let p = parent_tool_use_id(params).or_else(|| tc.and_then(parent_tool_use_id));
+        if let Some(p) = p.filter(|p| self.child_index.contains_key(*p)) {
+            return Some(p.to_string());
+        }
+        let id = tc.and_then(|t| t.get("toolCallId")).and_then(Value::as_str)?;
+        self.tool_owner.get(id).cloned()
+    }
+
+    /// A child is blocked on a permission answer (`waiting`), or resumed.
+    fn set_waiting(&mut self, key: &str, waiting: bool) {
+        self.set_state(key, if waiting { "waiting" } else { "running" });
+    }
+
+    fn absorb_usage(&mut self, update: &Value) {
+        // Bridge sends `{used, size}` — cumulative context pressure.
+        // Last one in the turn wins.
+        if let Some(used) = update.get("used").and_then(Value::as_i64) {
+            self.context_used = Some(used);
+        }
+        if let Some(size) = update.get("size").and_then(Value::as_i64) {
+            self.context_window = Some(size);
+        }
+        let cost = update.get("cost");
+        if cost.and_then(|c| c.get("currency")).and_then(Value::as_str) == Some("USD") {
+            if let Some(amount) = cost.and_then(|c| c.get("amount")).and_then(Value::as_f64) {
+                self.cost_usd = Some(amount);
+            }
+        }
+        // Live context meter: `used\tsize`, either side may be empty.
+        if self.context_used.is_some() || self.context_window.is_some() {
+            crate::observe_usage(self.context_used, self.context_window);
+            let fmt = |v: Option<i64>| v.map(|n| n.to_string()).unwrap_or_default();
+            crate::emit_progress(
+                "usage",
+                &format!("{}\t{}", fmt(self.context_used), fmt(self.context_window)),
+            );
+        }
+    }
+
     fn finish(mut self) -> TurnOutcome {
-        self.flush_message();
+        // A child the bridge never closed cannot outlive the turn. Innermost
+        // first, so a nested child's result is in its parent before that
+        // parent's own result is taken.
+        let end = if self.stop_reason == "cancelled" { "cancelled" } else { "completed" };
+        for i in (0..self.children.len()).rev() {
+            let key = self.children[i].out.session_id.clone();
+            self.set_state(&key, end);
+        }
+        self.main.flush_message();
         // If the whole message came after the last tool call, `message` is
         // still populated — keep it as the outcome's headline text.
-        let message = if self.message.trim().is_empty() {
-            self.events
-                .iter()
-                .rev()
-                .find_map(|e| match e {
-                    AgentEvent::Message(m) => Some(m.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default()
+        let message = if self.main.message.trim().is_empty() {
+            self.main.last_message().unwrap_or_default().to_string()
         } else {
-            self.message.trim().to_string()
+            self.main.message.trim().to_string()
         };
+        let children = self
+            .children
+            .into_iter()
+            .map(|c| ChildOutcome { events: c.t.events, ..c.out })
+            .collect();
         TurnOutcome {
             message,
-            thoughts: self.thoughts.trim().to_string(),
-            events: self.events,
+            thoughts: self.main.thoughts.trim().to_string(),
+            events: self.main.events,
+            children,
             model: None,
             context_used: self.context_used,
             context_window: self.context_window,
