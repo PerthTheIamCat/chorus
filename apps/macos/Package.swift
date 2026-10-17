@@ -40,5 +40,10 @@ let package = Package(
                 ])
             ]
         ),
+        // `swift test` links the same staticlib: run `cargo build -p chorus-ffi` first.
+        .testTarget(
+            name: "ChorusTests",
+            dependencies: ["Chorus"]
+        ),
     ]
 )

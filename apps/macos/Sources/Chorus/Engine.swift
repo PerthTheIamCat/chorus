@@ -377,6 +377,8 @@ final class Engine: ObservableObject {
 
     struct PermissionAsk: Identifiable {
         let id = UUID()
+        /// Agent name the turn runs on (may carry `@account`), from Rust.
+        let agent: String
         let tool: String
         let kind: String
         let detail: String
@@ -388,10 +390,11 @@ final class Engine: ObservableObject {
     /// Called from the C callback on the engine's background thread. Publishes
     /// the ask to the UI and blocks until `answerPermission` is called.
     fileprivate func askPermissionBlocking(_ json: String) -> Bool {
-        struct Raw: Codable { let tool: String?; let kind: String?; let detail: String? }
+        struct Raw: Codable { let agent: String?; let tool: String?; let kind: String?; let detail: String? }
         let raw = (try? JSONDecoder().decode(Raw.self, from: Data(json.utf8)))
         DispatchQueue.main.async {
             self.pendingAsk = PermissionAsk(
+                agent: raw?.agent ?? self.liveAgent ?? "agent",
                 tool: raw?.tool ?? "action", kind: raw?.kind ?? "", detail: raw?.detail ?? "")
         }
         permGate.wait()
@@ -429,7 +432,13 @@ final class Engine: ObservableObject {
         var tools: [Tool] = []
         var isEmpty: Bool { thoughts.isEmpty && message.isEmpty && tools.isEmpty }
     }
-    @Published var live = LiveTurn()
+    /// Its own observable so a streamed token re-renders the live row only,
+    /// not every view that observes `Engine` (the whole ~4k-line window).
+    let liveStream = LiveStream()
+    var live: LiveTurn {
+        get { liveStream.turn }
+        set { liveStream.turn = newValue }
+    }
     @Published var liveAgent: String? = nil
     /// The finished turn's reasoning. Agents send it but it is not stored in
     /// the ledger, so it lives here until the next turn starts.
@@ -450,16 +459,16 @@ final class Engine: ObservableObject {
 
     private func absorb(_ kind: String, _ text: String) {
         switch kind {
-        case "thought": live.thoughts += text
-        case "message": live.message += text
-        case "tool": live.tools.append(.init(title: text))
+        case "thought": liveStream.turn.thoughts += text
+        case "message": liveStream.turn.message += text
+        case "tool": liveStream.turn.tools.append(.init(title: text))
         case "tool_done":
             let parts = text.split(separator: "\t", maxSplits: 1).map(String.init)
             let state = parts.first ?? "completed"
             let title = parts.count > 1 ? parts[1] : ""
             if let i = live.tools.lastIndex(where: { $0.state == "running" && (title.isEmpty || $0.title == title) })
                 ?? live.tools.lastIndex(where: { $0.state == "running" }) {
-                live.tools[i].state = state
+                liveStream.turn.tools[i].state = state
             }
         case "usage":
             // `used\tsize` from the bridge's usage_update, so the context
@@ -486,20 +495,40 @@ final class Engine: ObservableObject {
         _ = Self.string(from: chorus_cancel())
     }
 
+    /// Matches `MAX_FILE_BYTES` in chorus-ffi's `chorus_import_attachment`.
+    nonisolated static let maxAttachmentBytes = 20 * 1024 * 1024
+
+    /// Size gate that runs before a single byte is read or mapped, so a
+    /// 2 GB video is refused at once instead of after queueing behind a turn.
+    static func attachmentRejection(_ url: URL) -> String? {
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]) else {
+            return "อ่านข้อมูลไฟล์ไม่ได้"
+        }
+        guard values.isRegularFile == true else { return "เลือกได้เฉพาะไฟล์" }
+        guard let size = values.fileSize, size <= maxAttachmentBytes else { return "ไฟล์หนึ่งต้องไม่เกิน 20 MB" }
+        return nil
+    }
+
     /// Copy a selected file into the session immediately. PDF text and image
     /// normalization stay local; the original bytes remain in the session.
     func importFile(_ url: URL, completion: @escaping (DraftAttachment?, String?) -> Void) {
         guard let h = handle else { completion(nil, "เปิดเซสชันก่อนแนบไฟล์"); return }
+        do {
+            let access = url.startAccessingSecurityScopedResource()
+            defer { if access { url.stopAccessingSecurityScopedResource() } }
+            if let reason = Self.attachmentRejection(url) { completion(nil, reason); return }
+        }
         queue.async {
             let access = url.startAccessingSecurityScopedResource()
             defer { if access { url.stopAccessingSecurityScopedResource() } }
             do {
-                let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
-                guard values.isRegularFile == true else { throw ImportError.message("เลือกได้เฉพาะไฟล์") }
-                guard (values.fileSize ?? 0) <= 20 * 1024 * 1024 else {
+                // Bounded read: the file may have grown since the size check.
+                let fh = try FileHandle(forReadingFrom: url)
+                defer { try? fh.close() }
+                let bytes = try fh.read(upToCount: Self.maxAttachmentBytes + 1) ?? Data()
+                guard bytes.count <= Self.maxAttachmentBytes else {
                     throw ImportError.message("ไฟล์หนึ่งต้องไม่เกิน 20 MB")
                 }
-                let bytes = try Data(contentsOf: url, options: .mappedIfSafe)
                 let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
                 let prepared = Self.prepareAttachment(bytes, mime: mime, filename: url.lastPathComponent)
                 let json = Self.callImport(h.raw, name: url.lastPathComponent, mime: mime,
@@ -2345,4 +2374,9 @@ final class Engine: ObservableObject {
               let s = String(data: data, encoding: .utf8) else { return "[]" }
         return s
     }
+}
+
+/// The running turn's streamed state, split off `Engine` (see `liveStream`).
+final class LiveStream: ObservableObject {
+    @Published var turn = Engine.LiveTurn()
 }

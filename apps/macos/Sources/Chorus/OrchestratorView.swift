@@ -200,7 +200,7 @@ struct OrchestratorView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Lead Orchestrator (ตัวคุมงาน)")
                             .font(.system(size: 11, weight: .bold))
-                        Text("ตามหลักการควรเลือกโมเดลที่ฉลาดและมี Reasoning สูงที่สุด (เช่น Claude 3.7 Sonnet / o3-mini) เพื่อทำหน้าที่วิเคราะห์เป้าหมาย แตกงานย่อย (Decomposition) ควบคุมลำดับงาน และสังเคราะห์ข้อสรุปรวม")
+                        Text("ตามหลักการควรเลือกโมเดลที่ฉลาดและมี Reasoning สูงที่สุด ที่มีอยู่ เพื่อทำหน้าที่วิเคราะห์เป้าหมาย แตกงานย่อย (Decomposition) ควบคุมลำดับงาน และสังเคราะห์ข้อสรุปรวม")
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -631,22 +631,7 @@ struct OrchestratorView: View {
     }
 
     private var modelSuggestions: [String] {
-        var list = [
-            "claude-3-7-sonnet-20250219",
-            "gpt-5.1-codex",
-            "gemini-2.5-flash",
-            "gemini-2.5-pro",
-            "o3-mini",
-            "claude-3-5-haiku-20241022"
-        ]
-        for a in engine.agents {
-            for m in a.baseModels {
-                if !list.contains(m.id) {
-                    list.append(m.id)
-                }
-            }
-        }
-        return list
+        engine.knownBaseModels().map(\.id)
     }
 
     private func quickAssignModel(role: Engine.AgentRole, model: String?) {
@@ -1028,7 +1013,7 @@ struct RoleEditorSheet: View {
             // Model preference
             VStack(alignment: .leading, spacing: 4) {
                 Text("โมเดลที่แนะนำ (Model Preference - ไม่บังคับ)").font(.system(size: 10.5, weight: .medium))
-                TextField("เว้นว่างไว้เพื่อใช้ค่าเริ่มต้น หรือระบุ เช่น claude-sonnet-4-6, gpt-5.1-codex", text: $modelPreference)
+                TextField("เว้นว่างไว้เพื่อใช้ค่าเริ่มต้น หรือระบุ model id จาก `chorus models`", text: $modelPreference)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 10.5, design: .monospaced))
             }

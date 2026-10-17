@@ -15,6 +15,10 @@ struct WorkspaceExplorerView: View {
     @State private var fileTree: Engine.FileTreeResult?
     @State private var activeWorktrees: [Engine.WorktreeInfo] = []
     @State private var expandedPaths: Set<String> = []
+    /// Workspace whose top level has already been auto-expanded. Seeding runs
+    /// once per folder, so a refresh (every 15 s, on diff, on activation)
+    /// never re-opens a folder the user collapsed.
+    @State private var seededRoot: String?
     @State private var isLoading = false
 
     var body: some View {
@@ -197,19 +201,26 @@ struct WorkspaceExplorerView: View {
     private func refreshTree() {
         guard !workspace.isEmpty else { return }
         isLoading = true
-        engine.fetchFileTree(cwd: workspace) { tree in
+        let root = workspace
+        engine.fetchFileTree(cwd: root) { tree in
             self.fileTree = tree
             self.isLoading = false
-            // Auto expand top level
-            if let rootNodes = tree?.nodes {
-                for node in rootNodes where node.is_dir {
-                    self.expandedPaths.insert(node.rel_path)
-                }
+            if let rootNodes = tree?.nodes,
+               let seeded = Self.seedExpansion(rootNodes, root: root, seededRoot: self.seededRoot) {
+                self.seededRoot = root
+                self.expandedPaths = seeded
             }
         }
         engine.fetchWorktrees(cwd: workspace) { wts in
             self.activeWorktrees = wts
         }
+    }
+
+    /// Top-level folders open on the first load of a folder, and never again:
+    /// returns `nil` (leave the user's expansion alone) once `root` is seeded.
+    static func seedExpansion(_ nodes: [Engine.FileNode], root: String, seededRoot: String?) -> Set<String>? {
+        guard seededRoot != root else { return nil }
+        return Set(nodes.filter(\.is_dir).map(\.rel_path))
     }
 
     private func filteredNodes(_ nodes: [Engine.FileNode]) -> [Engine.FileNode] {

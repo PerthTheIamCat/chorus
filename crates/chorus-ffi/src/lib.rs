@@ -688,8 +688,19 @@ pub unsafe extern "C" fn chorus_run_turn_with_attachments(
     }
 }
 
+/// The ask handed to the shell. `agent` is the agent this turn runs on — the
+/// one actually asking — so the dialog never names whatever the composer
+/// happens to have selected.
+fn ask_payload(agent: &str, ask: &chorus_cli::session::PermissionAsk) -> String {
+    serde_json::json!({
+        "agent": agent, "tool": ask.tool, "kind": ask.kind, "detail": ask.detail
+    })
+    .to_string()
+}
+
 /// A permission callback: given the ask as JSON
-/// (`{"tool":"...","kind":"...","detail":"..."}`), return non-zero to allow.
+/// (`{"agent":"...","tool":"...","kind":"...","detail":"..."}`), return
+/// non-zero to allow.
 /// Called on the same thread as `chorus_run_turn_interactive` (which the
 /// shell already runs off its main thread) — the shell hops to its UI,
 /// shows a dialog, and blocks here until the user answers.
@@ -718,11 +729,7 @@ pub unsafe extern "C" fn chorus_run_turn_interactive(
 
     let ctx_usize = ctx as usize; // move a Copy value into the closure
     let mut decide = |ask: &chorus_cli::session::PermissionAsk| {
-        let payload = serde_json::json!({
-            "tool": ask.tool, "kind": ask.kind, "detail": ask.detail
-        })
-        .to_string();
-        let c = std::ffi::CString::new(payload).unwrap_or_default();
+        let c = std::ffi::CString::new(ask_payload(agent, ask)).unwrap_or_default();
         let allow = callback(ctx_usize as *mut std::ffi::c_void, c.as_ptr());
         if allow != 0 {
             chorus_cli::session::Permission::Allow
@@ -782,11 +789,7 @@ pub unsafe extern "C" fn chorus_run_turn_interactive_with_attachments(
     };
     let ctx_usize = ctx as usize;
     let mut decide = |ask: &chorus_cli::session::PermissionAsk| {
-        let payload = serde_json::json!({
-            "tool": ask.tool, "kind": ask.kind, "detail": ask.detail
-        })
-        .to_string();
-        let c = CString::new(payload).unwrap_or_default();
+        let c = CString::new(ask_payload(agent, ask)).unwrap_or_default();
         if callback(ctx_usize as *mut std::ffi::c_void, c.as_ptr()) != 0 {
             chorus_cli::session::Permission::Allow
         } else {
@@ -2430,6 +2433,20 @@ pub unsafe extern "C" fn chorus_pairing_revoke_json(device_id: *const c_char) ->
 mod tests {
     use super::*;
     use std::ffi::{CStr, CString};
+
+    #[test]
+    fn permission_ask_names_the_agent_running_the_turn() {
+        let ask = chorus_cli::session::PermissionAsk {
+            tool: "Edit files".into(),
+            kind: "edit".into(),
+            detail: "src/a.rs".into(),
+        };
+        let v: serde_json::Value = serde_json::from_str(&ask_payload("claude@work", &ask)).unwrap();
+        assert_eq!(v["agent"], "claude@work");
+        assert_eq!(v["tool"], "Edit files");
+        assert_eq!(v["kind"], "edit");
+        assert_eq!(v["detail"], "src/a.rs");
+    }
 
     #[test]
     fn ffi_roles_lifecycle() {
