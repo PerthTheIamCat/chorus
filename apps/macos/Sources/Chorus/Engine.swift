@@ -182,6 +182,7 @@ final class Engine: ObservableObject {
     private let ioQueue = DispatchQueue(label: "chorus.io", qos: .userInitiated, attributes: .concurrent)
     private let catalogQueue = DispatchQueue(label: "chorus.catalog", qos: .utility)
     private let routerSetupQueue = DispatchQueue(label: "chorus.routerSetup", qos: .utility)
+    private let monitorQueue = DispatchQueue(label: "chorus.monitor", qos: .utility)
     @Published var catalog: [CatalogIntegration] = []
     @Published var catalogError: String?
     @Published var catalogActionError: String?
@@ -918,6 +919,27 @@ final class Engine: ObservableObject {
     private var modelDownloadTask: URLSessionDownloadTask?
     private var modelDownloadID: UUID?
     var canCancelLocalModelDownload: Bool { modelDownloadTask != nil }
+
+    /// System monitor request (`chorus_monitor_json`; the window builds the
+    /// JSON, Rust decides). Snapshots touch no SQLite, so they run on their
+    /// own queue and never wait behind a turn. Clean-ups that write a store
+    /// or the shadow repo go through `queue` with the handle, so they cannot
+    /// race the engine's connection and the open session's checkpoint base
+    /// is protected from a prune.
+    func monitor(_ request: String, onEngineQueue: Bool = false, completion: @escaping (String) -> Void) {
+        if onEngineQueue {
+            let h = handle
+            queue.async {
+                let s = Self.string(from: chorus_monitor_json(h?.raw, request))
+                DispatchQueue.main.async { completion(s) }
+            }
+        } else {
+            monitorQueue.async {
+                let s = Self.string(from: chorus_monitor_json(nil, request))
+                DispatchQueue.main.async { completion(s) }
+            }
+        }
+    }
 
     func loadLocalModels() {
         routerSetupQueue.async { [weak self] in

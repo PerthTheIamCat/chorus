@@ -138,6 +138,11 @@ char *chorus_cancel(void);
 /* Kill the running agent and its whole process tree. Call from applicationWillTerminate. */
 void chorus_shutdown(void);
 
+/* System monitor: typed JSON request (op: snapshot|stop|wait_exit|disk|
+ * preview|apply) → {"ok":true,"result":...}. `e` may be NULL; when given,
+ * its checkpoint base is protected from checkpoint pruning. Blocking. */
+char *chorus_monitor_json(const ChorusEngine *e, const char *request);
+
 /* Skills visible in a workspace (chorus/project/user). {"ok":true,"skills":[{name,description,path,source}]} */
 char *chorus_list_skills(const char *cwd);
 

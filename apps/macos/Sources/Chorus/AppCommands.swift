@@ -29,6 +29,7 @@ enum AppCommand: Equatable {
     case nextEffort
     case sendReview
     case openInEditor
+    case systemMonitor
 
     /// Every command, for the uniqueness test and anyone listing shortcuts.
     static var all: [AppCommand] {
@@ -36,7 +37,7 @@ enum AppCommand: Equatable {
          .toggleSidebar, .toggleExplorer, .toggleInspector]
             + ContentView.RightTab.allCases.indices.map { .inspectorTab($0) }
             + [.toggleOrchestrator, .toggleLivePreview, .toggleTerminal, .toggleFocusMode,
-               .send, .stop, .chooseModel, .nextEffort, .sendReview, .openInEditor]
+               .send, .stop, .chooseModel, .nextEffort, .sendReview, .openInEditor, .systemMonitor]
     }
 
     /// The one key combo for each command. The menu reads this table, so a
@@ -63,6 +64,9 @@ enum AppCommand: Equatable {
         case .nextEffort: KeyboardShortcut("e", modifiers: [.command, .shift])
         case .sendReview: KeyboardShortcut(.return, modifiers: [.command, .shift])
         case .openInEditor: KeyboardShortcut("e", modifiers: [.command, .option])
+        // Placed above Minimize in the Window menu so it wins over the
+        // system's ⌥⌘M "Minimize All" alternate.
+        case .systemMonitor: KeyboardShortcut("m", modifiers: [.command, .option])
         }
     }
 }
@@ -88,8 +92,15 @@ final class AppCommandCenter: ObservableObject {
 
 struct ChorusCommands: Commands {
     @ObservedObject var center: AppCommandCenter
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
+        CommandGroup(before: .windowSize) {
+            Button("System Monitor") { openWindow(id: SystemMonitorView.windowID) }
+                .keyboardShortcut(AppCommand.systemMonitor.shortcut)
+            Divider()
+        }
+
         CommandGroup(replacing: .appSettings) {
             Button("Settings…") { center.send(.settings) }
                 .keyboardShortcut(AppCommand.settings.shortcut)

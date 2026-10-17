@@ -14,6 +14,7 @@
 pub mod sandbox;
 pub mod codex;
 pub mod env;
+pub mod registry;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
@@ -139,6 +140,12 @@ pub fn shutdown() {
     }
 }
 
+/// True while an agent is answering a turn. The system monitor refuses
+/// `VACUUM` then: it would wait on, or stall, the turn's own writes.
+pub fn turn_running() -> bool {
+    ACTIVE_PID.load(std::sync::atomic::Ordering::SeqCst) != 0
+}
+
 /// True if the last turn ended because [`cancel_active`] killed it.
 pub fn was_cancelled() -> bool {
     CANCELLED.load(std::sync::atomic::Ordering::SeqCst)
@@ -218,6 +225,7 @@ impl Agent {
         }
         let mut child = command.spawn().with_context(|| format!("spawn {cmd:?}"))?;
         ACTIVE_PID.store(child.id(), std::sync::atomic::Ordering::SeqCst);
+        registry::register(child.id(), registry::label_for(cmd), true);
 
         let stdout = child.stdout.take().expect("piped");
         let stderr = child.stderr.take().expect("piped");
@@ -440,6 +448,7 @@ impl Drop for Agent {
         kill_group(self.child.id(), 9);
         let _ = self.child.kill();
         let _ = self.child.wait();
+        registry::unregister(self.child.id());
     }
 }
 
