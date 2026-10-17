@@ -1300,7 +1300,9 @@ impl Session {
         );
         let mut servers: Vec<serde_json::Value> = composed.servers.into_iter().map(|s| s.entry).collect();
         if let Some(m) = &self.mcp {
-            servers.push(m.mcp_server_entry());
+            // Per-agent bearer secret: scopes the caller to this session and
+            // attributes its control-surface writes to this agent.
+            servers.push(m.mcp_server_entry(agent_name)?);
         }
         let mcp_servers = serde_json::Value::Array(servers);
         // Confine the agent's writes with the OS before the turn, not just

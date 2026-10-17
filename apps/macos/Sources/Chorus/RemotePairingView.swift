@@ -15,6 +15,14 @@ private struct PairingSessionData: Decodable {
 private struct PairingInitiateResponse: Decodable {
     let ok: Bool
     let session: PairingSessionData?
+    /// Built in Rust from the port the daemon actually bound.
+    let endpoint: String?
+    let qr_payload: String?
+    let error: String?
+}
+
+private struct PairingRevokeResponse: Decodable {
+    let ok: Bool
     let error: String?
 }
 
@@ -43,6 +51,10 @@ struct RemotePairingView: View {
     @State private var pairedDevices: [PairedDeviceItem] = []
     @State private var isLoading = true
     @State private var copied = false
+    @State private var pairingError: String? = nil
+    /// Set when the device list could not be read — never shown as "no devices".
+    @State private var devicesError: String? = nil
+    @State private var revokeError: String? = nil
 
     struct PairedDeviceItem: Identifiable {
         let id: String
@@ -84,7 +96,12 @@ struct RemotePairingView: View {
                 VStack(spacing: 24) {
                     // QR Code Card
                     VStack(spacing: 16) {
-                        if let qr = qrImage {
+                        if let e = pairingError {
+                            Label(e, systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                                .frame(width: 200, height: 200)
+                        } else if let qr = qrImage {
                             Image(nsImage: qr)
                                 .interpolation(.none)
                                 .resizable()
@@ -142,7 +159,20 @@ struct RemotePairingView: View {
                         Text("อุปกรณ์ที่จับคู่แล้ว (\(pairedDevices.count))")
                             .font(.headline)
 
-                        if pairedDevices.isEmpty {
+                        if let e = revokeError {
+                            Label(e, systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+
+                        if let e = devicesError {
+                            Label("โหลดรายการอุปกรณ์ไม่สำเร็จ — อุปกรณ์ที่จับคู่ไว้อาจยังใช้งานได้: \(e)", systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                                .padding()
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.red.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+                        } else if pairedDevices.isEmpty {
                             HStack {
                                 Image(systemName: "shield.slash")
                                     .foregroundStyle(.secondary)
@@ -202,22 +232,24 @@ struct RemotePairingView: View {
             }
             defer { chorus_string_free(ptr) }
             let jsonString = String(cString: ptr)
-            if let data = jsonString.data(using: .utf8),
-               let resp = try? JSONDecoder().decode(PairingInitiateResponse.self, from: data),
-               resp.ok, let session = resp.session {
-                let targetEndpoint = session.tailscale_ip != nil ? "http://\(session.tailscale_ip!):24678" : session.endpoint_url
-                let payload = "chorus://pair?token=\(session.pairing_token)&endpoint=\(targetEndpoint)"
+            let resp = jsonString.data(using: .utf8)
+                .flatMap { try? JSONDecoder().decode(PairingInitiateResponse.self, from: $0) }
+            if let resp, resp.ok, let session = resp.session,
+               let endpoint = resp.endpoint, let payload = resp.qr_payload {
                 let qr = generateQRCode(from: payload)
                 DispatchQueue.main.async {
                     self.pairingToken = session.pairing_token
-                    self.daemonEndpoint = targetEndpoint
+                    self.daemonEndpoint = endpoint
                     self.qrImage = qr
+                    self.pairingError = nil
                     self.isLoading = false
                     self.fetchDevices()
                 }
             } else {
                 DispatchQueue.main.async {
+                    self.pairingError = resp?.error ?? "สร้างรหัสจับคู่ไม่สำเร็จ"
                     self.isLoading = false
+                    self.fetchDevices()
                 }
             }
         }
@@ -228,9 +260,15 @@ struct RemotePairingView: View {
             guard let ptr = chorus_pairing_devices_json() else { return }
             defer { chorus_string_free(ptr) }
             let jsonString = String(cString: ptr)
-            if let data = jsonString.data(using: .utf8),
-               let resp = try? JSONDecoder().decode(PairingDevicesResponse.self, from: data),
-               resp.ok, let devs = resp.devices {
+            let resp = jsonString.data(using: .utf8)
+                .flatMap { try? JSONDecoder().decode(PairingDevicesResponse.self, from: $0) }
+            guard let resp, resp.ok, let devs = resp.devices else {
+                DispatchQueue.main.async {
+                    self.devicesError = resp?.error ?? "อ่านคำตอบจาก daemon ไม่ได้"
+                }
+                return
+            }
+            do {
                 let items = devs.map { d in
                     let pairedDate = Date(timeIntervalSince1970: TimeInterval(d.paired_at))
                     let lastSeenDate = Date(timeIntervalSince1970: TimeInterval(d.last_seen_at))
@@ -244,6 +282,7 @@ struct RemotePairingView: View {
                     )
                 }
                 DispatchQueue.main.async {
+                    self.devicesError = nil
                     self.pairedDevices = items
                 }
             }
@@ -269,11 +308,20 @@ struct RemotePairingView: View {
 
     private func revokeDevice(id: String) {
         DispatchQueue.global(qos: .userInitiated).async {
+            var resp: PairingRevokeResponse? = nil
             if let ptr = chorus_pairing_revoke_json(id) {
-                chorus_string_free(ptr)
+                defer { chorus_string_free(ptr) }
+                resp = String(cString: ptr).data(using: .utf8)
+                    .flatMap { try? JSONDecoder().decode(PairingRevokeResponse.self, from: $0) }
             }
             DispatchQueue.main.async {
-                self.pairedDevices.removeAll { $0.id == id }
+                // Only drop the row once the daemon confirmed the token is gone.
+                if resp?.ok == true {
+                    self.revokeError = nil
+                    self.pairedDevices.removeAll { $0.id == id }
+                } else {
+                    self.revokeError = "ยกเลิกการเชื่อมต่อไม่สำเร็จ — อุปกรณ์ยังใช้งานได้: \(resp?.error ?? "ไม่ทราบสาเหตุ")"
+                }
             }
         }
     }

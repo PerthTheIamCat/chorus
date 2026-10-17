@@ -2151,16 +2151,10 @@ pub unsafe extern "C" fn chorus_delete_role(
     let Some(cwd) = borrow(cwd) else { return err("cwd must be valid UTF-8"); };
     let Some(name) = borrow(name) else { return err("name must be valid UTF-8"); };
 
-    let file_path = Path::new(cwd)
-        .join(chorus_core::roles::AGENTS_DIR)
-        .join(format!("{name}.md"));
-
-    if file_path.exists() {
-        if let Err(e) = std::fs::remove_file(&file_path) {
-            return err(format!("failed to delete role file: {e}"));
-        }
+    match chorus_core::roles::delete_role(Path::new(cwd), name) {
+        Ok(_) => out(serde_json::json!({"ok": true}).to_string()),
+        Err(e) => err(format!("failed to delete role: {e}")),
     }
-    out(serde_json::json!({"ok": true}).to_string())
 }
 
 /// Synthesize an agent role via AI heuristic / generator.
@@ -2279,13 +2273,54 @@ pub unsafe extern "C" fn chorus_repo_map_generate_json(
     }
 }
 
-/// Verify workspace via fast linter/compiler checks.
+/// Confine project code (checkers, hooks) to the same Seatbelt profile a
+/// turn that may write gets. `Err` means no sandbox, and the caller refuses.
+fn confine_like_turn(argv: &[String], cwd: &Path) -> Result<Vec<String>, String> {
+    chorus_cli::sandbox::wrap(argv, cwd, chorus_cli::sandbox::Profile::Workspace)
+}
+
+fn verify_workspace_with(
+    store: &chorus_core::trust::TrustStore,
+    ws: &Path,
+) -> Result<serde_json::Value, String> {
+    let consent = store.consent(ws, &confine_like_turn).map_err(|e| e.to_string())?;
+    let res = chorus_core::verify_loop::VerifyLoop::verify_workspace(&consent).map_err(|e| e.to_string())?;
+    serde_json::to_value(res).map_err(|e| e.to_string())
+}
+
+/// Whether the user trusted this project to run its own code (checks, hooks).
+/// Returns `{"ok":true,"trusted":bool}`.
+///
+/// # Safety
+/// `ws` must be null or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_project_trusted_json(ws: *const c_char) -> *mut c_char {
+    let Some(ws) = borrow(ws) else { return err("ws must be valid UTF-8"); };
+    let trusted = chorus_core::trust::TrustStore::default_location().is_trusted(Path::new(ws));
+    out(serde_json::json!({"ok": true, "trusted": trusted}).to_string())
+}
+
+/// Record the user's "trust this project" decision. Only the UI calls this;
+/// no agent-facing tool can, and the store is outside the sandbox's writes.
+///
+/// # Safety
+/// `ws` must be null or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_project_trusted(ws: *const c_char, trusted: bool) -> *mut c_char {
+    let Some(ws) = borrow(ws) else { return err("ws must be valid UTF-8"); };
+    match chorus_core::trust::TrustStore::default_location().set_trusted(Path::new(ws), trusted) {
+        Ok(()) => out(serde_json::json!({"ok": true, "trusted": trusted}).to_string()),
+        Err(e) => err(e.to_string()),
+    }
+}
+
+/// Verify workspace via fast linter/compiler checks. Runs only for a project
+/// the user trusted, and only inside the turn's Seatbelt profile.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_verify_workspace_json(ws: *const c_char) -> *mut c_char {
     let Some(ws_path) = borrow(ws) else { return err("ws must be valid UTF-8"); };
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
-        let res = chorus_core::verify_loop::VerifyLoop::verify_workspace(Path::new(ws_path)).map_err(|e| e.to_string())?;
-        Ok(serde_json::to_value(res).map_err(|e| e.to_string())?)
+        verify_workspace_with(&chorus_core::trust::TrustStore::default_location(), Path::new(ws_path))
     }));
 
     match result {
@@ -2308,113 +2343,81 @@ pub unsafe extern "C" fn chorus_structural_diff_json(
     out(serde_json::json!({"ok": true, "analysis": analysis}).to_string())
 }
 
-static LOCAL_PAIRING: std::sync::OnceLock<chorus_daemon::pairing::PairingManager> = std::sync::OnceLock::new();
-
-fn get_local_pairing() -> &'static chorus_daemon::pairing::PairingManager {
-    LOCAL_PAIRING.get_or_init(|| {
-        let endpoint = format!("http://{}", chorus_daemon::config::DEFAULT_HTTP_ADDR);
-        chorus_daemon::pairing::PairingManager::new().with_endpoint(Some(endpoint))
-    })
+fn daemon_socket() -> std::path::PathBuf {
+    chorus_daemon::config::default_chorus_dir().join(chorus_daemon::config::DEFAULT_SOCKET_NAME)
 }
 
-/// Initiate a pairing session. First queries the running daemon over the Unix domain socket;
-/// falls back to local in-process pairing manager if daemon is offline.
+// Pairing state lives in the daemon, which is what serves paired phones.
+// There is deliberately no in-process fallback: an empty local manager made a
+// failed request look like "no devices" or a successful revoke while the
+// device's token stayed valid on the daemon.
+fn daemon_for_pairing(sock: &Path) -> Result<chorus_daemon::client::DaemonClient, String> {
+    if !sock.exists() {
+        return Err("Chorus daemon is not running — pairing needs the daemon".into());
+    }
+    Ok(chorus_daemon::client::DaemonClient::from_uds(sock))
+}
+
+fn pairing_initiate_at(sock: &Path) -> Result<serde_json::Value, String> {
+    let raw = daemon_for_pairing(sock)?
+        .initiate_pairing()
+        .map_err(|e| format!("daemon pairing request failed: {e}"))?;
+    let session: chorus_daemon::pairing::PairingSession =
+        serde_json::from_value(raw).map_err(|e| format!("daemon returned a bad pairing session: {e}"))?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "endpoint": session.advertised_endpoint(),
+        "qr_payload": session.qr_payload(),
+        "session": session,
+    }))
+}
+
+fn pairing_devices_at(sock: &Path) -> Result<serde_json::Value, String> {
+    let devices = daemon_for_pairing(sock)?
+        .list_paired_devices()
+        .map_err(|e| format!("could not list paired devices: {e}"))?;
+    Ok(serde_json::json!({"ok": true, "devices": devices}))
+}
+
+fn pairing_revoke_at(sock: &Path, id: &str) -> Result<serde_json::Value, String> {
+    let revoked = daemon_for_pairing(sock)?
+        .revoke_paired_device(id)
+        .map_err(|e| format!("revoke failed, the device may still be paired: {e}"))?;
+    if revoked {
+        Ok(serde_json::json!({"ok": true}))
+    } else {
+        Err(format!("daemon has no paired device {id}"))
+    }
+}
+
+fn pairing_result(r: std::thread::Result<Result<serde_json::Value, String>>, what: &str) -> *mut c_char {
+    match r {
+        Ok(Ok(val)) => out(val.to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err(format!("panic in pairing {what}")),
+    }
+}
+
+/// Initiate a pairing session on the running daemon. Returns the session plus
+/// `endpoint`/`qr_payload` built from the port the daemon actually bound.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_pairing_initiate_json() -> *mut c_char {
-    let result = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
-        let sock_path = chorus_daemon::config::default_chorus_dir()
-            .join(chorus_daemon::config::DEFAULT_SOCKET_NAME);
-        if sock_path.exists() {
-            let client = chorus_daemon::client::DaemonClient::from_uds(&sock_path);
-            if let Ok(session) = client.initiate_pairing() {
-                return Ok(serde_json::json!({
-                    "ok": true,
-                    "session": session,
-                }));
-            }
-        }
-        let mgr = get_local_pairing();
-        let session = mgr.initiate_host_session().map_err(|e: chorus_daemon::DaemonError| e.to_string())?;
-        Ok(serde_json::json!({
-            "ok": true,
-            "session": session,
-        }))
-    }));
-    match result {
-        Ok(Ok(val)) => out(val.to_string()),
-        Ok(Err(e)) => err(e),
-        Err(_) => err("panic in pairing initiate"),
-    }
+    pairing_result(catch_unwind(|| pairing_initiate_at(&daemon_socket())), "initiate")
 }
 
-/// List paired devices. First queries daemon over UDS, falls back to local in-process pairing manager.
+/// List paired devices from the daemon. Any failure is an error, never `[]`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_pairing_devices_json() -> *mut c_char {
-    let result = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
-        let sock_path = chorus_daemon::config::default_chorus_dir()
-            .join(chorus_daemon::config::DEFAULT_SOCKET_NAME);
-        if sock_path.exists() {
-            let client = chorus_daemon::client::DaemonClient::from_uds(&sock_path);
-            if let Ok(devices) = client.list_paired_devices() {
-                return Ok(serde_json::json!({
-                    "ok": true,
-                    "devices": devices,
-                }));
-            }
-        }
-        let mgr = get_local_pairing();
-        let devs: Vec<_> = mgr
-            .list_devices()
-            .iter()
-            .map(|dev| {
-                serde_json::json!({
-                    "device_id": dev.device_id,
-                    "device_name": dev.device_name,
-                    "paired_at": dev.paired_at,
-                    "last_seen_at": dev.last_seen_at,
-                })
-            })
-            .collect();
-        Ok(serde_json::json!({
-            "ok": true,
-            "devices": devs,
-        }))
-    }));
-    match result {
-        Ok(Ok(val)) => out(val.to_string()),
-        Ok(Err(e)) => err(e),
-        Err(_) => err("panic in pairing devices"),
-    }
+    pairing_result(catch_unwind(|| pairing_devices_at(&daemon_socket())), "devices")
 }
 
-/// Revoke a paired device by ID.
+/// Revoke a paired device on the daemon. `ok:true` only when the daemon confirmed.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_pairing_revoke_json(device_id: *const c_char) -> *mut c_char {
     let Some(id) = borrow(device_id) else {
         return err("device_id must be valid UTF-8");
     };
-    let result = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
-        let sock_path = chorus_daemon::config::default_chorus_dir()
-            .join(chorus_daemon::config::DEFAULT_SOCKET_NAME);
-        if sock_path.exists() {
-            let client = chorus_daemon::client::DaemonClient::from_uds(&sock_path);
-            if let Ok(ok) = client.revoke_paired_device(id) {
-                return Ok(serde_json::json!({
-                    "ok": ok,
-                }));
-            }
-        }
-        let mgr = get_local_pairing();
-        let ok = mgr.revoke_device(id);
-        Ok(serde_json::json!({
-            "ok": ok,
-        }))
-    }));
-    match result {
-        Ok(Ok(val)) => out(val.to_string()),
-        Ok(Err(e)) => err(e),
-        Err(_) => err("panic in pairing revoke"),
-    }
+    pairing_result(catch_unwind(|| pairing_revoke_at(&daemon_socket(), id)), "revoke")
 }
 
 #[cfg(test)]
@@ -2474,6 +2477,69 @@ mod tests {
     }
 
     #[test]
+    fn ffi_delete_role_refuses_traversal_names() {
+        let temp = std::env::temp_dir().join(format!("chorus-ffi-role-{}", std::process::id()));
+        let ws = temp.join("a").join("ws");
+        std::fs::create_dir_all(ws.join(chorus_core::roles::AGENTS_DIR)).unwrap();
+        let victim = temp.join("victim.md");
+        std::fs::write(&victim, "keep").unwrap();
+        let cwd = CString::new(ws.to_str().unwrap()).unwrap();
+        for name in ["../../../../victim", victim.with_extension("").to_str().unwrap()] {
+            let n = CString::new(name).unwrap();
+            let ptr = unsafe { chorus_delete_role(cwd.as_ptr(), n.as_ptr()) };
+            let v: serde_json::Value =
+                serde_json::from_str(unsafe { CStr::from_ptr(ptr).to_str().unwrap() }).unwrap();
+            unsafe { chorus_string_free(ptr) };
+            assert_eq!(v["ok"], false, "{name}: {v}");
+        }
+        assert!(victim.exists());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// P1 regression: a hostile repo's `build.rs` ran as the user, unsandboxed,
+    /// when a turn ended. Untrusted: nothing runs. Trusted: it runs under
+    /// Seatbelt, so a write outside the workspace is denied.
+    #[test]
+    fn ffi_verify_needs_trust_and_runs_build_rs_under_seatbelt() {
+        let base = std::env::temp_dir().join(format!("chorus-ffi-verify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let ws = base.join("ws");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        // Outside the workspace and outside every sandbox allow-list (not /tmp).
+        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
+        let escaped = home.join(format!(".chorus-verify-escape-{}", std::process::id()));
+        let _ = std::fs::remove_file(&escaped);
+        std::fs::write(
+            ws.join("Cargo.toml"),
+            "[package]\nname = \"hostile\"\nversion = \"0.0.0\"\nedition = \"2021\"\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join("src/lib.rs"), "").unwrap();
+        std::fs::write(
+            ws.join("build.rs"),
+            format!(
+                "fn main() {{ let _ = std::fs::write({:?}, \"x\"); std::fs::write(\"ran\", \"x\").unwrap(); }}",
+                escaped
+            ),
+        )
+        .unwrap();
+        let store = chorus_core::trust::TrustStore::at(base.join("trusted.json"));
+
+        let refused = verify_workspace_with(&store, &ws);
+        assert!(refused.unwrap_err().contains("not trusted"));
+        assert!(!ws.join("ran").exists() && !ws.join("target").exists());
+
+        store.set_trusted(&ws, true).unwrap();
+        if cfg!(target_os = "macos") && chorus_core::trust::which("cargo").is_some() {
+            let _ = verify_workspace_with(&store, &ws);
+            assert!(ws.join("ran").exists(), "build.rs should run once trusted");
+            assert!(!escaped.exists(), "write outside workspace must be denied by Seatbelt");
+        }
+        let _ = std::fs::remove_file(&escaped);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn ffi_usage_report_antigravity() {
         let ptr = chorus_usage_report();
         assert!(!ptr.is_null());
@@ -2484,10 +2550,10 @@ mod tests {
         let anti = accounts.iter().find(|a| a["agent"] == "antigravity");
         assert!(anti.is_some());
         let anti_obj = anti.unwrap();
-        println!("FFI Antigravity account JSON: {}", anti_obj);
-        assert!(anti_obj["rate_limits"].is_object());
-        assert!(anti_obj["rate_limits"]["secondary"].is_object());
-        assert!(anti_obj["rate_limits"]["groups"].is_array());
+        // Quota is unknown (null) unless a statusline bridge file exists;
+        // when present it has the usual shape.
+        let rl = &anti_obj["rate_limits"];
+        assert!(rl.is_null() || rl.is_object(), "{anti_obj}");
         unsafe { chorus_string_free(ptr) };
     }
 
@@ -2547,35 +2613,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
+    /// Serve one canned HTTP response per connection on a fresh Unix socket.
+    fn fake_daemon(tag: &str, resp: &'static str, conns: usize) -> std::path::PathBuf {
+        use std::io::{Read, Write};
+        let dir = std::env::temp_dir().join(format!("cf-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("d.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..conns {
+                let Ok((mut s, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        sock
+    }
+
+    /// P2-2: a failed daemon request used to fall back to an empty in-process
+    /// manager — the device list said "none" and revoke looked done while the
+    /// token stayed valid.
     #[test]
-    fn ffi_pairing_lifecycle() {
-        // 1. Initiate pairing
-        let init_ptr = unsafe { chorus_pairing_initiate_json() };
-        assert!(!init_ptr.is_null());
-        let init_str = unsafe { CStr::from_ptr(init_ptr).to_str().unwrap() };
-        let init_json: serde_json::Value = serde_json::from_str(init_str).unwrap();
-        assert!(init_json["ok"].as_bool().unwrap(), "pairing initiate failed: {init_str}");
-        let session = &init_json["session"];
-        assert!(!session["pairing_token"].as_str().unwrap().is_empty());
-        assert!(!session["endpoint_url"].as_str().unwrap().is_empty());
-        unsafe { chorus_string_free(init_ptr) };
+    fn ffi_pairing_fails_closed_when_daemon_errors() {
+        let missing = std::env::temp_dir().join("chorus-no-such-daemon.sock");
+        assert!(pairing_devices_at(&missing).is_err());
+        assert!(pairing_revoke_at(&missing, "dev").is_err());
+        assert!(pairing_initiate_at(&missing).is_err());
 
-        // 2. List devices
-        let dev_ptr = unsafe { chorus_pairing_devices_json() };
-        assert!(!dev_ptr.is_null());
-        let dev_str = unsafe { CStr::from_ptr(dev_ptr).to_str().unwrap() };
-        let dev_json: serde_json::Value = serde_json::from_str(dev_str).unwrap();
-        assert!(dev_json["ok"].as_bool().unwrap());
-        unsafe { chorus_string_free(dev_ptr) };
+        let sock = fake_daemon("500", "HTTP/1.1 500 Internal\r\nContent-Length: 0\r\n\r\n", 3);
+        assert!(pairing_devices_at(&sock).is_err(), "devices must not report []");
+        assert!(pairing_revoke_at(&sock, "dev").is_err(), "revoke must not look done");
+        assert!(pairing_initiate_at(&sock).is_err());
 
-        // 3. Revoke nonexistent device returns false
-        let fake_id = CString::new("fake-device-123").unwrap();
-        let rev_ptr = unsafe { chorus_pairing_revoke_json(fake_id.as_ptr()) };
-        assert!(!rev_ptr.is_null());
-        let rev_str = unsafe { CStr::from_ptr(rev_ptr).to_str().unwrap() };
-        let rev_json: serde_json::Value = serde_json::from_str(rev_str).unwrap();
-        assert!(!rev_json["ok"].as_bool().unwrap());
-        unsafe { chorus_string_free(rev_ptr) };
+        let sock = fake_daemon("nf", "HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n{\"ok\":false}", 1);
+        assert!(pairing_revoke_at(&sock, "dev").is_err(), "unconfirmed revoke is not success");
+
+        let sock = fake_daemon("ok", "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"ok\":true}", 1);
+        assert_eq!(pairing_revoke_at(&sock, "dev").unwrap()["ok"], true);
+    }
+
+    /// P3-3: the QR carries the daemon's bound port, computed in Rust.
+    #[test]
+    fn ffi_pairing_qr_uses_daemon_bound_port() {
+        let body = r#"{"daemon_id":"d","machine_name":"m","pairing_token":"tok","endpoint_url":"http://0.0.0.0:51234","tailscale_ip":"100.64.0.7","created_at":0,"expires_at":300}"#;
+        let resp: &'static str = Box::leak(
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len()).into_boxed_str(),
+        );
+        let sock = fake_daemon("qr", resp, 1);
+        let v = pairing_initiate_at(&sock).unwrap();
+        assert_eq!(v["endpoint"], "http://100.64.0.7:51234");
+        assert_eq!(v["qr_payload"], "chorus://pair?token=tok&endpoint=http://100.64.0.7:51234");
     }
 }
 

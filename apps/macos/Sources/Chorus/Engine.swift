@@ -2267,6 +2267,25 @@ final class Engine: ObservableObject {
         }
     }
 
+    /// "Trust this project": the Rust core runs checks and hooks only when on.
+    @Published public var projectTrusted: Bool = false
+
+    private struct TrustResponse: Codable { let ok: Bool; let trusted: Bool? }
+
+    func loadProjectTrust(ws: String) {
+        guard !ws.isEmpty else { projectTrusted = false; return }
+        let json = ws.withCString { Self.string(from: chorus_project_trusted_json($0)) }
+        projectTrusted = Self.decode(TrustResponse.self, json)?.trusted ?? false
+    }
+
+    func setProjectTrusted(ws: String, _ trusted: Bool) {
+        guard !ws.isEmpty else { return }
+        let json = ws.withCString { Self.string(from: chorus_set_project_trusted($0, trusted)) }
+        let res = Self.decode(TrustResponse.self, json)
+        projectTrusted = res?.ok == true ? (res?.trusted ?? false) : false
+        if !projectTrusted { lastVerification = nil }
+    }
+
     func verifyWorkspace(workspace: String, completion: @escaping (VerificationResult?, String?) -> Void) {
         verifyWorkspace(ws: workspace) { data, err in
             completion(data, err)

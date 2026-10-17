@@ -82,8 +82,14 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key>       <string>APPL</string>
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>
     <key>CFBundleVersion</key>           <string>${VERSION}</string>
-    <key>LSMinimumSystemVersion</key>    <string>13.0</string>
+    <key>LSMinimumSystemVersion</key>    <string>14.0</string>
     <key>NSHighResolutionCapable</key>   <true/>
+    <!-- Voice dictation. Without these TCC kills the app on first use.
+         Recognition is on-device only (requiresOnDeviceRecognition). -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Chorus ใช้ไมโครโฟนเพื่อถอดเสียงพูดเป็นข้อความในช่องพิมพ์ เสียงประมวลผลบนเครื่องนี้เท่านั้น</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Chorus ถอดเสียงพูดเป็นข้อความบนเครื่องนี้ ไม่ส่งเสียงออกไปที่เซิร์ฟเวอร์</string>
     <!-- Chorus spawns agent CLIs (claude, codex) as child processes and reads
          the user's repo. Both die under the App Sandbox, so it is off until
          the Seatbelt profile in the design doc is actually written. -->

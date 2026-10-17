@@ -34,7 +34,9 @@ pub const CLAUDE_BRIDGE_LEGACY: &[&str] = &["npx", "-y", "@zed-industries/claude
 
 fn find_binary(name: &str) -> Option<PathBuf> {
     if let Some(path_var) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path_var) {
+        // Relative PATH entries (`.`, `node_modules/.bin`) resolve against the
+        // cwd, which may be an untrusted repo.
+        for dir in std::env::split_paths(&path_var).filter(|d| d.is_absolute()) {
             let candidate = dir.join(name);
             if candidate.is_file() {
                 return Some(candidate);
@@ -102,19 +104,9 @@ pub fn bridge_for(agent_name: &str) -> Vec<String> {
                 }
             }
         }
-        for rel in [
-            "target/debug/antigravity-acp",
-            "target/release/antigravity-acp",
-            "../../target/debug/antigravity-acp",
-            "../../target/release/antigravity-acp",
-        ] {
-            let target_candidate = std::path::Path::new(rel);
-            if target_candidate.is_file() {
-                if let Ok(p) = target_candidate.canonicalize() {
-                    return vec![p.to_string_lossy().to_string()];
-                }
-            }
-        }
+        // No cwd-relative `target/*/antigravity-acp` fallback: the process
+        // cwd may be a cloned repo, and its committed binary would run as the
+        // bridge. Dev builds set CHORUS_ANTIGRAVITY_BRIDGE or install it.
     } else if n.contains("codex") {
         if let Some(p) = find_binary("codex-acp") {
             return vec![p.to_string_lossy().to_string()];

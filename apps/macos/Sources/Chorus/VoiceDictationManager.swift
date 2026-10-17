@@ -37,6 +37,13 @@ public final class VoiceDictationManager: ObservableObject {
             self.errorMessage = "Speech Recognizer ไม่พร้อมใช้งานสำหรับภาษา \(language)"
             return
         }
+        // Audio never leaves the Mac ("zero external telemetry"): without an
+        // on-device model for this language, dictation is unavailable rather
+        // than silently falling back to Apple's servers.
+        guard speechRecognizer.supportsOnDeviceRecognition else {
+            self.errorMessage = "ภาษา \(language) ยังไม่มีโมเดลถอดเสียงบนเครื่อง — ดาวน์โหลดได้ที่ System Settings › Keyboard › Dictation"
+            return
+        }
 
         SFSpeechRecognizer.requestAuthorization { [weak self] authStatus in
             DispatchQueue.main.async {
@@ -64,6 +71,7 @@ public final class VoiceDictationManager: ObservableObject {
         recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
         guard let recognitionRequest else { return }
         recognitionRequest.shouldReportPartialResults = true
+        recognitionRequest.requiresOnDeviceRecognition = true
 
         recognitionTask = speechRecognizer?.recognitionTask(with: recognitionRequest) { [weak self] result, error in
             guard let self else { return }

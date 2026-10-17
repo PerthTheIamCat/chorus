@@ -12,6 +12,11 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Largest response body the client will buffer. The server's
+/// `Content-Length` is not trusted: whatever answers on the socket could
+/// otherwise make the app allocate without bound.
+pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
 /// Transport target for the daemon client.
 #[derive(Debug, Clone)]
 pub enum ClientTarget {
@@ -129,10 +134,23 @@ impl DaemonClient {
         // Read body
         let mut resp_body = Vec::new();
         if let Some(len) = content_len {
+            if len > MAX_RESPONSE_BYTES {
+                return Err(DaemonError::HttpProtocol(format!(
+                    "response Content-Length {len} exceeds {MAX_RESPONSE_BYTES} bytes"
+                )));
+            }
             resp_body.resize(len, 0);
             reader.read_exact(&mut resp_body)?;
         } else {
-            reader.read_to_end(&mut resp_body)?;
+            reader
+                .by_ref()
+                .take(MAX_RESPONSE_BYTES as u64 + 1)
+                .read_to_end(&mut resp_body)?;
+            if resp_body.len() > MAX_RESPONSE_BYTES {
+                return Err(DaemonError::HttpProtocol(format!(
+                    "response body exceeds {MAX_RESPONSE_BYTES} bytes"
+                )));
+            }
         }
 
         Ok((code, resp_body))
@@ -396,5 +414,40 @@ impl EventStreamReader {
                 data_lines.push(rest.trim().to_string());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    /// Serve one canned HTTP response on a fresh socket and return a client for it.
+    fn serve_once(resp: &'static [u8]) -> (tempfile::TempDir, DaemonClient) {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("d.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(resp);
+            }
+        });
+        (dir, DaemonClient::from_uds(&sock).with_timeout(Duration::from_secs(2)))
+    }
+
+    #[test]
+    fn huge_content_length_is_refused_without_allocating() {
+        let (_d, c) = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 999999999999\r\n\r\n");
+        let e = c.request("GET", "/x", &[], None).unwrap_err();
+        assert!(e.to_string().contains("exceeds"), "{e}");
+    }
+
+    #[test]
+    fn small_response_still_reads() {
+        let (_d, c) = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        let (code, body) = c.request("GET", "/x", &[], None).unwrap();
+        assert_eq!((code, body.as_slice()), (200, &b"ok"[..]));
     }
 }

@@ -598,76 +598,8 @@ pub fn parse_antigravity_usage(text: &str) -> Option<RateLimits> {
     }
 }
 
-fn fetch_live_antigravity_quota() -> Option<String> {
-    let output = std::process::Command::new("ps")
-        .args(["-A", "-o", "pid,command"])
-        .output()
-        .ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut target_pid = None;
-    let mut token = None;
-
-    for line in stdout.lines() {
-        if line.contains("language_server") && line.contains("--csrf_token") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if let Some(pid_str) = parts.first() {
-                target_pid = Some(pid_str.to_string());
-            }
-            if let Some(pos) = line.find("--csrf_token") {
-                let rest = &line[pos + "--csrf_token".len()..];
-                let t = rest.trim_start().split_whitespace().next().unwrap_or("");
-                token = Some(t.to_string());
-            }
-            break;
-        }
-    }
-
-    let pid = target_pid?;
-    let csrf = token?;
-
-    let lsof = std::process::Command::new("lsof")
-        .args(["-nP", "-p", &pid])
-        .output()
-        .ok()?;
-    let lsof_out = String::from_utf8_lossy(&lsof.stdout);
-    let mut ports = Vec::new();
-    for line in lsof_out.lines() {
-        if line.contains("LISTEN") && line.contains("127.0.0.1:") {
-            if let Some(pos) = line.find("127.0.0.1:") {
-                let rem = &line[pos + "127.0.0.1:".len()..];
-                let port_str = rem.split_whitespace().next().unwrap_or("");
-                if let Ok(p) = port_str.parse::<u16>() {
-                    ports.push(p);
-                }
-            }
-        }
-    }
-
-    for port in ports {
-        if let Ok(res) = std::process::Command::new("curl")
-            .args([
-                "-k", "-s", "--max-time", "2",
-                "-X", "POST",
-                &format!("https://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"),
-                "-H", "Content-Type: application/json",
-                "-H", &format!("x-codeium-csrf-token: {csrf}"),
-                "-d", "{}",
-            ])
-            .output()
-        {
-            if res.status.success() {
-                let text = String::from_utf8_lossy(&res.stdout).to_string();
-                if text.contains("groups") && text.contains("buckets") {
-                    return Some(text);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Antigravity 5-hour and weekly usage snapshot. Reads from local statusline bridge cache
-/// (AIUsageBar or Chorus cache) or account directory.
+/// Antigravity 5-hour and weekly usage snapshot. Reads only statusline bridge
+/// files (AIUsageBar, Chorus cache, account directory); otherwise unknown.
 pub fn antigravity_rate_limits(dir: &Path) -> Option<RateLimits> {
     let local_custom = dir.join("antigravity-statusline.json");
     if local_custom.exists() {
@@ -678,26 +610,19 @@ pub fn antigravity_rate_limits(dir: &Path) -> Option<RateLimits> {
         }
     }
 
-    if let Some(live_json) = fetch_live_antigravity_quota() {
-        if let Some(limits) = parse_antigravity_usage(&live_json) {
-            if let Some(h) = std::env::var_os("HOME").map(PathBuf::from) {
-                let cache_dir = h.join(".chorus/cache");
-                let _ = std::fs::create_dir_all(&cache_dir);
-                let _ = std::fs::write(cache_dir.join("antigravity-quota-summary.json"), &live_json);
-            }
-            return Some(limits);
-        }
-    }
+    // No live query. Antigravity exposes quota only through its language
+    // server, and reaching that meant scraping another product's CSRF token
+    // out of `ps` (every user's processes) and replaying it with `curl -k`.
+    // Chorus never reads another tool's credentials, so without a statusline
+    // bridge file the quota is unknown (`None`).
 
     let mut candidates = Vec::new();
     if let Some(h) = std::env::var_os("HOME").map(PathBuf::from) {
-        candidates.push(h.join(".chorus/cache/antigravity-quota-summary.json"));
         candidates.push(h.join("Library/Application Support/AIUsageBar/antigravity-statusline.json"));
         candidates.push(h.join(".chorus/cache/antigravity-statusline.json"));
         candidates.push(h.join(".chorus/cache/antigravity-usage.json"));
         candidates.push(h.join(".chorus/cache/antigravity-statusline-raw.json"));
     }
-    candidates.push(dir.join("antigravity-quota-summary.json"));
     candidates.push(dir.join("antigravity-statusline.json"));
     candidates.push(dir.join("cache/antigravity-statusline.json"));
 

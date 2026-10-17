@@ -98,35 +98,26 @@ fn main() -> anyhow::Result<()> {
 
                 let agy_bin = find_agy_binary();
                 let mut cmd = Command::new(&agy_bin);
-                cmd.arg("-p").arg(&prompt_text);
-
-                // Format model & effort
-                let (raw_base, effort_opt) = match current_model.split_once('[') {
-                    Some((b, rest)) => (b, rest.strip_suffix(']').unwrap_or(rest)),
-                    None => (current_model.as_str(), ""),
-                };
-                let base = raw_base
-                    .trim_end_matches("-high")
-                    .trim_end_matches("-medium")
-                    .trim_end_matches("-low");
-
-                if !effort_opt.is_empty() {
-                    cmd.arg("--model").arg(base).arg("--effort").arg(effort_opt);
-                } else if raw_base != base {
-                    cmd.arg("--model").arg(raw_base);
-                } else {
-                    cmd.arg("--model").arg(base);
-                }
-
-                cmd.arg("--output-format")
-                    .arg("stream-json")
+                // The prompt (context, memory, attachments) goes over stdin,
+                // never argv: argv is readable by every local user via `ps`
+                // and long prompts hit ARG_MAX.
+                cmd.args(agy_args(&current_model))
                     .current_dir(&current_cwd)
-                    .stdin(Stdio::null())
+                    .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
 
                 match cmd.spawn() {
                     Ok(mut child) => {
+                        // Write from a thread so a large prompt cannot deadlock
+                        // against agy filling its stdout pipe; dropping the
+                        // handle closes stdin, which ends the one-turn input.
+                        let feeder = child.stdin.take().map(|mut stdin| {
+                            let line = stdin_message(&prompt_text);
+                            std::thread::spawn(move || {
+                                let _ = stdin.write_all(line.as_bytes());
+                            })
+                        });
                         let mut sent_any = false;
                         if let Some(stdout_stream) = child.stdout.take() {
                             let reader = BufReader::new(stdout_stream);
@@ -137,6 +128,9 @@ fn main() -> anyhow::Result<()> {
                             }
                         }
                         let _ = child.wait();
+                        if let Some(f) = feeder {
+                            let _ = f.join();
+                        }
                         if !sent_any {
                             let mut err_str = String::new();
                             if let Some(mut err_stream) = child.stderr.take() {
@@ -177,6 +171,37 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// `agy` arguments for one print-mode turn. Deliberately has no prompt in it.
+fn agy_args(current_model: &str) -> Vec<String> {
+    let mut args: Vec<String> = vec!["--input-format".into(), "stream-json".into()];
+    let (raw_base, effort_opt) = match current_model.split_once('[') {
+        Some((b, rest)) => (b, rest.strip_suffix(']').unwrap_or(rest)),
+        None => (current_model, ""),
+    };
+    let base = raw_base
+        .trim_end_matches("-high")
+        .trim_end_matches("-medium")
+        .trim_end_matches("-low");
+
+    if !effort_opt.is_empty() {
+        args.extend(["--model".into(), base.into(), "--effort".into(), effort_opt.into()]);
+    } else if raw_base != base {
+        args.extend(["--model".into(), raw_base.into()]);
+    } else {
+        args.extend(["--model".into(), base.into()]);
+    }
+    args.extend(["--output-format".into(), "stream-json".into()]);
+    args
+}
+
+/// The one NDJSON line `agy --input-format stream-json` reads for a turn
+/// (shape measured against agy on 17 Oct 2026).
+fn stdin_message(prompt: &str) -> String {
+    let mut line = json!({ "event": "user", "message": { "content": prompt } }).to_string();
+    line.push('\n');
+    line
 }
 
 fn find_agy_binary() -> std::path::PathBuf {
@@ -409,4 +434,33 @@ fn send_notification(out: &mut io::StdoutLock, method: &str, params: Value) -> a
     writeln!(out, "{msg}")?;
     out.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P3-2: the prompt was passed as `-p <prompt>`, visible to every local
+    /// user through `ps`.
+    #[test]
+    fn prompt_never_appears_in_argv() {
+        let secret = "ข้อมูลลับ sk-test-123 context";
+        for model in ["gemini-3.8-flash[high]", "gemini-pro-high", "x"] {
+            let args = agy_args(model);
+            assert!(!args.iter().any(|a| a.contains("sk-test-123")), "{args:?}");
+            assert!(!args.iter().any(|a| a == "-p" || a == "--print"), "{args:?}");
+            assert!(args.windows(2).any(|w| w == ["--input-format", "stream-json"]));
+        }
+        let line = stdin_message(secret);
+        assert!(line.ends_with('\n') && !line[..line.len() - 1].contains('\n'));
+        let v: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(v["event"], "user");
+        assert_eq!(v["message"]["content"], secret);
+    }
+
+    #[test]
+    fn model_and_effort_are_split_as_before() {
+        let a = agy_args("gemini-3.8-flash[high]");
+        assert!(a.windows(4).any(|w| w == ["--model", "gemini-3.8-flash", "--effort", "high"]));
+    }
 }

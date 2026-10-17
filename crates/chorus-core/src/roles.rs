@@ -13,6 +13,38 @@ use std::path::{Path, PathBuf};
 /// Where project-level custom agent definitions live, relative to workspace root.
 pub const AGENTS_DIR: &str = ".chorus/agents";
 
+/// Role names become file names, so they are confined to `[a-z0-9-]{1,64}`.
+///
+/// Role files ship with cloned repos and are untrusted: a frontmatter name of
+/// `../../.claude/CLAUDE` or an absolute path would otherwise make
+/// `Path::join` write or delete an instruction file outside `.chorus/agents/`.
+pub fn is_valid_role_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// The file a role lives in, or an error when `name` is not a valid role name.
+/// Never joins an unvalidated name into a path.
+pub fn role_path(dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+    if !is_valid_role_name(name) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid role name {name:?}: must match [a-z0-9-]{{1,64}}"),
+        ));
+    }
+    Ok(dir.join(AGENTS_DIR).join(format!("{name}.md")))
+}
+
+/// Delete `.chorus/agents/<name>.md` under `dir`. Returns whether a file was removed.
+pub fn delete_role(dir: &Path, name: &str) -> std::io::Result<bool> {
+    let path = role_path(dir, name)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// A defined agent role specification.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AgentRole {
@@ -180,9 +212,8 @@ impl AgentRole {
 
     /// Save this role definition to `.chorus/agents/<name>.md` under `dir`.
     pub fn save_to_dir(&self, dir: &Path) -> std::io::Result<PathBuf> {
-        let agents_dir = dir.join(AGENTS_DIR);
-        std::fs::create_dir_all(&agents_dir)?;
-        let file_path = agents_dir.join(format!("{}.md", self.name));
+        let file_path = role_path(dir, &self.name)?;
+        std::fs::create_dir_all(dir.join(AGENTS_DIR))?;
         std::fs::write(&file_path, self.to_markdown())?;
         Ok(file_path)
     }
@@ -306,6 +337,11 @@ pub fn load_roles(cwd: &Path) -> Vec<AgentRole> {
                     .unwrap_or("custom-agent");
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     let custom = AgentRole::parse(&content, fallback);
+                    // Untrusted repo file: a name that cannot be a file name is
+                    // dropped, not sanitised, so the UI never offers it.
+                    if !is_valid_role_name(&custom.name) {
+                        continue;
+                    }
                     // Replace built-in with same name, or add new
                     if let Some(pos) = roles.iter().position(|r| r.name == custom.name) {
                         roles[pos] = custom;
@@ -430,13 +466,16 @@ pub fn synthesize_role(task: &str, write_mode: bool, name_hint: Option<&str>) ->
 fn slugify(text: &str) -> String {
     let slug: String = text
         .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
         .collect();
     let cleaned: Vec<&str> = slug.split('-').filter(|s| !s.is_empty()).collect();
-    if cleaned.is_empty() {
+    let mut out = cleaned.join("-");
+    out.truncate(64);
+    let out = out.trim_end_matches('-').to_string();
+    if out.is_empty() {
         "custom-agent".to_string()
     } else {
-        cleaned.join("-")
+        out
     }
 }
 
@@ -524,6 +563,67 @@ Inspect authentication barriers and cryptographically sensitive flows.
         let inv = roles.iter().find(|r| r.name == "investigator").unwrap();
         assert_eq!(inv.description, "Custom repo investigator");
         assert_eq!(inv.system_prompt, "Custom prompt");
+    }
+
+    #[test]
+    fn role_names_are_confined_to_slug_charset() {
+        for ok in ["a", "code-reviewer", "x9", &"a".repeat(64)] {
+            assert!(is_valid_role_name(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "../../.claude/CLAUDE",
+            "/Users/x/.claude/CLAUDE",
+            "Upper",
+            "a b",
+            "a/b",
+            "a.b",
+            "ทดสอบ",
+            &"a".repeat(65),
+        ] {
+            assert!(!is_valid_role_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn traversal_role_name_is_dropped_on_load_and_refused_on_save_and_delete() {
+        let temp = tempfile::tempdir().unwrap();
+        let ws = temp.path().join("ws");
+        let custom_dir = ws.join(AGENTS_DIR);
+        std::fs::create_dir_all(&custom_dir).unwrap();
+        std::fs::write(
+            custom_dir.join("x.md"),
+            "---\nname: ../../../victim\ndescription: d\n---\nINJECTED",
+        )
+        .unwrap();
+        let victim = temp.path().join("victim.md");
+        std::fs::write(&victim, "original").unwrap();
+
+        let roles = load_roles(&ws);
+        assert!(roles.iter().all(|r| is_valid_role_name(&r.name)));
+        assert!(!roles.iter().any(|r| r.system_prompt == "INJECTED"));
+
+        let hostile = AgentRole {
+            name: "../../../victim".into(),
+            description: "d".into(),
+            system_prompt: "INJECTED".into(),
+            tools: vec![],
+            model: None,
+        };
+        assert!(hostile.save_to_dir(&ws).is_err());
+        let abs = AgentRole { name: victim.with_extension("").display().to_string(), ..hostile };
+        assert!(abs.save_to_dir(&ws).is_err());
+        assert!(delete_role(&ws, "../../../victim").is_err());
+        assert!(delete_role(&ws, &victim.with_extension("").display().to_string()).is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "original");
+    }
+
+    #[test]
+    fn synthesized_role_name_is_always_valid() {
+        let thai = synthesize_role("ตรวจโค้ด", false, Some("ผู้ตรวจ"));
+        assert!(is_valid_role_name(&thai.name), "{}", thai.name);
+        let long = synthesize_role("x", false, Some(&"ab-".repeat(40)));
+        assert!(is_valid_role_name(&long.name), "{}", long.name);
     }
 
     #[test]

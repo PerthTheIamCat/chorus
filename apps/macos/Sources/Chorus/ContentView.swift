@@ -898,6 +898,7 @@ struct ContentView: View {
             }
         }
         .onAppear {
+            engine.loadProjectTrust(ws: workspace)
             migrateRouterModelPreference()
             if workspace.isEmpty {
                 if let p = projects.projects.first(where: { !$0.folders.isEmpty }),
@@ -941,6 +942,7 @@ struct ContentView: View {
             }
         }
         .onChange(of: workspace) { _, w in
+            engine.loadProjectTrust(ws: w)
             suggestionsPaused = false
             fileIndex.load(w)
             engine.loadSkills(cwd: w)
@@ -994,7 +996,8 @@ struct ContentView: View {
             flushQueue()
             if !busy && engine.sessionID >= 0 {
                 engine.updateSessionCost(db: dbPath, id: engine.sessionID)
-                if !workspace.isEmpty {
+                // Runs the project's own code — only after "trust this project".
+                if !workspace.isEmpty && engine.projectTrusted {
                     engine.verifyWorkspace(ws: workspace)
                 }
             }
@@ -2964,9 +2967,21 @@ struct ContentView: View {
                                     .foregroundStyle(.secondary)
                             }
                             .buttonStyle(.plain)
-                            .disabled(engine.isVerifying || workspace.isEmpty)
-                            .help("รัน cargo check, swift build, tsc, biome หรือ pytest ในโปรเจกต์ทันที")
+                            .disabled(engine.isVerifying || workspace.isEmpty || !engine.projectTrusted)
+                            .help("รัน cargo check, biome, ruff หรือ swiftlint ในโปรเจกต์ทันที (ใน sandbox)")
                         }
+
+                        Toggle(isOn: Binding(
+                            get: { engine.projectTrusted },
+                            set: { engine.setProjectTrusted(ws: workspace, $0) }
+                        )) {
+                            Text("เชื่อถือโปรเจกต์นี้ — รันตรวจโค้ด/hooks หลังทุกเทิร์น")
+                                .font(.caption2)
+                        }
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .disabled(workspace.isEmpty)
+                        .help("build.rs, hooks และ linter คือโค้ดของโปรเจกต์ เปิดเฉพาะโปรเจกต์ที่ไว้ใจ — ถึงเปิดก็รันใน sandbox เดียวกับเทิร์น")
 
                         if let v = engine.lastVerification, !v.passed {
                             VStack(alignment: .leading, spacing: 4) {

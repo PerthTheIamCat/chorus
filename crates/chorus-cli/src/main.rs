@@ -1398,7 +1398,9 @@ fn agent_cmd(args: &[String]) -> Result<()> {
             let id: i64 = rest.first().and_then(|s| s.parse().ok()).context("agent message <id> <text>")?;
             let text = rest.get(1).context("agent message <id> <text>")?;
             let store = Store::open(&db_path).context("open store")?;
-            let msg = agent_control::send_message(store.conn(), id, text)?;
+            // Typed by the person at the CLI, so it is the user speaking.
+            let user = actor::intern(store.conn(), "user", "human")?;
+            let msg = agent_control::send_message(store.conn(), id, user, text)?;
             println!("Sent message to agent #{}: {}", id, msg.content);
         }
         "wait" => {

@@ -31,6 +31,37 @@ pub struct PairedDevice {
     pub last_seen_at: u64,
 }
 
+impl PairingSession {
+    /// The endpoint the phone should dial: the port the daemon actually
+    /// bound (from `endpoint_url`), on the Tailscale address when there is
+    /// one. Never a hardcoded port — another local user could bind that.
+    pub fn advertised_endpoint(&self) -> String {
+        let Some(ip) = self.tailscale_ip.as_deref().filter(|ip| !ip.is_empty()) else {
+            return self.endpoint_url.clone();
+        };
+        let hostport = self
+            .endpoint_url
+            .split_once("://")
+            .map_or(self.endpoint_url.as_str(), |(_, rest)| rest);
+        let hostport = hostport.split('/').next().unwrap_or(hostport);
+        match hostport.rsplit_once(':').map(|(_, port)| port) {
+            Some(port) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
+                format!("http://{ip}:{port}")
+            }
+            _ => self.endpoint_url.clone(),
+        }
+    }
+
+    /// The `chorus://pair` URL encoded into the QR code.
+    pub fn qr_payload(&self) -> String {
+        format!(
+            "chorus://pair?token={}&endpoint={}",
+            self.pairing_token,
+            self.advertised_endpoint()
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PairingManager {
     inner: Arc<Mutex<PairingState>>,
@@ -206,6 +237,34 @@ fn detect_tailscale_ip() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    fn session(endpoint: &str, ts: Option<&str>) -> PairingSession {
+        PairingSession {
+            daemon_id: "d".into(),
+            machine_name: "m".into(),
+            pairing_token: "tok".into(),
+            endpoint_url: endpoint.into(),
+            tailscale_ip: ts.map(str::to_string),
+            created_at: 0,
+            expires_at: 0,
+        }
+    }
+
+    #[test]
+    fn advertised_endpoint_uses_the_bound_port_not_24678() {
+        assert_eq!(
+            session("http://0.0.0.0:51234", Some("100.64.0.7")).advertised_endpoint(),
+            "http://100.64.0.7:51234"
+        );
+        assert_eq!(
+            session("http://127.0.0.1:4040", None).advertised_endpoint(),
+            "http://127.0.0.1:4040"
+        );
+        assert_eq!(
+            session("http://0.0.0.0:51234", Some("100.64.0.7")).qr_payload(),
+            "chorus://pair?token=tok&endpoint=http://100.64.0.7:51234"
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -48,6 +48,7 @@ pub mod store;
 pub mod structural_diff;
 pub mod swarm;
 pub mod tokens;
+pub mod trust;
 pub mod types;
 pub mod updater;
 pub mod vector_accelerate;

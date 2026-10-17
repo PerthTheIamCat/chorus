@@ -3,11 +3,16 @@
 //! Executes lightning-fast post-edit compiler checks and linters (`cargo check`, `biome`,
 //! `ruff`, `swiftlint`), parses diagnostics, and automatically constructs self-healing
 //! error feedback to steer the agent before human review.
+//!
+//! Every checker runs the project's own code (build scripts, proc-macros,
+//! linter plugins), so it only runs with a [`Consent`]: the user trusted the
+//! project and the command is wrapped in the turn's sandbox profile.
 
+use crate::trust::{which, Consent};
 use crate::{ChorusError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::process::Command;
+use std::process::Output;
 
 /// A compiler or linter diagnostic item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,19 +65,33 @@ impl VerificationResult {
 
 pub struct VerifyLoop;
 
+/// Run `tool args…` under `consent`, or `None` when the tool is not installed.
+fn run_tool(consent: &Consent, tool: &str, args: &[&str]) -> Result<Option<Output>> {
+    let Some(bin) = which(tool) else { return Ok(None) };
+    let mut argv = vec![bin.to_string_lossy().into_owned()];
+    argv.extend(args.iter().map(|a| a.to_string()));
+    let out = consent
+        .command(&argv)?
+        .output()
+        .map_err(|e| ChorusError::Invalid(format!("Failed to run {tool}: {e}")))?;
+    Ok(Some(out))
+}
+
 impl VerifyLoop {
-    /// Detects project tooling and runs the fastest verification command.
-    pub fn verify_workspace(workspace_root: &Path) -> Result<VerificationResult> {
+    /// Detects project tooling and runs the fastest verification command,
+    /// confined by `consent` (see [`crate::trust`]).
+    pub fn verify_workspace(consent: &Consent) -> Result<VerificationResult> {
         let start = std::time::Instant::now();
+        let workspace_root: &Path = consent.workspace();
 
         if workspace_root.join("Cargo.toml").exists() {
-            Self::verify_rust(workspace_root, start)
+            Self::verify_rust(consent, start)
         } else if workspace_root.join("package.json").exists() {
-            Self::verify_node(workspace_root, start)
+            Self::verify_node(consent, start)
         } else if workspace_root.join("pyproject.toml").exists() || workspace_root.join("requirements.txt").exists() {
-            Self::verify_python(workspace_root, start)
+            Self::verify_python(consent, start)
         } else if workspace_root.join("Package.swift").exists() {
-            Self::verify_swift(workspace_root, start)
+            Self::verify_swift(consent, start)
         } else {
             Ok(VerificationResult {
                 passed: true,
@@ -84,14 +103,9 @@ impl VerifyLoop {
         }
     }
 
-    fn verify_rust(root: &Path, start: std::time::Instant) -> Result<VerificationResult> {
-        let output = Command::new("cargo")
-            .arg("check")
-            .arg("--message-format=json")
-            .arg("--quiet")
-            .current_dir(root)
-            .output()
-            .map_err(|e| ChorusError::Invalid(format!("Failed to run cargo check: {e}")))?;
+    fn verify_rust(consent: &Consent, start: std::time::Instant) -> Result<VerificationResult> {
+        let output = run_tool(consent, "cargo", &["check", "--message-format=json", "--quiet"])?
+            .ok_or_else(|| ChorusError::Invalid("Failed to run cargo check: cargo not found on PATH".into()))?;
 
         let raw = String::from_utf8_lossy(&output.stdout).to_string();
         let mut diagnostics = Vec::new();
@@ -136,9 +150,9 @@ impl VerifyLoop {
         })
     }
 
-    fn verify_node(root: &Path, start: std::time::Instant) -> Result<VerificationResult> {
+    fn verify_node(consent: &Consent, start: std::time::Instant) -> Result<VerificationResult> {
         // Try biome if available
-        if let Ok(out) = Command::new("biome").arg("check").current_dir(root).output() {
+        if let Some(out) = run_tool(consent, "biome", &["check"])? {
             let passed = out.status.success();
             let raw = String::from_utf8_lossy(&out.stdout).to_string();
             return Ok(VerificationResult {
@@ -159,8 +173,8 @@ impl VerifyLoop {
         })
     }
 
-    fn verify_python(root: &Path, start: std::time::Instant) -> Result<VerificationResult> {
-        if let Ok(out) = Command::new("ruff").arg("check").current_dir(root).output() {
+    fn verify_python(consent: &Consent, start: std::time::Instant) -> Result<VerificationResult> {
+        if let Some(out) = run_tool(consent, "ruff", &["check"])? {
             let passed = out.status.success();
             let raw = String::from_utf8_lossy(&out.stdout).to_string();
             return Ok(VerificationResult {
@@ -181,8 +195,8 @@ impl VerifyLoop {
         })
     }
 
-    fn verify_swift(root: &Path, start: std::time::Instant) -> Result<VerificationResult> {
-        if let Ok(out) = Command::new("swiftlint").arg("lint").arg("--quiet").current_dir(root).output() {
+    fn verify_swift(consent: &Consent, start: std::time::Instant) -> Result<VerificationResult> {
+        if let Some(out) = run_tool(consent, "swiftlint", &["lint", "--quiet"])? {
             let passed = out.status.success();
             let raw = String::from_utf8_lossy(&out.stdout).to_string();
             return Ok(VerificationResult {
@@ -207,6 +221,36 @@ impl VerifyLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trust::TrustStore;
+
+    fn identity(argv: &[String], _: &Path) -> std::result::Result<Vec<String>, String> {
+        Ok(argv.to_vec())
+    }
+
+    /// The P1 escape: opening a Rust repo and ending a turn ran its `build.rs`.
+    /// Without trust there is no `Consent`, so `verify_workspace` cannot be
+    /// called at all; with trust, every command goes through the confine hook.
+    #[test]
+    fn verify_runs_nothing_without_trust_and_always_confines() {
+        let home = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        let store = TrustStore::at(home.path().join("t.json"));
+        assert!(store.consent(ws.path(), &identity).is_err());
+
+        store.set_trusted(ws.path(), true).unwrap();
+        let seen = std::cell::RefCell::new(Vec::<Vec<String>>::new());
+        let refuse = |argv: &[String], _: &Path| {
+            seen.borrow_mut().push(argv.to_vec());
+            Err("test: sandbox refused".to_string())
+        };
+        let consent = store.consent(ws.path(), &refuse).unwrap();
+        if which("cargo").is_some() {
+            assert!(VerifyLoop::verify_workspace(&consent).is_err(), "must fail closed");
+            assert_eq!(seen.borrow().len(), 1);
+            assert!(seen.borrow()[0][0].ends_with("cargo"));
+        }
+    }
 
     #[test]
     fn format_agent_feedback_renders_cleanly() {

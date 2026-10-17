@@ -3,9 +3,53 @@
 use chorus_core::hooks::{
     find_hook, run_post_turn, run_pre_dispatch, HookContext, HookStage, HooksEngine,
 };
+use chorus_core::trust::{Consent, TrustStore};
 use std::fs;
+use std::path::Path;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+
+fn identity(argv: &[String], _: &Path) -> Result<Vec<String>, String> {
+    Ok(argv.to_vec())
+}
+
+/// Trust `ws` in a private store and hand back consent with a pass-through
+/// confine; the real Seatbelt wrap is exercised in chorus-ffi.
+fn trusted(ws: &Path) -> (tempfile::TempDir, TrustStore) {
+    let home = tempfile::tempdir().unwrap();
+    let store = TrustStore::at(home.path().join("t.json"));
+    store.set_trusted(ws, true).unwrap();
+    (home, store)
+}
+
+fn consent<'a>(store: &TrustStore, ws: &Path) -> Consent<'a> {
+    store.consent(ws, &identity).unwrap()
+}
+
+#[test]
+fn hooks_from_an_untrusted_repo_never_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let hooks_dir = dir.path().join(".chorus").join("hooks");
+    fs::create_dir_all(&hooks_dir).unwrap();
+    let marker = dir.path().join("pwned");
+    fs::write(
+        hooks_dir.join("post-turn.sh"),
+        format!("#!/bin/sh\ntouch {}\n", marker.display()),
+    )
+    .unwrap();
+
+    let home = tempfile::tempdir().unwrap();
+    let store = TrustStore::at(home.path().join("t.json"));
+    assert!(store.consent(dir.path(), &identity).is_err());
+    assert!(!marker.exists());
+
+    // Trusted, but the sandbox is unavailable: still nothing runs.
+    store.set_trusted(dir.path(), true).unwrap();
+    let no_sandbox = |_: &[String], _: &Path| Err("no sandbox".to_string());
+    let c = store.consent(dir.path(), &no_sandbox).unwrap();
+    assert!(run_post_turn(&c, &HookContext::new()).is_err());
+    assert!(!marker.exists());
+}
 
 #[test]
 fn pre_dispatch_and_post_turn_discovery() {
@@ -57,7 +101,8 @@ exit 0
         .with_turn(3)
         .with_env("MY_CUSTOM_VAR", "hello_chorus");
 
-    let out = run_pre_dispatch(dir.path(), &ctx).unwrap().expect("hook should run");
+    let (_h, store) = trusted(dir.path());
+    let out = run_pre_dispatch(&consent(&store, dir.path()), &ctx).unwrap().expect("hook should run");
     assert!(out.is_success());
     assert_eq!(out.exit_code, Some(0));
     assert!(out.stdout.contains("Stage: pre-dispatch"));
@@ -86,7 +131,8 @@ exit 1
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
 
     let ctx = HookContext::new().with_agent("codex");
-    let out = run_post_turn(dir.path(), &ctx).unwrap().expect("hook should run");
+    let (_h, store) = trusted(dir.path());
+    let out = run_post_turn(&consent(&store, dir.path()), &ctx).unwrap().expect("hook should run");
 
     assert!(!out.is_success());
     assert_eq!(out.exit_code, Some(1));
@@ -109,6 +155,7 @@ fn returns_none_when_no_hook_is_defined() {
     assert!(!engine.has_hook(HookStage::PostTurn));
 
     let ctx = HookContext::new();
-    let res = engine.run_post_turn(&ctx).unwrap();
+    let (_h, store) = trusted(dir.path());
+    let res = engine.run_post_turn(&consent(&store, dir.path()), &ctx).unwrap();
     assert!(res.is_none());
 }

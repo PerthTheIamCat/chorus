@@ -19,20 +19,78 @@
 //! Verified end to end: Codex calls `memory_propose`, the proposal lands in
 //! the queue. In `read-only` mode the call is still gated through our
 //! permission engine first (`--yes` to allow) — that's the design working.
+//!
+//! ## Authentication
+//!
+//! Loopback TCP is reachable by every local process, other macOS users
+//! included. So every request must carry `Authorization: Bearer <secret>`,
+//! a random per-agent secret Chorus mints and hands to the agent inside ACP
+//! `mcpServers[].headers` ([`McpServer::mcp_server_entry`]). The credential —
+//! never a tool argument — decides which session the caller acts in and which
+//! actor its ledger writes are attributed to.
 
-use crate::{agent_control, attachments, memory, notify, roles, Result, Store};
+use crate::types::{EventKind, NewEvent};
+use crate::{actor, agent_control, attachments, ledger, memory, notify, roles, Result, Store};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+
+/// Who is calling: derived from the bearer credential, never from arguments.
+#[derive(Debug, Clone)]
+struct Caller {
+    /// The session this server was started for. `None` = project-memory server.
+    session: Option<i64>,
+    /// The agent the credential was minted for; ledger writes use this actor.
+    actor: String,
+}
+
+#[derive(Debug, Clone)]
+struct Credential {
+    secret: String,
+    caller: Caller,
+}
+
+type Credentials = Arc<Mutex<Vec<Credential>>>;
 
 /// A running MCP server. Drop it (or call `stop`) to shut down.
 pub struct McpServer {
     url: String,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    scope: Option<i64>,
+    creds: Credentials,
+}
+
+/// 32 bytes from the OS CSPRNG, hex-encoded.
+fn random_secret() -> std::io::Result<String> {
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Compare without an early exit, so response time does not reveal how many
+/// leading bytes of a guessed secret were right.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn authenticate(creds: &Credentials, presented: Option<&str>) -> Option<Caller> {
+    let presented = presented?;
+    let list = creds.lock().ok()?;
+    let mut found = None;
+    // Check every credential: no short-circuit on the first match.
+    for c in list.iter() {
+        if ct_eq(c.secret.as_bytes(), presented.as_bytes()) {
+            found = Some(c.caller.clone());
+        }
+    }
+    found
 }
 
 impl McpServer {
@@ -57,7 +115,8 @@ impl McpServer {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
         let db = db_path.to_string();
-        let scope = session_scope;
+        let creds: Credentials = Arc::new(Mutex::new(Vec::new()));
+        let creds_thread = creds.clone();
 
         let handle = std::thread::spawn(move || {
             while !stop_thread.load(Ordering::Relaxed) {
@@ -68,9 +127,10 @@ impl McpServer {
                         // would serialise everything behind it.
                         let db = db.clone();
                         let stop = stop_thread.clone();
+                        let creds = creds_thread.clone();
                         std::thread::spawn(move || {
                             if let Ok(store) = Store::open(std::path::Path::new(&db)) {
-                                let _ = handle_conn(stream, store.conn(), &stop, scope);
+                                let _ = handle_conn(stream, store.conn(), &stop, &creds);
                             }
                         });
                     }
@@ -86,13 +146,41 @@ impl McpServer {
             url,
             stop,
             handle: Some(handle),
+            scope: session_scope,
+            creds,
         })
     }
 
-    /// The entry to put in `session/new`'s `mcpServers` (ACP HTTP shape:
-    /// `type` + `name` + `url` + `headers`).
-    pub fn mcp_server_entry(&self) -> Value {
-        json!({ "type": "http", "name": "chorus", "url": self.url, "headers": [] })
+    /// The bearer secret for `agent` on this server, minted on first use.
+    /// The agent's ledger writes through this server are attributed to it.
+    pub fn credential(&self, agent: &str) -> Result<String> {
+        // Never mint a credential that writes as the human.
+        let agent = if agent.trim().is_empty() || agent == "user" { "agent" } else { agent };
+        let mut list = self
+            .creds
+            .lock()
+            .map_err(|_| crate::ChorusError::Invalid("mcp credentials poisoned".into()))?;
+        if let Some(c) = list.iter().find(|c| c.caller.actor == agent) {
+            return Ok(c.secret.clone());
+        }
+        let secret = random_secret()?;
+        list.push(Credential {
+            secret: secret.clone(),
+            caller: Caller { session: self.scope, actor: agent.to_string() },
+        });
+        Ok(secret)
+    }
+
+    /// The entry to put in `session/new`'s `mcpServers` for `agent` (ACP HTTP
+    /// shape: `type` + `name` + `url` + `headers`, headers as `{name, value}`).
+    pub fn mcp_server_entry(&self, agent: &str) -> Result<Value> {
+        let secret = self.credential(agent)?;
+        Ok(json!({
+            "type": "http",
+            "name": "chorus",
+            "url": self.url,
+            "headers": [{ "name": "Authorization", "value": format!("Bearer {secret}") }]
+        }))
     }
 
     pub fn url(&self) -> &str {
@@ -141,7 +229,7 @@ fn handle_conn(
     mut stream: TcpStream,
     conn: &rusqlite::Connection,
     stop: &AtomicBool,
-    session_scope: Option<i64>,
+    creds: &Credentials,
 ) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(IDLE_TIMEOUT))?;
@@ -157,6 +245,7 @@ fn handle_conn(
         }
         let mut content_length = 0usize;
         let mut has_origin = false;
+        let mut bearer: Option<String> = None;
         loop {
             let mut h = String::new();
             if reader.read_line(&mut h)? == 0 {
@@ -176,6 +265,12 @@ fn handle_conn(
             if lower.starts_with("origin:") {
                 has_origin = true;
             }
+            if lower.starts_with("authorization:") {
+                let v = h["authorization:".len()..].trim();
+                if v.len() > 7 && v[..7].eq_ignore_ascii_case("bearer ") {
+                    bearer = Some(v[7..].trim().to_string());
+                }
+            }
         }
 
         if has_origin {
@@ -186,6 +281,15 @@ fn handle_conn(
             )?;
             return Ok(());
         }
+
+        let Some(caller) = authenticate(creds, bearer.as_deref()) else {
+            write_raw(
+                &mut stream,
+                "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                b"",
+            )?;
+            return Ok(());
+        };
 
         if request_line.starts_with("GET") {
             // (the Origin check above already rejected browser-initiated GETs)
@@ -235,7 +339,7 @@ fn handle_conn(
         debug_log("in", &String::from_utf8_lossy(&body));
 
         let req: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        let resp = dispatch(&req, conn, session_scope);
+        let resp = dispatch(&req, conn, &caller);
         if resp.is_null() {
             // A notification — no body, keep the connection open.
             write_raw(
@@ -256,7 +360,8 @@ fn write_raw(stream: &mut TcpStream, head: &str, body: &[u8]) -> std::io::Result
     stream.flush()
 }
 
-fn dispatch(req: &Value, conn: &rusqlite::Connection, session_scope: Option<i64>) -> Value {
+fn dispatch(req: &Value, conn: &rusqlite::Connection, caller: &Caller) -> Value {
+    let session_scope = caller.session;
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
 
@@ -273,28 +378,25 @@ fn dispatch(req: &Value, conn: &rusqlite::Connection, session_scope: Option<i64>
         "notifications/initialized" | "notifications/cancelled" => return Value::Null,
         "tools/list" => {
             let mut tools = vec![propose_tool_schema()];
+            // Session-bound tools only exist on a session's own server; the
+            // project-memory server has no session to act in.
             if session_scope.is_some() {
                 tools.extend([attachment_list_schema(), attachment_read_schema()]);
+                tools.extend([
+                    spawn_agent_schema(),
+                    send_message_schema(),
+                    wait_agent_schema(),
+                    collect_results_schema(),
+                    cancel_agent_schema(),
+                    update_checklist_schema(),
+                    jump_to_file_schema(),
+                    request_review_schema(),
+                ]);
             }
-            tools.extend([
-                spawn_agent_schema(),
-                send_message_schema(),
-                wait_agent_schema(),
-                collect_results_schema(),
-                cancel_agent_schema(),
-                update_checklist_schema(),
-                jump_to_file_schema(),
-                request_review_schema(),
-                synthesize_role_schema(),
-                notify_user_schema(),
-            ]);
+            tools.extend([synthesize_role_schema(), notify_user_schema()]);
             Ok(json!({ "tools": tools }))
         }
-        "tools/call" => call_tool(
-            req.get("params").unwrap_or(&Value::Null),
-            conn,
-            session_scope,
-        ),
+        "tools/call" => call_tool(req.get("params").unwrap_or(&Value::Null), conn, caller),
         other => Err(format!("unknown method {other}")),
     };
 
@@ -331,11 +433,47 @@ fn propose_tool_schema() -> Value {
     })
 }
 
+/// The caller's actor id. Looked up by name first so an existing actor's
+/// provider is not overwritten; created only for a name never seen before.
+fn caller_actor(conn: &rusqlite::Connection, caller: &Caller) -> std::result::Result<i64, String> {
+    use rusqlite::OptionalExtension;
+    let found: Option<i64> = conn
+        .query_row("SELECT id FROM actor WHERE name = ?1", [&caller.actor], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    match found {
+        Some(id) => Ok(id),
+        None => actor::intern(conn, &caller.actor, "agent").map_err(|e| e.to_string()),
+    }
+}
+
+/// The session the caller acts in, or an error on the unscoped server.
+fn require_session(caller: &Caller) -> std::result::Result<i64, String> {
+    caller
+        .session
+        .ok_or_else(|| "this tool needs a session; it is unavailable on this server".to_string())
+}
+
+/// Refuse any `agent_id` outside the caller's session tree.
+fn require_owned(
+    conn: &rusqlite::Connection,
+    caller: &Caller,
+    agent_id: i64,
+) -> std::result::Result<(), String> {
+    let sess = require_session(caller)?;
+    match agent_control::agent_in_session_tree(conn, sess, agent_id) {
+        Ok(true) => Ok(()),
+        // Same message whether it exists elsewhere or not at all.
+        _ => Err(format!("no agent #{agent_id} in this session")),
+    }
+}
+
 fn call_tool(
     params: &Value,
     conn: &rusqlite::Connection,
-    session_scope: Option<i64>,
+    caller: &Caller,
 ) -> std::result::Result<Value, String> {
+    let session_scope = caller.session;
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(Value::Null);
     if name == "attachment_list" {
@@ -418,49 +556,28 @@ fn call_tool(
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
-        let cwd = session_scope
-            .and_then(|sess| {
-                conn.query_row("SELECT cwd FROM session WHERE id = ?1", [sess], |r| {
-                    r.get::<_, String>(0)
-                })
-                .ok()
-            })
-            .unwrap_or_else(|| {
-                std::env::current_dir()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                    .to_string_lossy()
-                    .to_string()
-            });
+        let sess = require_session(caller)?;
+        let cwd: String = conn
+            .query_row("SELECT cwd FROM session WHERE id = ?1", [sess], |r| r.get(0))
+            .map_err(|e| format!("session {sess}: {e}"))?;
 
-        let agent = agent_control::spawn_agent(
-            conn,
-            session_scope,
-            role,
-            task,
-            worktree,
-            &cwd,
-        )
-        .map_err(|e| e.to_string())?;
+        let agent = agent_control::spawn_agent(conn, Some(sess), role, task, worktree, &cwd)
+            .map_err(|e| e.to_string())?;
 
-        if let Some(sess) = session_scope {
-            let payload = serde_json::json!({
-                "event": "subagent_spawned",
-                "sessionId": format!("subagent-{}", agent.id),
-                "parentSessionId": format!("{sess}"),
-                "name": format!("Role: {role}"),
-                "task": task,
-            }).to_string();
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-            let actor_id: i64 = conn.query_row("SELECT id FROM actor LIMIT 1", [], |r| r.get(0)).unwrap_or(1);
-            let _ = conn.execute(
-                "INSERT INTO event (sess, t, kind, actor, body, tok_in, tok_out, model_id)
-                 VALUES (?1, ?2, 1, ?3, ?4, 0, 0, NULL)",
-                rusqlite::params![sess, now, actor_id, payload],
-            );
+        let payload = serde_json::json!({
+            "event": "subagent_spawned",
+            "sessionId": format!("subagent-{}", agent.id),
+            "parentSessionId": format!("{sess}"),
+            "name": format!("Role: {role}"),
+            "task": task,
+        })
+        .to_string();
+        let actor_id = caller_actor(conn, caller)?;
+        let mut ev = NewEvent::new(sess, EventKind::ToolCall, actor_id, payload);
+        if let Some(last) = ledger::tail(conn, sess, 1).map_err(|e| e.to_string())?.last() {
+            ev = ev.parent(last.seq);
         }
+        ledger::append(conn, &ev).map_err(|e| e.to_string())?;
 
         let text = format!(
             "Spawned child agent #{} (role: '{}', status: '{}').\nTask: {}\nWorktree: {}\nJSON: {}",
@@ -489,7 +606,9 @@ fn call_tool(
             .and_then(Value::as_str)
             .ok_or("message is required")?;
 
-        let msg = agent_control::send_message(conn, agent_id, message)
+        require_owned(conn, caller, agent_id)?;
+        let actor_id = caller_actor(conn, caller)?;
+        let msg = agent_control::send_message(conn, agent_id, actor_id, message)
             .map_err(|e| e.to_string())?;
 
         let text = format!("Message delivered to child agent #{}: {:?}", msg.subagent_id, msg.content);
@@ -504,8 +623,12 @@ fn call_tool(
             .get("timeout_secs")
             .and_then(Value::as_u64)
             .unwrap_or(30);
+        let sess = require_session(caller)?;
+        if let Some(id) = agent_id {
+            require_owned(conn, caller, id)?;
+        }
 
-        let rep = agent_control::wait_agent(conn, session_scope, agent_id, timeout_secs)
+        let rep = agent_control::wait_agent(conn, Some(sess), agent_id, timeout_secs)
             .map_err(|e| e.to_string())?;
 
         let text = format!(
@@ -532,8 +655,12 @@ fn call_tool(
         }
         let ids_opt = if agent_ids.is_empty() { None } else { Some(agent_ids.as_slice()) };
         let join_mode = args.get("join_mode").and_then(Value::as_str).unwrap_or("compact");
+        let sess = require_session(caller)?;
+        for id in &agent_ids {
+            require_owned(conn, caller, *id)?;
+        }
 
-        let res = agent_control::collect_results(conn, session_scope, ids_opt, join_mode)
+        let res = agent_control::collect_results(conn, Some(sess), ids_opt, join_mode)
             .map_err(|e| e.to_string())?;
 
         return Ok(json!({
@@ -548,6 +675,7 @@ fn call_tool(
             .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
             .ok_or("agent_id is required")?;
         let reason = args.get("reason").and_then(Value::as_str);
+        require_owned(conn, caller, agent_id)?;
 
         let agent = agent_control::cancel_agent(conn, agent_id, reason)
             .map_err(|e| e.to_string())?;
@@ -583,7 +711,7 @@ fn call_tool(
             });
         }
 
-        let sess = session_scope.unwrap_or(1);
+        let sess = require_session(caller)?;
         let updated = agent_control::update_checklist(conn, sess, &items)
             .map_err(|e| e.to_string())?;
 
@@ -602,7 +730,7 @@ fn call_tool(
             .and_then(Value::as_u64)
             .map(|v| v as u32);
 
-        let sess = session_scope.unwrap_or(1);
+        let sess = require_session(caller)?;
         let jump = agent_control::jump_to_file(conn, sess, path, line)
             .map_err(|e| e.to_string())?;
 
@@ -618,7 +746,7 @@ fn call_tool(
             .ok_or("summary is required")?;
         let hunks = args.get("hunks").cloned().unwrap_or(json!([]));
 
-        let sess = session_scope.unwrap_or(1);
+        let sess = require_session(caller)?;
         let req = agent_control::request_review(conn, sess, summary, &hunks)
             .map_err(|e| e.to_string())?;
 

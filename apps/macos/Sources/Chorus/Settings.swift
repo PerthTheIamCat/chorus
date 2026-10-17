@@ -190,6 +190,7 @@ struct GeneralSettings: View {
     var workspace: String = ""
     @AppStorage("chorus.defaultPermission") private var defaultPermission = Int(PermissionLevel.ask.rawValue)
     @AppStorage("chorus.enterSends") private var enterSends = true
+    @AppStorage(SpotlightIndexer.settingKey) private var spotlightIndexing = false
     @AppStorage("chorus.thinkingOpen") private var thinkingOpen = true
     @AppStorage("chorus.failoverAccounts") private var failoverAccounts = true
     @AppStorage("chorus.failoverProviders") private var failoverProviders = true
@@ -225,6 +226,13 @@ struct GeneralSettings: View {
                 Divider().padding(.leading, 12)
                 SettingsRow(title: "เปิดกล่องความคิดระหว่างเอเจนต์ทำงาน") {
                     Toggle("", isOn: $thinkingOpen).labelsHidden().toggleStyle(.switch)
+                }
+                Divider().padding(.leading, 12)
+                SettingsRow(title: "ค้นหาเซสชันผ่าน Spotlight", detail: "ส่งชื่อและเป้าหมายของเซสชันเข้าดัชนี Spotlight ของระบบ (อยู่นอกข้อมูลของ Chorus)") {
+                    Toggle("", isOn: $spotlightIndexing).labelsHidden().toggleStyle(.switch)
+                        .onChange(of: spotlightIndexing) { _, on in
+                            if !on { SpotlightIndexer.shared.clearAll() }
+                        }
                 }
             }
             SettingsGroup(title: "รูปแบบหน้าต่างและแถบเลื่อน",

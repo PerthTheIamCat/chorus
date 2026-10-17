@@ -6,8 +6,14 @@ import UniformTypeIdentifiers
 ///
 /// Enables users to search via macOS Spotlight (⌘Space) or Alfred / Raycast
 /// for previous agent sessions, architectural decisions, and debugging runs.
+///
+/// Off by default: a session's goal is the user's first message, which can
+/// hold pasted secrets, and the system index lives outside Chorus's data.
 final class SpotlightIndexer {
     static let shared = SpotlightIndexer()
+    /// `UserDefaults` key for the opt-in. Absent = off.
+    static let settingKey = "chorus.spotlightIndexing"
+    static var isEnabled: Bool { UserDefaults.standard.bool(forKey: settingKey) }
     private let index = CSSearchableIndex.default()
     private let domainIdentifier = "dev.chorus.app.sessions"
 
@@ -15,7 +21,7 @@ final class SpotlightIndexer {
 
     /// Indexes an active or updated Chorus session.
     func indexSession(id: Int64, title: String, goal: String, cwd: String) {
-        guard CSSearchableIndex.isIndexingAvailable() else { return }
+        guard Self.isEnabled, CSSearchableIndex.isIndexingAvailable() else { return }
 
         let attributeSet = CSSearchableItemAttributeSet(contentType: .text)
         attributeSet.title = title.isEmpty ? "Chorus Session #\(id)" : title

@@ -7,11 +7,15 @@
 //! When `post-turn.sh` fails, stdout and stderr are captured and returned
 //! as a structured verification failure feedback message to guide the agent
 //! to self-heal without human intervention.
+//!
+//! Hook scripts come from the repo, so running one needs a [`Consent`]: the
+//! user trusted the project, and the script runs inside the turn's sandbox
+//! profile. Cloning a repo never runs its hooks.
 
+use crate::trust::Consent;
 use crate::{ChorusError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Instant;
 
 /// Max bytes of stdout/stderr to retain before truncating to avoid context blowout.
@@ -178,22 +182,32 @@ fn truncate_hook_output(raw: &str) -> String {
         return raw.to_string();
     }
 
-    let head_size = MAX_HOOK_OUTPUT_BYTES / 2;
-    let tail_size = MAX_HOOK_OUTPUT_BYTES / 2;
+    // Cut on char boundaries: Thai is 3 bytes per char, and a byte-offset
+    // slice through one panics.
+    let mut head_end = MAX_HOOK_OUTPUT_BYTES / 2;
+    while !raw.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = raw.len() - MAX_HOOK_OUTPUT_BYTES / 2;
+    while !raw.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
 
-    let head = &raw[..head_size];
-    let tail = &raw[raw.len() - tail_size..];
+    let head = &raw[..head_end];
+    let tail = &raw[tail_start..];
 
     format!("{head}\n\n... [output truncated: exceeded 64KB] ...\n\n{tail}")
 }
 
-/// Execute a hook script if present in `<workspace_root>/.chorus/hooks/`.
+/// Execute a hook script if present in `<workspace>/.chorus/hooks/`, where
+/// the workspace is the one `consent` was given for, inside its sandbox.
 /// Returns `Ok(None)` if no script exists for this stage.
 pub fn run_hook(
-    workspace_root: &Path,
+    consent: &Consent,
     stage: HookStage,
     context: &HookContext,
 ) -> Result<Option<HookOutput>> {
+    let workspace_root = consent.workspace();
     let Some(script_path) = find_hook(workspace_root, stage) else {
         return Ok(None);
     };
@@ -202,15 +216,13 @@ pub fn run_hook(
 
     // Determine how to run the hook script.
     // If it has a .sh extension, run with `/bin/sh`. Otherwise, run directly.
-    let mut cmd = if script_path.extension().and_then(|e| e.to_str()) == Some("sh") {
-        let mut c = Command::new("/bin/sh");
-        c.arg(&script_path);
-        c
+    let script = script_path.to_string_lossy().into_owned();
+    let argv = if script_path.extension().and_then(|e| e.to_str()) == Some("sh") {
+        vec!["/bin/sh".to_string(), script]
     } else {
-        Command::new(&script_path)
+        vec![script]
     };
-
-    cmd.current_dir(workspace_root);
+    let mut cmd = consent.command(&argv)?;
 
     // Standard environment variables
     cmd.env("CHORUS_HOOK_STAGE", stage.as_str());
@@ -262,19 +274,13 @@ pub fn run_hook(
 }
 
 /// Convenience runner for pre-dispatch hooks.
-pub fn run_pre_dispatch(
-    workspace_root: &Path,
-    context: &HookContext,
-) -> Result<Option<HookOutput>> {
-    run_hook(workspace_root, HookStage::PreDispatch, context)
+pub fn run_pre_dispatch(consent: &Consent, context: &HookContext) -> Result<Option<HookOutput>> {
+    run_hook(consent, HookStage::PreDispatch, context)
 }
 
 /// Convenience runner for post-turn verification hooks.
-pub fn run_post_turn(
-    workspace_root: &Path,
-    context: &HookContext,
-) -> Result<Option<HookOutput>> {
-    run_hook(workspace_root, HookStage::PostTurn, context)
+pub fn run_post_turn(consent: &Consent, context: &HookContext) -> Result<Option<HookOutput>> {
+    run_hook(consent, HookStage::PostTurn, context)
 }
 
 /// High-level engine managing hook execution for a workspace.
@@ -298,15 +304,41 @@ impl HooksEngine {
         find_hook(&self.workspace_root, stage).is_some()
     }
 
-    pub fn run(&self, stage: HookStage, context: &HookContext) -> Result<Option<HookOutput>> {
-        run_hook(&self.workspace_root, stage, context)
+    /// Run a hook. `consent` must be for this engine's workspace.
+    pub fn run(
+        &self,
+        consent: &Consent,
+        stage: HookStage,
+        context: &HookContext,
+    ) -> Result<Option<HookOutput>> {
+        if consent.workspace() != self.workspace_root {
+            return Err(ChorusError::Invalid("consent is for a different workspace".into()));
+        }
+        run_hook(consent, stage, context)
     }
 
-    pub fn run_pre_dispatch(&self, context: &HookContext) -> Result<Option<HookOutput>> {
-        self.run(HookStage::PreDispatch, context)
+    pub fn run_pre_dispatch(&self, consent: &Consent, context: &HookContext) -> Result<Option<HookOutput>> {
+        self.run(consent, HookStage::PreDispatch, context)
     }
 
-    pub fn run_post_turn(&self, context: &HookContext) -> Result<Option<HookOutput>> {
-        self.run(HookStage::PostTurn, context)
+    pub fn run_post_turn(&self, consent: &Consent, context: &HookContext) -> Result<Option<HookOutput>> {
+        self.run(consent, HookStage::PostTurn, context)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncation_cuts_on_char_boundaries() {
+        // 'ก' is 3 bytes; 64 KiB / 2 is not a multiple of 3, so a byte slice
+        // lands inside a char and used to panic.
+        let thai = "ก".repeat(MAX_HOOK_OUTPUT_BYTES);
+        let out = truncate_hook_output(&thai);
+        assert!(out.contains("output truncated"));
+        assert!(out.len() < thai.len());
+        let mixed = format!("x{}", "ก".repeat(MAX_HOOK_OUTPUT_BYTES));
+        truncate_hook_output(&mixed);
     }
 }

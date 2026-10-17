@@ -4,14 +4,20 @@ use chorus_core::{mcp::McpServer, memory, store::Store};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
-fn rpc(url: &str, body: serde_json::Value) -> serde_json::Value {
+fn rpc(server: &McpServer, body: serde_json::Value) -> serde_json::Value {
+    rpc_as(server.url(), Some(&server.credential("codex").unwrap()), body)
+}
+
+/// Raw call with an explicit bearer secret (or none).
+fn rpc_as(url: &str, secret: Option<&str>, body: serde_json::Value) -> serde_json::Value {
     use std::io::{BufRead, BufReader};
     let addr = url.trim_start_matches("http://").split('/').next().unwrap();
     let payload = serde_json::to_vec(&body).unwrap();
     let mut s = TcpStream::connect(addr).unwrap();
     write!(
         s,
-        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n",
+        secret.map(|s| format!("Authorization: Bearer {s}\r\n")).unwrap_or_default(),
         payload.len()
     )
     .unwrap();
@@ -47,7 +53,7 @@ fn an_agent_can_list_and_call_memory_propose() {
     let server = McpServer::start(db.to_str().unwrap()).unwrap();
 
     let init = rpc(
-        server.url(),
+        &server,
         serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}
         }),
@@ -57,7 +63,7 @@ fn an_agent_can_list_and_call_memory_propose() {
     assert!(init["result"]["instructions"].as_str().unwrap().contains("memory_propose"));
 
     let tools = rpc(
-        server.url(),
+        &server,
         serde_json::json!({
             "jsonrpc": "2.0", "id": 2, "method": "tools/list"
         }),
@@ -65,7 +71,7 @@ fn an_agent_can_list_and_call_memory_propose() {
     assert_eq!(tools["result"]["tools"][0]["name"], "memory_propose");
 
     let call = rpc(
-        server.url(),
+        &server,
         serde_json::json!({
             "jsonrpc": "2.0", "id": 3, "method": "tools/call",
             "params": { "name": "memory_propose", "arguments": { "text": "ใช้ pnpm ไม่ใช่ npm" } }
@@ -85,7 +91,7 @@ fn an_agent_can_list_and_call_memory_propose() {
 
     // An over-long proposal is rejected by the tool.
     let bad = rpc(
-        server.url(),
+        &server,
         serde_json::json!({
             "jsonrpc": "2.0", "id": 4, "method": "tools/call",
             "params": { "name": "memory_propose", "arguments": { "text": "x".repeat(200) } }
@@ -116,10 +122,11 @@ fn an_absurd_content_length_is_refused_not_allocated() {
         .to_string();
 
     // Claim 8 GiB. The old code did `vec![0u8; content_length]` and died.
+    let secret = server.credential("codex").unwrap();
     let mut s = TcpStream::connect(&addr).unwrap();
     write!(
         s,
-        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 8589934592\r\n\r\n"
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {secret}\r\nContent-Length: 8589934592\r\n\r\n"
     )
     .unwrap();
     s.flush().unwrap();
@@ -162,4 +169,46 @@ fn a_browser_origin_is_turned_away() {
         .unwrap();
     let _ = s.read_to_string(&mut buf);
     assert!(buf.contains("403"), "expected 403, got: {buf:?}");
+}
+
+/// P2-4: loopback is reachable by every local process and user. No secret,
+/// or a wrong one, gets nothing — not even `tools/list`.
+#[test]
+fn requests_without_the_session_secret_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("s.db");
+    let store = Store::open(&db).unwrap();
+    let sess = chorus_core::ledger::new_session(store.conn(), "s", "/tmp").unwrap();
+    let server = McpServer::start_for_session(db.to_str().unwrap(), sess).unwrap();
+    let good = server.credential("codex").unwrap();
+    let list = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+
+    assert!(rpc_as(server.url(), None, list.clone()).is_null());
+    assert!(rpc_as(server.url(), Some("not-the-secret"), list.clone()).is_null());
+    let mut near = good.clone();
+    near.pop();
+    near.push('0');
+    if near != good {
+        assert!(rpc_as(server.url(), Some(&near), list.clone()).is_null());
+    }
+    // Another session's server secret does not work here either.
+    let other = McpServer::start_for_session(db.to_str().unwrap(), sess).unwrap();
+    let foreign = other.credential("codex").unwrap();
+    assert!(rpc_as(server.url(), Some(&foreign), list.clone()).is_null());
+
+    assert!(rpc_as(server.url(), Some(&good), list)["result"]["tools"].is_array());
+
+    // The ACP entry carries the secret as an `{name, value}` header.
+    let entry = server.mcp_server_entry("codex").unwrap();
+    assert_eq!(entry["headers"][0]["name"], "Authorization");
+    assert_eq!(entry["headers"][0]["value"], format!("Bearer {good}"));
+
+    // Raw status is 401.
+    let addr = server.url().trim_start_matches("http://").split('/').next().unwrap().to_string();
+    let mut s = TcpStream::connect(&addr).unwrap();
+    write!(s, "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 2\r\n\r\n{{}}").unwrap();
+    let mut buf = String::new();
+    s.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+    let _ = s.read_to_string(&mut buf);
+    assert!(buf.starts_with("HTTP/1.1 401"), "{buf:?}");
 }

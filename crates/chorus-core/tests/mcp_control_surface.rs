@@ -3,20 +3,26 @@
 use chorus_core::{
     agent_control,
     mcp::McpServer,
-    roles::{self, AgentRole, AGENTS_DIR},
+    roles::{self, AGENTS_DIR},
     store::Store,
 };
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
-fn rpc(url: &str, body: Value) -> Value {
+fn rpc(server: &McpServer, body: Value) -> Value {
+    rpc_as(server.url(), Some(&server.credential("codex").unwrap()), body)
+}
+
+/// Raw call with an explicit bearer secret (or none).
+fn rpc_as(url: &str, secret: Option<&str>, body: Value) -> Value {
     let addr = url.trim_start_matches("http://").split('/').next().unwrap();
     let payload = serde_json::to_vec(&body).unwrap();
     let mut s = TcpStream::connect(addr).unwrap();
     write!(
         s,
-        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n",
+        secret.map(|s| format!("Authorization: Bearer {s}\r\n")).unwrap_or_default(),
         payload.len()
     )
     .unwrap();
@@ -44,12 +50,13 @@ fn rpc(url: &str, body: Value) -> Value {
 fn tools_list_exposes_full_agent_control_surface() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("store.db");
-    Store::open(&db).unwrap();
 
-    let server = McpServer::start(db.to_str().unwrap()).unwrap();
+    let store = Store::open(&db).unwrap();
+    let sess = chorus_core::ledger::new_session(store.conn(), "root", "/tmp").unwrap();
+    let server = McpServer::start_for_session(db.to_str().unwrap(), sess).unwrap();
 
     let list_resp = rpc(
-        server.url(),
+        &server,
         json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
     );
 
@@ -99,7 +106,7 @@ fn end_to_end_orchestration_tool_dispatch() {
 
     // 1. chorus_spawn_agent
     let spawn_res = rpc(
-        server.url(),
+        &server,
         json!({
             "jsonrpc": "2.0", "id": 10, "method": "tools/call",
             "params": {
@@ -118,7 +125,7 @@ fn end_to_end_orchestration_tool_dispatch() {
 
     // 2. chorus_send_message
     let msg_res = rpc(
-        server.url(),
+        &server,
         json!({
             "jsonrpc": "2.0", "id": 11, "method": "tools/call",
             "params": {
@@ -135,7 +142,7 @@ fn end_to_end_orchestration_tool_dispatch() {
 
     // 3. chorus_wait_agent (still running)
     let wait_res = rpc(
-        server.url(),
+        &server,
         json!({
             "jsonrpc": "2.0", "id": 12, "method": "tools/call",
             "params": {
@@ -158,7 +165,7 @@ fn end_to_end_orchestration_tool_dispatch() {
 
     // 4. chorus_wait_agent (after completion)
     let wait_done = rpc(
-        server.url(),
+        &server,
         json!({
             "jsonrpc": "2.0", "id": 13, "method": "tools/call",
             "params": {
@@ -171,7 +178,7 @@ fn end_to_end_orchestration_tool_dispatch() {
 
     // 5. chorus_collect_results
     let collect_res = rpc(
-        server.url(),
+        &server,
         json!({
             "jsonrpc": "2.0", "id": 14, "method": "tools/call",
             "params": {
@@ -187,7 +194,7 @@ fn end_to_end_orchestration_tool_dispatch() {
 
     // 6. Spawn a second agent and chorus_cancel_agent
     let spawn2_res = rpc(
-        server.url(),
+        &server,
         json!({
             "jsonrpc": "2.0", "id": 15, "method": "tools/call",
             "params": {
@@ -199,7 +206,7 @@ fn end_to_end_orchestration_tool_dispatch() {
     assert!(spawn2_res["result"]["content"][0]["text"].as_str().unwrap().contains("#2"));
 
     let cancel_res = rpc(
-        server.url(),
+        &server,
         json!({
             "jsonrpc": "2.0", "id": 16, "method": "tools/call",
             "params": {
@@ -223,7 +230,7 @@ fn steering_and_task_visibility_tool_dispatch() {
 
     // 1. chorus_update_checklist
     let checklist_res = rpc(
-        server.url(),
+        &server,
         json!({
             "jsonrpc": "2.0", "id": 20, "method": "tools/call",
             "params": {
@@ -248,7 +255,7 @@ fn steering_and_task_visibility_tool_dispatch() {
 
     // 2. chorus_jump_to_file
     let jump_res = rpc(
-        server.url(),
+        &server,
         json!({
             "jsonrpc": "2.0", "id": 21, "method": "tools/call",
             "params": {
@@ -266,7 +273,7 @@ fn steering_and_task_visibility_tool_dispatch() {
 
     // 3. chorus_request_review
     let review_res = rpc(
-        server.url(),
+        &server,
         json!({
             "jsonrpc": "2.0", "id": 22, "method": "tools/call",
             "params": {
@@ -289,7 +296,7 @@ fn steering_and_task_visibility_tool_dispatch() {
 
     // 4. chorus_synthesize_role
     let synth_res = rpc(
-        server.url(),
+        &server,
         json!({
             "jsonrpc": "2.0", "id": 23, "method": "tools/call",
             "params": {
@@ -307,7 +314,7 @@ fn steering_and_task_visibility_tool_dispatch() {
 
     // 5. chorus_notify_user
     let notify_res = rpc(
-        server.url(),
+        &server,
         json!({
             "jsonrpc": "2.0", "id": 24, "method": "tools/call",
             "params": {
@@ -358,4 +365,110 @@ Always ensure zero credentials, tokens, or plaintext secrets exist in proposed p
 
     let reloaded = roles::find_role(dir.path(), "a11y-auditor").expect("find saved role");
     assert_eq!(reloaded.name, "a11y-auditor");
+}
+
+fn call(server: &McpServer, as_agent: &str, tool: &str, args: Value) -> Value {
+    let secret = server.credential(as_agent).unwrap();
+    rpc_as(
+        server.url(),
+        Some(&secret),
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":args}}),
+    )
+}
+
+/// P2-3: an agent in session A could steer, read or cancel session B's
+/// sub-agents by guessing a small integer id.
+#[test]
+fn agent_ids_outside_the_callers_session_tree_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("store.db");
+    let store = Store::open(&db).unwrap();
+    let a = chorus_core::ledger::new_session(store.conn(), "A", "/tmp").unwrap();
+    let b = chorus_core::ledger::new_session(store.conn(), "B", "/tmp").unwrap();
+    let server_a = McpServer::start_for_session(db.to_str().unwrap(), a).unwrap();
+    let server_b = McpServer::start_for_session(db.to_str().unwrap(), b).unwrap();
+
+    let spawned = call(&server_b, "codex", "chorus_spawn_agent", json!({"role":"builder","task":"t"}));
+    assert!(spawned["result"].is_object(), "{spawned}");
+    let b_agent = agent_control::list_subagents(store.conn(), Some(b)).unwrap()[0].id;
+
+    for (tool, args) in [
+        ("chorus_send_message", json!({"agent_id": b_agent, "message": "x"})),
+        ("chorus_cancel_agent", json!({"agent_id": b_agent})),
+        ("chorus_wait_agent", json!({"agent_id": b_agent})),
+        ("chorus_collect_results", json!({"agent_ids": [b_agent]})),
+    ] {
+        let r = call(&server_a, "codex", tool, args);
+        assert!(r["error"].is_object(), "{tool} crossed sessions: {r}");
+    }
+    let still = agent_control::get_subagent(store.conn(), b_agent).unwrap();
+    assert_eq!(still.status, agent_control::SubagentStatus::Running);
+
+    // The owner can still act on it.
+    let ok = call(&server_b, "codex", "chorus_send_message", json!({"agent_id": b_agent, "message": "go"}));
+    assert!(ok["result"].is_object(), "{ok}");
+}
+
+/// P2-3: control-surface writes used raw INSERTs as actor 1 ("user") with no
+/// parent link — agent text became a *user* message in the child's ledger.
+#[test]
+fn control_surface_writes_go_through_the_ledger_as_the_calling_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("store.db");
+    let store = Store::open(&db).unwrap();
+    let c = store.conn();
+    // `Session::new` interns "user" first; mirror that so actor 1 == user.
+    let user = chorus_core::actor::intern(c, "user", "human").unwrap();
+    let sess = chorus_core::ledger::new_session(c, "root", "/tmp").unwrap();
+    let first = chorus_core::ledger::append(
+        c,
+        &chorus_core::NewEvent::new(sess, chorus_core::EventKind::Msg, user, "hello"),
+    )
+    .unwrap();
+    let server = McpServer::start_for_session(db.to_str().unwrap(), sess).unwrap();
+
+    call(&server, "codex", "chorus_spawn_agent", json!({"role":"builder","task":"t"}));
+    let agent = agent_control::list_subagents(c, Some(sess)).unwrap()[0].clone();
+    call(&server, "codex", "chorus_send_message", json!({"agent_id": agent.id, "message": "do it"}));
+
+    let codex: i64 = c.query_row("SELECT id FROM actor WHERE name='codex'", [], |r| r.get(0)).unwrap();
+    let spawn_ev = chorus_core::ledger::tail(c, sess, 1).unwrap().pop().unwrap();
+    assert_eq!(spawn_ev.actor, codex);
+    assert_eq!(spawn_ev.parent, Some(first), "spawn event must keep the parent chain");
+    assert!(spawn_ev.t > 0 || spawn_ev.t == 0 && spawn_ev.seq > first);
+
+    let child = agent.child_sess.unwrap();
+    let msg = chorus_core::ledger::tail(c, child, 1).unwrap().pop().unwrap();
+    assert_eq!(msg.actor, codex, "agent text must not be recorded as the user");
+    assert_ne!(msg.actor, user);
+}
+
+/// P2-3: the project-memory server has no session. It used to act on
+/// session 1; now session-bound tools are absent and refused.
+#[test]
+fn unscoped_server_never_falls_back_to_session_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("store.db");
+    let store = Store::open(&db).unwrap();
+    let one = chorus_core::ledger::new_session(store.conn(), "one", "/tmp").unwrap();
+    assert_eq!(one, 1);
+    let server = McpServer::start(db.to_str().unwrap()).unwrap();
+
+    let tools = rpc(&server, json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}));
+    let names: Vec<&str> = tools["result"]["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(names.contains(&"memory_propose"));
+    assert!(!names.contains(&"chorus_update_checklist"));
+
+    for (tool, args) in [
+        ("chorus_update_checklist", json!({"items":[{"text":"x"}]})),
+        ("chorus_jump_to_file", json!({"path":"a"})),
+        ("chorus_request_review", json!({"summary":"s"})),
+        ("chorus_spawn_agent", json!({"role":"builder","task":"t"})),
+    ] {
+        let r = call(&server, "codex", tool, args);
+        assert!(r["error"].is_object(), "{tool}: {r}");
+    }
+    assert!(agent_control::get_checklist(store.conn(), 1).unwrap().is_empty());
+    assert!(agent_control::get_latest_jump(store.conn(), 1).unwrap().is_none());
+    assert!(agent_control::list_subagents(store.conn(), None).unwrap().is_empty());
 }

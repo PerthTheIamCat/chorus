@@ -245,8 +245,37 @@ pub fn list_subagents(conn: &Connection, parent_sess: Option<i64>) -> Result<Vec
     Ok(out)
 }
 
+/// Whether subagent `agent_id` belongs to `root_sess`'s tree: spawned by it,
+/// or by a child session that itself descends from it.
+pub fn agent_in_session_tree(conn: &Connection, root_sess: i64, agent_id: i64) -> Result<bool> {
+    let mut sess = get_subagent(conn, agent_id)?.parent_sess;
+    // Bounded walk: a cycle in hand-edited rows must not hang the server.
+    for _ in 0..64 {
+        let Some(s) = sess else { return Ok(false) };
+        if s == root_sess {
+            return Ok(true);
+        }
+        sess = conn
+            .query_row("SELECT parent_sess FROM subagent WHERE child_sess = ?1", [s], |r| {
+                r.get::<_, Option<i64>>(0)
+            })
+            .optional()?
+            .flatten();
+    }
+    Ok(false)
+}
+
 /// Send a steering message or instruction to a child agent session.
-pub fn send_message(conn: &Connection, subagent_id: i64, message: &str) -> Result<SubagentMessage> {
+///
+/// `actor` is who is speaking — the orchestrating agent when this comes from
+/// MCP. It is recorded through [`crate::ledger::append`] so the child's
+/// ledger keeps its parent chain and never shows agent text as the user's.
+pub fn send_message(
+    conn: &Connection,
+    subagent_id: i64,
+    actor: i64,
+    message: &str,
+) -> Result<SubagentMessage> {
     // Verify subagent exists
     let agent = get_subagent(conn, subagent_id)?;
     let now = now_ms();
@@ -265,11 +294,11 @@ pub fn send_message(conn: &Connection, subagent_id: i64, message: &str) -> Resul
 
     // If subagent has child session, record a Msg event in the child ledger
     if let Some(child_sess) = agent.child_sess {
-        let _ = conn.execute(
-            "INSERT INTO event(t, sess, parent, kind, actor, body, blob, tok_in, tok_out, cost_usd, model_id)
-             VALUES (0, ?1, NULL, 0, 1, ?2, NULL, NULL, NULL, NULL, NULL)",
-            params![child_sess, message],
-        );
+        let mut ev = crate::types::NewEvent::new(child_sess, crate::types::EventKind::Msg, actor, message);
+        if let Some(last) = crate::ledger::tail(conn, child_sess, 1)?.last() {
+            ev = ev.parent(last.seq);
+        }
+        crate::ledger::append(conn, &ev)?;
     }
 
     Ok(SubagentMessage {
@@ -620,7 +649,8 @@ mod tests {
         assert!(agent.worktree.is_some());
 
         // Steering message
-        let msg = send_message(conn, agent.id, "Check HeuristicCounter").unwrap();
+        let lead = crate::actor::intern(conn, "lead", "agent").unwrap();
+        let msg = send_message(conn, agent.id, lead, "Check HeuristicCounter").unwrap();
         assert_eq!(msg.content, "Check HeuristicCounter");
 
         // Wait check while running
