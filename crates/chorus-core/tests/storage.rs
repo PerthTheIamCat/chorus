@@ -391,3 +391,20 @@ fn rename_and_delete_session() {
     assert_eq!(blobs, 1);
     assert!(ledger::delete_session(c, gone).is_err());
 }
+
+#[test]
+fn session_cost_sums_reported_cost() {
+    // `event.actor` is an INTEGER id; reading it as text failed the whole
+    // query, so the shell's cost card sat at $0 for every session.
+    let store = setup();
+    let conn = store.conn();
+    let actor_id = actor::intern(conn, "claude", "anthropic").unwrap();
+    let sess = ledger::new_session(conn, "cost", "/tmp").unwrap();
+    for cost in [Some(0.25), None, Some(0.5)] {
+        let mut ev = NewEvent::new(sess, EventKind::Msg, actor_id, "reply");
+        ev.cost_usd = cost;
+        ledger::append(conn, &ev).unwrap();
+    }
+    let total = ledger::session_cost_usd(conn, sess).unwrap();
+    assert!((total - 0.75).abs() < 1e-9, "got {total}");
+}

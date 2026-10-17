@@ -1648,6 +1648,9 @@ impl Session {
     ) -> Result<Vec<i64>> {
         let c = self.store.conn();
         let mut seqs = Vec::new();
+        // The bridge's turn cost goes on one event only, or the session total
+        // would count it once per message.
+        let mut cost = outcome.cost_usd;
         for ev in &outcome.events {
             let (kind, body) = match ev {
                 AgentEvent::Message(m) => (EventKind::Msg, m.clone()),
@@ -1684,6 +1687,7 @@ impl Session {
             if matches!(ev, AgentEvent::Message(_)) {
                 ne.tok_out = outcome.context_used;
                 ne.model_id = outcome.model.clone();
+                ne.cost_usd = cost.take();
             }
             seqs.push(ledger::append(c, &ne)?);
         }

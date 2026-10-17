@@ -13,6 +13,10 @@ struct CodeViewerView: View {
 
     @State private var fileContent: String = ""
     @State private var lines: [String] = []
+    /// Coloured lines, built off the main thread from the core's spans.
+    /// Empty until ready; rows fall back to plain text meanwhile.
+    @State private var highlighted: [AttributedString] = []
+    @State private var loadToken = UUID()
     @State private var hoveredLine: Int? = nil
     @State private var selectedLine: Int? = nil
     @State private var detectedEditor: String = "VS Code"
@@ -54,7 +58,7 @@ struct CodeViewerView: View {
                         CodeLineRow(
                             lineNum: lineNum,
                             lineText: rawLine,
-                            ext: fileExtension,
+                            highlighted: idx < highlighted.count ? highlighted[idx] : nil,
                             isHovered: hoveredLine == lineNum,
                             isSelected: selectedLine == lineNum,
                             onHover: { h in
@@ -219,11 +223,23 @@ struct CodeViewerView: View {
     private func loadFile() {
         guard !filePath.isEmpty, !cwd.isEmpty else { return }
         let fullPath = (cwd as NSString).appendingPathComponent(filePath)
-        if let content = try? String(contentsOfFile: fullPath, encoding: .utf8) {
-            self.fileContent = content
-            self.lines = content.components(separatedBy: "\n")
-        } else {
-            self.lines = ["// Error: Unable to read file at \(filePath)"]
+        let path = filePath
+        let token = UUID()
+        loadToken = token
+        highlighted = []
+        // Read + highlight off the main thread; a big file used to freeze
+        // the window while it loaded.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let content = try? String(contentsOfFile: fullPath, encoding: .utf8)
+            let lines = content?.components(separatedBy: "\n") ?? ["// Error: Unable to read file at \(path)"]
+            let spans = content.flatMap { Engine.highlightSpans(path: path, text: $0) }
+            let coloured = spans.map { CodeTheme.paint(lines: lines, spans: $0) } ?? []
+            DispatchQueue.main.async {
+                guard token == loadToken else { return }   // another file was opened since
+                fileContent = content ?? ""
+                self.lines = lines
+                highlighted = coloured
+            }
         }
     }
 
@@ -264,7 +280,7 @@ struct CodeViewerView: View {
 private struct CodeLineRow: View {
     let lineNum: Int
     let lineText: String
-    let ext: String
+    let highlighted: AttributedString?
     let isHovered: Bool
     let isSelected: Bool
     let onHover: (Bool) -> Void
@@ -286,7 +302,7 @@ private struct CodeLineRow: View {
                 .frame(width: 1)
 
             // Syntax Highlighted Code
-            Text(highlightedText)
+            Text(highlighted ?? AttributedString(lineText.isEmpty ? " " : lineText))
                 .font(.system(size: 12.5, weight: .regular, design: .monospaced))
                 .textSelection(.enabled)
                 .lineLimit(1)
@@ -312,69 +328,48 @@ private struct CodeLineRow: View {
         return Color.clear
     }
 
-    private var highlightedText: AttributedString {
-        SyntaxHighlighter.highlight(line: lineText, ext: ext)
-    }
 }
 
-// MARK: - Lightweight Syntax Highlighter
-enum SyntaxHighlighter {
-    static func highlight(line: String, ext: String) -> AttributedString {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        if trimmed.isEmpty {
-            return AttributedString(" ")
+// MARK: - Syntax theme
+/// Xcode's default light/dark palette for the kinds `chorus_highlight`
+/// reports. Colour only — which text is what kind is decided in the core.
+enum CodeTheme {
+    private static func dynamic(_ light: UInt32, _ dark: UInt32) -> Color {
+        func ns(_ hex: UInt32) -> NSColor {
+            NSColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255,
+                    blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
         }
-
-        var attr = AttributedString(line)
-
-        // 1. Comments
-        if trimmed.hasPrefix("#") || trimmed.hasPrefix("//") {
-            attr.foregroundColor = .secondary.opacity(0.65)
-            attr.font = .system(size: 12.5, weight: .regular, design: .monospaced).italic()
-            return attr
-        }
-
-        // 2. TOML Section headers: [package], [[bin]], [dependencies]
-        if (ext == "toml" || ext == "ini") && trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
-            attr.foregroundColor = .blue
-            attr.font = .system(size: 12.5, weight: .bold, design: .monospaced)
-            return attr
-        }
-
-        // 3. Highlight Strings in Green
-        highlightRegex(pattern: "\"[^\"]*\"|'[^']*'", in: &attr, color: .green)
-
-        // 4. Highlight Keys in TOML / YAML (e.g. `name =`, `version.workspace =`)
-        if ext == "toml" || ext == "yaml" || ext == "yml" {
-            highlightRegex(pattern: "^\\s*([a-zA-Z0-9_.-]+)\\s*(?==)", in: &attr, color: .primary)
-            highlightRegex(pattern: "\\b(true|false)\\b", in: &attr, color: .orange)
-            highlightRegex(pattern: "\\b\\d+(\\.\\d+)?\\b", in: &attr, color: .purple)
-        }
-
-        // 5. Highlight Rust / Swift / TS / JS code
-        if ext == "rs" || ext == "swift" || ext == "ts" || ext == "js" {
-            let kwPattern = "\\b(pub|fn|struct|enum|impl|let|mut|match|if|else|return|import|export|const|function|var|class|type|interface|use|mod|crate|async|await|guard|case|default|where|for|in|while|loop)\\b"
-            highlightRegex(pattern: kwPattern, in: &attr, color: .purple)
-            // Types in Cyan
-            highlightRegex(pattern: "\\b([A-Z][a-zA-Z0-9_]+)\\b", in: &attr, color: .cyan)
-            // Booleans & Optionals in Orange
-            highlightRegex(pattern: "\\b(true|false|nil|null|None|Some|Ok|Err)\\b", in: &attr, color: .orange)
-            // Numbers in Teal
-            highlightRegex(pattern: "\\b\\d+(\\.\\d+)?\\b", in: &attr, color: .teal)
-        }
-
-        return attr
+        return Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? ns(dark) : ns(light)
+        })
     }
 
-    private static func highlightRegex(pattern: String, in attr: inout AttributedString, color: Color) {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return }
-        let fullString = String(attr.characters)
-        let matches = regex.matches(in: fullString, range: NSRange(location: 0, length: fullString.utf16.count))
+    /// Index = `chorus_core::highlight::Kind`.
+    static let colors: [Color] = [
+        dynamic(0x9B2393, 0xFC5FA3), // keyword
+        dynamic(0x0B4F79, 0x5DD8FF), // type
+        dynamic(0xC41A16, 0xFC6A5D), // string
+        dynamic(0x5D6C79, 0x6C7986), // comment
+        dynamic(0x1C00CF, 0xD0BF69), // number
+        dynamic(0x326D74, 0x67B7A4), // function
+        dynamic(0x643820, 0xFD8F3F), // attribute / macro / key
+        dynamic(0x9B2393, 0xFC5FA3), // constant (Xcode colours these as keywords)
+    ]
 
-        for match in matches {
-            guard let range = Range(match.range, in: fullString),
-                  let attrRange = Range(range, in: attr) else { continue }
-            attr[attrRange].foregroundColor = color
+    static func paint(lines: [String], spans: [[[Int]]]) -> [AttributedString] {
+        lines.enumerated().map { i, line in
+            var attr = AttributedString(line.isEmpty ? " " : line)
+            guard i < spans.count, !line.isEmpty else { return attr }
+            let utf8 = line.utf8
+            for span in spans[i] where span.count == 3 {
+                guard span[2] >= 0, span[2] < colors.count,
+                      let lo = utf8.index(utf8.startIndex, offsetBy: span[0], limitedBy: utf8.endIndex),
+                      let hi = utf8.index(lo, offsetBy: span[1], limitedBy: utf8.endIndex),
+                      let r = Range(lo..<hi, in: attr) else { continue }
+                attr[r].foregroundColor = colors[span[2]]
+                if span[2] == 3 { attr[r].font = .system(size: 12.5, design: .monospaced).italic() }
+            }
+            return attr
         }
     }
 }

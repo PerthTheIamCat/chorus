@@ -94,6 +94,11 @@ struct ContentView: View {
     @State private var showProvidersPopover = false
     /// A tool's own page shown in place of the thread (nil = the thread).
     @State private var toolPage: String?
+    /// Thread follows new output only while the reader is at the bottom.
+    /// Cleared when they scroll up on purpose; set again by scrolling back
+    /// down, sending, or opening a session.
+    @State private var chatPinned = true
+    @State private var chatLastMinY: CGFloat = 0
     @State private var settingsSection = SettingsSheet.Section.accounts
     @State private var compareOutput: String?
     @State private var inspected: (text: String, tokens: Int64)?
@@ -158,6 +163,7 @@ struct ContentView: View {
     @State private var importingFiles = 0
     @State private var confirmRevert = false
     @State private var rejected: Set<String> = []
+    @State private var collapsedFiles: Set<String> = []
     @State private var suggestionsPaused = false
     @ObservedObject private var powerManager = PowerManager.shared
     @State private var inspectedRepoMap: (text: String, count: Int)?
@@ -406,7 +412,7 @@ struct ContentView: View {
     private func badge(_ t: RightTab) -> Int {
         switch t {
         case .context: return 0
-        case .changes: return Set(parseHunks(engine.workingDiff).map(\.file)).count
+        case .changes: return engine.diffFiles.count
         case .memory: return engine.pending.count
         case .checkpoints: return 0
         }
@@ -1601,8 +1607,7 @@ struct ContentView: View {
     // MARK: thread — the ledger, plus the compose box
 
     @ViewBuilder
-    private func rowForEvent(_ ev: LedgerEvent) -> some View {
-        let atts = engine.attachments.filter { $0.event_seq == ev.seq }
+    private func rowForEvent(_ ev: LedgerEvent, atts: [SessionAttachment], lastAgentMsg: Int64?) -> some View {
         let isUser = ev.actor == "user"
         let trans = reduceMotion ? AnyTransition.opacity :
             AnyTransition.asymmetric(
@@ -1614,7 +1619,7 @@ struct ContentView: View {
         let isLastAgentMsg = !engine.busy
             && !isUser
             && ev.kind == "msg"
-            && ev.id == engine.events.last(where: { $0.actor != "user" && $0.kind == "msg" })?.id
+            && ev.id == lastAgentMsg
         let th = isLastAgentMsg ? engine.lastThoughts : nil
         EventRow(event: ev,
                  attachments: atts,
@@ -1637,55 +1642,82 @@ struct ContentView: View {
             } else if engine.events.isEmpty && !engine.busy {
                 sessionWelcomeView
             } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 14) {
-                            ForEach(engine.events) { ev in
-                                rowForEvent(ev)
+                GeometryReader { viewport in
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 14) {
+                                // Looked up once per render, not once per row.
+                                let attsBySeq = Dictionary(grouping: engine.attachments.filter { $0.event_seq != nil },
+                                                           by: { $0.event_seq! })
+                                let lastAgentMsg = engine.events.last(where: { $0.actor != "user" && $0.kind == "msg" })?.id
+                                ForEach(engine.events) { ev in
+                                    rowForEvent(ev, atts: attsBySeq[ev.seq] ?? [], lastAgentMsg: lastAgentMsg)
+                                }
+                                if engine.busy {
+                                    workingRow
+                                        .id("working")
+                                        .transition(
+                                            reduceMotion ? .opacity :
+                                                .scale(scale: 0.98, anchor: .bottomLeading)
+                                                .combined(with: .offset(y: 8))
+                                                .combined(with: .opacity)
+                                        )
+                                        .compositingGroup()
+                                        .geometryGroup()
+                                }
+                                Color.clear.frame(height: 1).id("chatBottom")
                             }
-                            if engine.busy {
-                                workingRow
-                                    .id("working")
-                                    .transition(
-                                        reduceMotion ? .opacity :
-                                            .scale(scale: 0.98, anchor: .bottomLeading)
-                                            .combined(with: .offset(y: 8))
-                                            .combined(with: .opacity)
-                                    )
-                                    .compositingGroup()
-                                    .geometryGroup()
-                            }
-                            Color.clear.frame(height: 1).id("chatBottom")
+                            .frame(maxWidth: 820)
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 20).padding(.vertical, 16)
+                            .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.82), value: engine.events.count)
+                            .background(GeometryReader { g in
+                                let f = g.frame(in: .named("chatScroll"))
+                                Color.clear.preference(key: ChatContentFrameKey.self,
+                                                       value: ChatContentFrame(minY: f.minY, maxY: f.maxY))
+                            })
                         }
-                        .frame(maxWidth: 820)
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 20).padding(.vertical, 16)
-                        .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.82), value: engine.events.count)
-                    }
-                    .onChange(of: engine.events.count) { _, _ in
-                        if reduceMotion {
-                            proxy.scrollTo("chatBottom", anchor: .bottom)
-                        } else {
-                            withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                        .coordinateSpace(name: "chatScroll")
+                        .modifier(OpenAtBottom())
+                        // A fresh scroll view per session, so it opens on the
+                        // latest message instead of keeping the last one's offset.
+                        .id(engine.sessionID)
+                        .onPreferenceChange(ChatContentFrameKey.self) { f in
+                            // Only an offset change (the reader or us scrolling)
+                            // decides pinning; growth at the bottom moves maxY
+                            // alone and must not unpin a reader who is following.
+                            guard abs(f.minY - chatLastMinY) > 0.5 else { return }
+                            chatLastMinY = f.minY
+                            let atBottom = f.maxY - viewport.size.height < 80
+                            if atBottom != chatPinned { chatPinned = atBottom }
+                        }
+                        .onChange(of: engine.sessionID) { _, _ in chatPinned = true }
+                        .onChange(of: engine.events.count) { _, _ in
+                            guard chatPinned else { return }
+                            if reduceMotion {
+                                proxy.scrollTo("chatBottom", anchor: .bottom)
+                            } else {
+                                withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                                    proxy.scrollTo("chatBottom", anchor: .bottom)
+                                }
+                            }
+                        }
+                        .onChange(of: (engine.live.message.count / 80) + (engine.live.thoughts.count / 150) + engine.live.tools.count) { _, _ in
+                            if engine.busy && chatPinned {
                                 proxy.scrollTo("chatBottom", anchor: .bottom)
                             }
                         }
-                    }
-                    .onChange(of: (engine.live.message.count / 80) + (engine.live.thoughts.count / 150) + engine.live.tools.count) { _, _ in
-                        if engine.busy {
-                            withAnimation(.snappy(duration: 0.2)) {
-                                proxy.scrollTo("chatBottom", anchor: .bottom)
+                        .onChange(of: engine.busy) { _, b in
+                            // Sending is a request to see the reply: re-pin.
+                            if b {
+                                chatPinned = true
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                                    proxy.scrollTo("chatBottom", anchor: .bottom)
+                                }
                             }
                         }
+                        .chorusScrollIndicators()
                     }
-                    .onChange(of: engine.busy) { _, b in
-                        if b {
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-                                proxy.scrollTo("chatBottom", anchor: .bottom)
-                            }
-                        }
-                    }
-                    .chorusScrollIndicators()
                 }
             }
         }
@@ -2377,9 +2409,9 @@ struct ContentView: View {
     // MARK: context pane — budget + last agent
 
     private var changesPane: some View {
-        let hunks = parseHunks(engine.workingDiff)
+        let hunks = engine.diffHunks
         let files = Dictionary(grouping: hunks, by: \.file)
-        let order = hunks.map(\.file).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+        let order = engine.diffFiles
         return VStack(spacing: 0) {
             PaneHeader(title: "ที่แก้ไปในเซสชันนี้",
                        subtitle: hunks.isEmpty ? nil
@@ -2394,9 +2426,21 @@ struct ContentView: View {
                           hint: "เมื่อเอเจนต์แก้ไฟล์ จะเห็นทีละก้อนที่นี่ เก็บหรือตีกลับได้ทีละก้อน")
             } else {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 8) {
+                    // Lazy and flat: one row per file header and per hunk,
+                    // so only what is on screen is built.
+                    LazyVStack(alignment: .leading, spacing: 6) {
                         ForEach(order, id: \.self) { f in
-                            FileChanges(file: f, hunks: files[f] ?? [], rejected: $rejected)
+                            let fileHunks = files[f] ?? []
+                            FileChangesHeader(file: f, hunks: fileHunks, open: !collapsedFiles.contains(f)) {
+                                if collapsedFiles.contains(f) { collapsedFiles.remove(f) } else { collapsedFiles.insert(f) }
+                            }
+                            if !collapsedFiles.contains(f) {
+                                ForEach(fileHunks) { h in
+                                    HunkView(hunk: h, rejected: rejected.contains(h.id)) {
+                                        if rejected.contains(h.id) { rejected.remove(h.id) } else { rejected.insert(h.id) }
+                                    }
+                                }
+                            }
                         }
                     }
                     .padding(10)
@@ -3185,40 +3229,32 @@ struct EmptyPane: View {
     }
 }
 
-/// One file's hunks, collapsible, each hunk with its own keep/reject pill.
-struct FileChanges: View {
+/// A file's row in the Changes pane: name, totals, collapse toggle. Its
+/// hunks are sibling rows of the parent's lazy stack, not children here.
+struct FileChangesHeader: View {
     let file: String
     let hunks: [DiffHunk]
-    @Binding var rejected: Set<String>
-    @State private var open = true
+    let open: Bool
+    let toggle: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button { withAnimation(.easeOut(duration: 0.15)) { open.toggle() } } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
-                        .rotationEffect(.degrees(open ? 90 : 0)).foregroundStyle(.secondary)
-                    Image(systemName: "doc.text").foregroundStyle(.secondary)
-                    Text((file as NSString).lastPathComponent).font(.callout.weight(.medium)).lineLimit(1)
-                    Spacer(minLength: 4)
-                    Text("+\(hunks.map(\.addCount).reduce(0, +))").foregroundStyle(.green)
-                    Text("−\(hunks.map(\.delCount).reduce(0, +))").foregroundStyle(.red)
-                }
-                .font(.caption.monospacedDigit())
-                .frame(maxWidth: .infinity, alignment: .leading)
+        Button { withAnimation(.easeOut(duration: 0.15)) { toggle() } } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
+                    .rotationEffect(.degrees(open ? 90 : 0)).foregroundStyle(.secondary)
+                Image(systemName: "doc.text").foregroundStyle(.secondary)
+                Text((file as NSString).lastPathComponent).font(.callout.weight(.medium)).lineLimit(1)
+                Spacer(minLength: 4)
+                Text("+\(hunks.reduce(0) { $0 + $1.addCount })").foregroundStyle(.green)
+                Text("−\(hunks.reduce(0) { $0 + $1.delCount })").foregroundStyle(.red)
             }
-            .buttonStyle(InteractiveStyle(cornerRadius: 7, padding: .init(top: 5, leading: 6, bottom: 5, trailing: 6)))
-            .help(file)
-            if open {
-                ForEach(hunks) { h in
-                    HunkView(hunk: h, rejected: rejected.contains(h.id)) {
-                        if rejected.contains(h.id) { rejected.remove(h.id) } else { rejected.insert(h.id) }
-                    }
-                }
-            }
+            .font(.caption.monospacedDigit())
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(6)
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .buttonStyle(InteractiveStyle(cornerRadius: 7, padding: .init(top: 5, leading: 6, bottom: 5, trailing: 6)))
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .help(file)
+        .padding(.top, 4)
     }
 }
 
@@ -3535,9 +3571,20 @@ struct DiffHunk: Identifiable {
     let header: String     // "@@ -a,b +c,d @@ …"
     let lines: [String]    // body lines (context / +/-)
 
+    /// Counted once at parse time: views read these on every render.
+    let addCount: Int
+    let delCount: Int
+
+    init(file: String, preamble: String, header: String, lines: [String]) {
+        self.file = file
+        self.preamble = preamble
+        self.header = header
+        self.lines = lines
+        addCount = lines.reduce(0) { $0 + ($1.hasPrefix("+") ? 1 : 0) }
+        delCount = lines.reduce(0) { $0 + ($1.hasPrefix("-") ? 1 : 0) }
+    }
+
     var patch: String { preamble + header + "\n" + lines.joined(separator: "\n") + "\n" }
-    var addCount: Int { lines.filter { $0.hasPrefix("+") }.count }
-    var delCount: Int { lines.filter { $0.hasPrefix("-") }.count }
 }
 
 func parseHunks(_ diff: String) -> [DiffHunk] {
@@ -3953,5 +4000,29 @@ struct Backdrop: View {
                            startPoint: .topLeading, endPoint: .bottomTrailing)
         }
         .ignoresSafeArea()
+    }
+}
+
+/// The thread's content frame in its scroll view's coordinate space:
+/// `minY` tracks the scroll offset, `maxY` the bottom of the content.
+struct ChatContentFrame: Equatable {
+    var minY: CGFloat
+    var maxY: CGFloat
+}
+
+struct ChatContentFrameKey: PreferenceKey {
+    static let defaultValue = ChatContentFrame(minY: 0, maxY: 0)
+    static func reduce(value: inout ChatContentFrame, nextValue: () -> ChatContentFrame) { value = nextValue() }
+}
+
+/// Open on the newest message. macOS 15 can limit the anchor to the first
+/// layout; on 14 the plain anchor also keeps the bottom on content growth.
+private struct OpenAtBottom: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.defaultScrollAnchor(.bottom, for: .initialOffset)
+        } else {
+            content.defaultScrollAnchor(.bottom)
+        }
     }
 }

@@ -175,7 +175,8 @@ char *chorus_reject_hunks(const ChorusEngine *e, const char *patch);
 /* Run one turn against a relay chain. `agents` is comma-separated names
  * (e.g. "codex,claude-opus,gemini"). On a rate-limit / quota / context
  * failure the chain hands off to the next link automatically.
- * JSON: {"ok":true,"answered_by":"...","message":"...","stop_reason":"...",
+ * JSON: {"ok":true,"answered_by":"...","message":"...",
+ *        "context_used":N|null,"context_window":N|null,"stop_reason":"...",
  *        "handoffs":[["from","to","why"], ...]} */
 char *chorus_run_relay(ChorusEngine *e, const char *agents,
                        const char *prompt, int allow);
@@ -334,6 +335,13 @@ char *chorus_verify_workspace_json(const char *ws);
 char *chorus_project_trusted_json(const char *ws);
 char *chorus_set_project_trusted(const char *ws, bool trusted);
 char *chorus_structural_diff_json(const char *old_code, const char *new_code);
+
+/* Syntax spans for the read-only code viewer. `path` picks the language by
+ * extension. JSON: {"ok":true,"lines":[[[start,len,kind],...],...]} — one
+ * entry per '\n'-separated line of `text`, offsets in UTF-8 bytes within the
+ * line. kind: 0 keyword · 1 type · 2 string · 3 comment · 4 number ·
+ * 5 function · 6 attribute/macro/key · 7 constant. */
+char *chorus_highlight(const char *path, const char *text);
 
 /* Remote Companion & Pairing Management (Phase 6) */
 char *chorus_pairing_initiate_json(void);

@@ -288,7 +288,9 @@ pub fn search(c: &Connection, q: &str, limit: usize) -> Result<Vec<Event>> {
 /// or falling back to token accounting for each event.
 pub fn session_cost_usd(c: &Connection, sess: i64) -> Result<f64> {
     let mut stmt = c.prepare(
-        "SELECT tok_in, tok_out, cost_usd, model_id, actor FROM event WHERE sess = ?1",
+        // `event.actor` is an interned id; the price table wants the name.
+        "SELECT e.tok_in, e.tok_out, e.cost_usd, e.model_id, a.name
+         FROM event e LEFT JOIN actor a ON a.id = e.actor WHERE e.sess = ?1",
     )?;
     let rows = stmt.query_map(rusqlite::params![sess], |r| {
         let tok_in: Option<i64> = r.get(0)?;

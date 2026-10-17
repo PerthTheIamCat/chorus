@@ -1080,6 +1080,8 @@ struct RelayJson {
     ok: bool,
     answered_by: String,
     message: String,
+    context_used: Option<i64>,
+    context_window: Option<i64>,
     stop_reason: String,
     handoffs: Vec<[String; 3]>,
 }
@@ -1115,6 +1117,8 @@ pub unsafe extern "C" fn chorus_run_relay(
             ok: true,
             answered_by: rr.answered_by,
             message: rr.turn.message,
+            context_used: rr.turn.context_used,
+            context_window: rr.turn.context_window,
             stop_reason: rr.turn.stop_reason,
             handoffs: rr
                 .handoffs
@@ -1165,6 +1169,8 @@ pub unsafe extern "C" fn chorus_run_relay_with_attachments(
             ok: true,
             answered_by: rr.answered_by,
             message: rr.turn.message,
+            context_used: rr.turn.context_used,
+            context_window: rr.turn.context_window,
             stop_reason: rr.turn.stop_reason,
             handoffs: rr
                 .handoffs
@@ -2669,3 +2675,22 @@ mod tests {
 }
 
 
+
+/// Syntax spans for the code viewer. `path` only picks the language (by
+/// extension); `text` is the file's content as the shell will show it.
+/// JSON: {"ok":true,"lines":[[[start,len,kind],...],...]} — one entry per
+/// `\n`-separated line, offsets in UTF-8 bytes within that line, kind per
+/// `chorus_core::highlight::Kind`.
+///
+/// # Safety
+/// `path`, `text` valid NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_highlight(path: *const c_char, text: *const c_char) -> *mut c_char {
+    let (Some(path), Some(text)) = (borrow(path), borrow(text)) else {
+        return err("path/text must be valid UTF-8");
+    };
+    match catch_unwind(|| chorus_core::highlight::highlight(path, text)) {
+        Ok(lines) => out(serde_json::json!({"ok": true, "lines": lines}).to_string()),
+        Err(_) => err("panic in highlight"),
+    }
+}
