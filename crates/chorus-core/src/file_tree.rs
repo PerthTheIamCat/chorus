@@ -182,10 +182,9 @@ fn walk_dir(
 
     for entry in dir_entries {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') && name != ".env" && name != ".gitignore" && name != ".chorus" {
-            if name == ".git" {
-                continue;
-            }
+        // `.git` is the only dot-entry this skips; it is not one of the kept ones.
+        if name == ".git" {
+            continue;
         }
         if IGNORED_DIRS.contains(&name.as_str()) {
             continue;

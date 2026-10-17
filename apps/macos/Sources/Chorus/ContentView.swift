@@ -72,6 +72,10 @@ struct ContentView: View {
     @State private var sessionModes: [Int64: SessionMode] = [:]
     @AppStorage(SettingsKey.defaultMode) private var defaultSessionMode = "auto"
     @AppStorage(SettingsKey.orchestratorModel) private var configuredOrchestrator = ""
+    @AppStorage(SettingsKey.orchestratorBackup) private var configuredOrchestratorBackup = ""
+    @AppStorage(SettingsKey.orchestraConcurrency) private var orchestraConcurrency = 3
+    @AppStorage(SettingsKey.orchestraMaxChildren) private var orchestraMaxChildren = 10
+    @AppStorage(SettingsKey.orchestraMaxMinutes) private var orchestraMaxMinutes = 30
     @AppStorage(SettingsKey.orchestraAskBeforePlan) private var askBeforePlan = false
     @State private var planApprovedSessions: Set<Int64> = []
 
@@ -2282,8 +2286,15 @@ struct ContentView: View {
 
     private func routeOrDispatch(_ send: PendingSend) {
         if currentSessionMode == .orchestra && !send.explicitAgent {
-            let orchModel = configuredOrchestrator.isEmpty ? "claude-opus-5.5" : configuredOrchestrator
-            dispatch(orchModel, send.text, attachments: send.attachments.map(\.id))
+            // Rust picks the lead and its backup, and runs it read-only.
+            lastPrompt = send.text
+            engine.sendOrchestra(send.text, primary: configuredOrchestrator,
+                                 backup: configuredOrchestratorBackup,
+                                 concurrency: orchestraConcurrency,
+                                 maxChildren: orchestraMaxChildren,
+                                 maxMinutes: orchestraMaxMinutes,
+                                 level: permission.rawValue,
+                                 attachments: send.attachments.map(\.id))
             return
         }
         guard currentSessionMode == .autoRoute, !send.explicitAgent else {

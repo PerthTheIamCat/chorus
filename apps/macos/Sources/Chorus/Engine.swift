@@ -1480,6 +1480,44 @@ final class Engine: ObservableObject {
         }
     }
 
+    /// Orchestra mode turn. Who leads, its read-only permission, failover to
+    /// the backup and the children's caps are all decided in Rust; this only
+    /// passes the Settings values through.
+    func sendOrchestra(_ prompt: String, primary: String, backup: String,
+                       concurrency: Int, maxChildren: Int, maxMinutes: Int,
+                       level: Int32, attachments: [Int64] = []) {
+        guard let h = handle, !busy else { return }
+        busy = true; lastError = nil
+        PowerManager.shared.beginActivity(reason: "Chorus Orchestra")
+        echoUser(prompt)
+        let idsJSON = Self.jsonIDs(attachments)
+        queue.async { [weak self] in
+            let json = prompt.withCString { p in
+                idsJSON.withCString { ids in
+                    primary.withCString { pr in
+                        backup.withCString { bk in
+                            Self.string(from: chorus_run_orchestra(
+                                h.raw, p, ids, pr, bk,
+                                Int32(concurrency), Int32(maxChildren), Int32(maxMinutes), level))
+                        }
+                    }
+                }
+            }
+            let obj = Self.decode(TurnResult.self, json)
+            DispatchQueue.main.async {
+                PowerManager.shared.endActivity()
+                self?.busy = false
+                self?.endLive()
+                if let r = obj, r.ok {
+                    if let u = r.context_used { self?.contextUsed = u }
+                    if let w = r.context_window { self?.contextWindow = w }
+                } else if !Self.isStop(obj?.error) { self?.lastError = obj?.error ?? "orchestra failed" }
+                self?.refresh()
+                self?.compactIfIdle()
+            }
+        }
+    }
+
     /// Compare mode — fork per agent, run the prompt on each.
     func compare(_ prompt: String, agents: String, level: Int32,
                  completion: @escaping (String) -> Void) {

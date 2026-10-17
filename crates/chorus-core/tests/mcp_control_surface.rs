@@ -10,6 +10,54 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
+/// A temp git repo, so a spawned writer can get a real worktree. Removes the
+/// worktrees it handed out (they live under Application Support) on drop.
+struct GitDir(tempfile::TempDir);
+
+impl GitDir {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(dir.path().join("README.md"), "x\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        Self(dir)
+    }
+
+    fn path(&self) -> &std::path::Path {
+        self.0.path()
+    }
+}
+
+impl Drop for GitDir {
+    fn drop(&mut self) {
+        let out = std::process::Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(self.path())
+            .output();
+        let Ok(out) = out else { return };
+        for wt in String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| l.strip_prefix("worktree "))
+            .skip(1)
+        {
+            let _ = std::process::Command::new("git")
+                .args(["worktree", "remove", "--force", wt])
+                .current_dir(self.path())
+                .output();
+        }
+    }
+}
+
 fn rpc(server: &McpServer, body: Value) -> Value {
     rpc_as(
         server.url(),
@@ -100,7 +148,7 @@ fn tools_list_exposes_full_agent_control_surface() {
 
 #[test]
 fn end_to_end_orchestration_tool_dispatch() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = GitDir::new();
     let db = dir.path().join("store.db");
     let store = Store::open(&db).unwrap();
     let sess = chorus_core::ledger::new_session(store.conn(), "root", dir.path().to_str().unwrap())
@@ -406,11 +454,13 @@ fn call(server: &McpServer, as_agent: &str, tool: &str, args: Value) -> Value {
 /// sub-agents by guessing a small integer id.
 #[test]
 fn agent_ids_outside_the_callers_session_tree_are_refused() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = GitDir::new();
     let db = dir.path().join("store.db");
     let store = Store::open(&db).unwrap();
-    let a = chorus_core::ledger::new_session(store.conn(), "A", "/tmp").unwrap();
-    let b = chorus_core::ledger::new_session(store.conn(), "B", "/tmp").unwrap();
+    let a =
+        chorus_core::ledger::new_session(store.conn(), "A", dir.path().to_str().unwrap()).unwrap();
+    let b =
+        chorus_core::ledger::new_session(store.conn(), "B", dir.path().to_str().unwrap()).unwrap();
     let server_a = McpServer::start_for_session(db.to_str().unwrap(), a).unwrap();
     let server_b = McpServer::start_for_session(db.to_str().unwrap(), b).unwrap();
 
@@ -452,13 +502,13 @@ fn agent_ids_outside_the_callers_session_tree_are_refused() {
 /// parent link — agent text became a *user* message in the child's ledger.
 #[test]
 fn control_surface_writes_go_through_the_ledger_as_the_calling_agent() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = GitDir::new();
     let db = dir.path().join("store.db");
     let store = Store::open(&db).unwrap();
     let c = store.conn();
     // `Session::new` interns "user" first; mirror that so actor 1 == user.
     let user = chorus_core::actor::intern(c, "user", "human").unwrap();
-    let sess = chorus_core::ledger::new_session(c, "root", "/tmp").unwrap();
+    let sess = chorus_core::ledger::new_session(c, "root", dir.path().to_str().unwrap()).unwrap();
     let first = chorus_core::ledger::append(
         c,
         &chorus_core::NewEvent::new(sess, chorus_core::EventKind::Msg, user, "hello"),

@@ -221,6 +221,17 @@ char *chorus_reject_hunks(const ChorusEngine *e, const char *patch);
 char *chorus_run_relay(ChorusEngine *e, const char *agents,
                        const char *prompt, int allow);
 
+/* One orchestra-mode turn. Rust picks the lead chain (primary, then backup;
+ * "" = Claude Opus at medium / strongest ready model elsewhere), runs the
+ * orchestrator read-only whatever `allow` is, and caps its children by
+ * `allow` and the three caps. Reply: chorus_run_relay's shape plus
+ * "lead":[["agent","model"], ...]. */
+char *chorus_run_orchestra(ChorusEngine *e, const char *prompt,
+                           const char *attachment_ids_json,
+                           const char *primary, const char *backup,
+                           int max_concurrency, int max_children,
+                           int max_minutes, int allow);
+
 /* Attachment-aware relay chain. attachment_ids_json is a JSON integer array. */
 char *chorus_run_relay_with_attachments(ChorusEngine *e, const char *agents,
                                         const char *prompt,

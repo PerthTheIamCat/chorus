@@ -5,8 +5,9 @@
 //!   collect their briefs, hit the cap and pause, cancel, and check no orphan processes remain.
 //! - The `complete_agent` and `wait_agent` timeouts work for real.
 
-use chorus_cli::session::Session;
+use chorus_cli::session::{Policy, Session};
 use chorus_core::agent_control::{self, complete_agent, wait_agent, OrchestraCaps, SubagentStatus};
+use chorus_core::router::Candidate;
 use chorus_core::Store;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -26,6 +27,54 @@ fn mock_bridge() -> Vec<String> {
         probe_bin().to_string_lossy().into_owned(),
         "--serve-mock".into(),
     ]
+}
+
+/// A mock that holds every prompt open for `ms` milliseconds.
+fn slow_bridge(ms: u64) -> Vec<String> {
+    let mut b = mock_bridge();
+    b.extend(["--sleep-ms".into(), ms.to_string()]);
+    b
+}
+
+/// A mock that writes `name` into its cwd mid-turn without asking.
+fn rogue_bridge(name: &str) -> Vec<String> {
+    let mut b = mock_bridge();
+    b.extend(["--rogue".into(), name.into()]);
+    b
+}
+
+fn cand(agent: &str, id: &str, tier: u8) -> Candidate {
+    let (base, effort) = chorus_cli::orchestra::split_effort(id);
+    Candidate {
+        id: format!("{agent}:{id}"),
+        agent: agent.into(),
+        model: base.into(),
+        effort: effort.unwrap_or("default").into(),
+        media_types: vec![],
+        integrations: vec![],
+        ready: true,
+        tier: Some(tier),
+    }
+}
+
+/// Two ready agents a light and a heavy task land on differently: codex has
+/// only a small model, claude only a large one.
+fn two_agents() -> Vec<Candidate> {
+    vec![
+        cand("codex", "gpt-5.6-luna[low]", 0),
+        cand("claude", "opus", 2),
+    ]
+}
+
+fn wait_until(secs: u64, mut f: impl FnMut() -> bool) -> bool {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < end {
+        if f() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    f()
 }
 
 fn init_git_repo(dir: &Path) {
@@ -119,6 +168,7 @@ fn orchestra_core_integration_mock_agent() {
     let mut session = Session::create(&db, dir.path(), "orchestrator session")
         .unwrap()
         .with_bridge(mock_bridge());
+    session.set_child_candidates(two_agents());
 
     let sess_id = session.session_id();
     let cwd_str = dir.path().to_str().unwrap();
@@ -143,7 +193,7 @@ fn orchestra_core_integration_mock_agent() {
         Some(sess_id),
         "builder",
         "Build a new module",
-        Some("normal"),
+        Some("heavy"),
         true,
         cwd_str,
         None,
@@ -176,6 +226,19 @@ fn orchestra_core_integration_mock_agent() {
     assert_eq!(w_brief.status, SubagentStatus::Completed);
     assert!(briefs.rendered_markdown.contains("investigator"));
     assert!(briefs.rendered_markdown.contains("builder"));
+    let wt = writer.worktree.clone().unwrap();
+    let _ = Command::new("git")
+        .args(["worktree", "remove", "--force", &wt])
+        .current_dir(dir.path())
+        .output();
+
+    // The router, not a hardcoded codex, picked each child's agent: a light
+    // investigation fits the small model, a normal build the large one.
+    let conn = session.store().conn();
+    let r = agent_control::get_subagent(conn, reader.id).unwrap();
+    let w = agent_control::get_subagent(conn, writer.id).unwrap();
+    assert_eq!(r.model.as_deref(), Some("codex"), "{r:?}");
+    assert_eq!(w.model.as_deref(), Some("claude"), "{w:?}");
 
     // 4. Test Cap enforcement: concurrency limit hit pauses and asks
     let custom_caps = OrchestraCaps {
@@ -231,5 +294,229 @@ fn orchestra_core_integration_mock_agent() {
     assert_eq!(cancelled_capped.status, SubagentStatus::Cancelled);
 
     // Check no orphan processes remain
-    assert!(!chorus_acp::turn_running());
+    assert!(wait_until(10, || session
+        .child_pids(running_child.id)
+        .is_empty()));
+    assert!(wait_until(10, || !chorus_acp::turn_running()));
+}
+
+#[test]
+fn heavy_weight_and_role_pin_route_children() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    let roles = dir.path().join(".chorus/agents");
+    fs::create_dir_all(&roles).unwrap();
+    fs::write(
+        roles.join("pinned-doer.md"),
+        "---\nname: pinned-doer\ndescription: \"always codex\"\nmodel: gpt-5.6-luna[low]\n---\nDo it.\n",
+    )
+    .unwrap();
+    let db = dir.path().join("store.db");
+    let mut session = Session::create(&db, dir.path(), "orch")
+        .unwrap()
+        .with_bridge(mock_bridge());
+    session.set_child_candidates(two_agents());
+    let cwd = dir.path().to_str().unwrap();
+    let conn = session.store().conn();
+    let sid = session.session_id();
+
+    let light = agent_control::spawn_agent_with_options(
+        conn,
+        Some(sid),
+        "builder",
+        "small fix",
+        Some("light"),
+        false,
+        cwd,
+        None,
+    )
+    .unwrap();
+    let pinned = agent_control::spawn_agent_with_options(
+        conn,
+        Some(sid),
+        "pinned-doer",
+        "big job",
+        Some("heavy"),
+        false,
+        cwd,
+        None,
+    )
+    .unwrap();
+    let rep = wait_agent(conn, Some(sid), None, 20).unwrap();
+    assert!(
+        rep.all_done,
+        "{rep:?} {:?}",
+        agent_control::list_subagents(conn, Some(sid))
+    );
+    let light = agent_control::get_subagent(conn, light.id).unwrap();
+    let pinned = agent_control::get_subagent(conn, pinned.id).unwrap();
+    assert_eq!(light.model.as_deref(), Some("codex"), "{light:?}");
+    assert_eq!(
+        pinned.model.as_deref(),
+        Some("codex"),
+        "role model: pins the agent that offers it, whatever the weight: {pinned:?}"
+    );
+
+    // A pin nobody offers fails the spawn instead of running elsewhere.
+    fs::write(
+        roles.join("ghost.md"),
+        "---\nname: ghost\nmodel: gemini-9\n---\nx\n",
+    )
+    .unwrap();
+    let ghost = agent_control::spawn_agent_with_options(
+        conn,
+        Some(sid),
+        "ghost",
+        "x",
+        None,
+        false,
+        cwd,
+        None,
+    )
+    .unwrap();
+    assert_eq!(ghost.status, SubagentStatus::Failed, "{ghost:?}");
+    assert!(ghost.summary.unwrap_or_default().contains("gemini-9"));
+}
+
+#[test]
+fn cancelling_one_child_leaves_its_sibling_running() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    let db = dir.path().join("store.db");
+    let mut session = Session::create(&db, dir.path(), "orch")
+        .unwrap()
+        .with_bridge(slow_bridge(2500));
+    session.set_child_candidates(two_agents());
+    let cwd = dir.path().to_str().unwrap();
+    let conn = session.store().conn();
+    let sid = session.session_id();
+    let a = agent_control::spawn_agent(conn, Some(sid), "investigator", "a", false, cwd).unwrap();
+    let b = agent_control::spawn_agent(conn, Some(sid), "investigator", "b", false, cwd).unwrap();
+    assert!(wait_until(10, || !session.child_pids(a.id).is_empty()
+        && !session.child_pids(b.id).is_empty()));
+
+    agent_control::cancel_agent(conn, a.id, None).unwrap();
+    assert!(
+        wait_until(5, || session.child_pids(a.id).is_empty()),
+        "a not reaped"
+    );
+    assert!(
+        !session.child_pids(b.id).is_empty(),
+        "stopping a must not stop b"
+    );
+
+    let rep = wait_agent(conn, Some(sid), Some(b.id), 20).unwrap();
+    assert_eq!(rep.completed, vec![b.id], "{rep:?}");
+    let a = agent_control::get_subagent(conn, a.id).unwrap();
+    assert_eq!(a.status, SubagentStatus::Cancelled);
+}
+
+#[test]
+fn running_child_pauses_at_the_wall_clock_and_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    let db = dir.path().join("store.db");
+    let mut session = Session::create(&db, dir.path(), "orch")
+        .unwrap()
+        .with_bridge(slow_bridge(4000));
+    session.set_child_candidates(two_agents());
+    session.set_orchestra_caps(OrchestraCaps {
+        max_concurrency: 3,
+        max_children: 10,
+        max_wall_time_secs: 1,
+    });
+    let cwd = dir.path().to_str().unwrap();
+    let conn = session.store().conn();
+    let sid = session.session_id();
+    let a =
+        agent_control::spawn_agent(conn, Some(sid), "investigator", "slow", false, cwd).unwrap();
+    assert_eq!(a.status, SubagentStatus::Running);
+
+    assert!(
+        wait_until(5, || {
+            agent_control::get_subagent(conn, a.id).unwrap().status == SubagentStatus::Waiting
+        }),
+        "a running child past the wall clock must pause"
+    );
+    let paused = agent_control::get_subagent(conn, a.id).unwrap();
+    assert!(paused
+        .summary
+        .unwrap_or_default()
+        .starts_with(agent_control::WALL_TIME_PAUSE));
+    assert!(
+        wait_until(5, || session.child_pids(a.id).is_empty()),
+        "paused child still running"
+    );
+
+    // A spawn while the clock is spent waits too.
+    let late =
+        agent_control::spawn_agent(conn, Some(sid), "investigator", "late", false, cwd).unwrap();
+    assert_eq!(late.status, SubagentStatus::Waiting);
+
+    // Continue restarts the clock: the child runs again instead of pausing at once.
+    let resumed = agent_control::resume_subagent(conn, a.id).unwrap();
+    assert_eq!(resumed.status, SubagentStatus::Running);
+    assert!(wait_until(5, || !session.child_pids(a.id).is_empty()));
+    session.cancel_orchestration().unwrap();
+    assert!(wait_until(10, || session.child_pids(a.id).is_empty()));
+}
+
+#[test]
+fn orchestrator_never_writes_but_its_writer_children_may() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+    let db = dir.path().join("store.db");
+    let mut session = Session::create(&db, dir.path(), "orch")
+        .unwrap()
+        .with_bridge(rogue_bridge("lead-wrote-this"));
+    session.set_child_candidates(two_agents());
+
+    // The user allows everything; the orchestrator still runs read-only.
+    let turn = session.run_orchestrator_turn("plan it", &[], "", "", Policy::AllowAll);
+    assert!(
+        !dir.path().join("lead-wrote-this").exists(),
+        "the orchestrator wrote into the workspace: {:?}",
+        turn.as_ref()
+            .map(|r| r.relay.answered_by.clone())
+            .map_err(|e| e.to_string())
+    );
+    if let Ok(r) = &turn {
+        assert_eq!(r.lead[0].agent, "claude");
+        assert_eq!(r.lead[0].model, "opus");
+    }
+
+    // Its children are capped by the user's permission, not by its own: a
+    // writer in a worktree can write, and its diff counts the new file.
+    let conn = session.store().conn();
+    let w = agent_control::spawn_agent_with_options(
+        conn,
+        Some(session.session_id()),
+        "builder",
+        "write",
+        Some("light"),
+        true,
+        dir.path().to_str().unwrap(),
+        None,
+    )
+    .unwrap();
+    assert!(
+        wait_agent(conn, Some(session.session_id()), Some(w.id), 20)
+            .unwrap()
+            .all_done
+    );
+    let w = agent_control::get_subagent(conn, w.id).unwrap();
+    assert_eq!(w.status, SubagentStatus::Completed, "{w:?}");
+    assert!(
+        w.files_touched.contains(&"lead-wrote-this".to_string()),
+        "{w:?}"
+    );
+    assert!(w
+        .diff_stat
+        .unwrap_or_default()
+        .starts_with("1 file changed"));
+    let wt = PathBuf::from(w.worktree.unwrap());
+    let _ = Command::new("git")
+        .args(["worktree", "remove", "--force", wt.to_str().unwrap()])
+        .current_dir(dir.path())
+        .output();
 }

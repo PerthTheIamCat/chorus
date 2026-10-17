@@ -1152,7 +1152,8 @@ fn wanted(kind: TaskKind, difficulty: Difficulty, preset: RoutePreset) -> Want {
     Want { tier, effort }
 }
 
-fn effort_rank(effort: &str) -> u8 {
+/// Rank of an effort word (0 minimal … 4 max); unknown words are medium.
+pub fn effort_rank(effort: &str) -> u8 {
     match effort.trim().to_ascii_lowercase().as_str() {
         "minimal" | "none" => 0,
         "low" => 1,

@@ -295,13 +295,188 @@ fn push_unique(v: &mut Vec<String>, item: &str) {
 #[derive(Clone)]
 struct ChildRunnerState {
     db_path: PathBuf,
+    /// The orchestrating session's workspace: role files are looked up here,
+    /// not in a child's worktree.
+    cwd: PathBuf,
     forced_bridge: Option<Vec<String>>,
+    /// The user's permission for this session — what children are capped by.
+    /// Never the orchestrator's own read-only turn policy.
     parent_policy: Policy,
     route_preset: chorus_core::router::RoutePreset,
+    caps: chorus_core::agent_control::OrchestraCaps,
+    /// Who may run a child. `None` = ask `agents::list_agents()` at spawn
+    /// time; tests set it so routing does not depend on this machine's logins.
+    candidates: Option<Vec<chorus_core::router::Candidate>>,
+    /// subagent id → the cancel tag its current run is filed under. Tags are
+    /// unique in the process; subagent ids are only unique per store.
+    tags: std::collections::HashMap<i64, i64>,
+}
+
+/// Next process-unique cancel tag (see `chorus_acp::scope`).
+fn next_cancel_tag() -> i64 {
+    static NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
 }
 
 struct SessionChildRunner {
     state: std::sync::Arc<std::sync::Mutex<ChildRunnerState>>,
+}
+
+fn epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+type RunnerState = std::sync::Arc<std::sync::Mutex<ChildRunnerState>>;
+
+/// The runner for children `sess` spawns, registered under `sess` only.
+fn register_runner(
+    store: &Store,
+    db: &Path,
+    cwd: &Path,
+    sess: i64,
+) -> (
+    RunnerState,
+    std::sync::Arc<dyn chorus_core::agent_control::ChildRunner>,
+) {
+    let state = std::sync::Arc::new(std::sync::Mutex::new(ChildRunnerState {
+        db_path: db.to_path_buf(),
+        cwd: cwd.to_path_buf(),
+        forced_bridge: None,
+        parent_policy: Policy::ReadOnly,
+        route_preset: Default::default(),
+        caps: Default::default(),
+        candidates: None,
+        tags: Default::default(),
+    }));
+    let runner: std::sync::Arc<dyn chorus_core::agent_control::ChildRunner> =
+        std::sync::Arc::new(SessionChildRunner {
+            state: state.clone(),
+        });
+    chorus_core::agent_control::register_child_runner(store.conn(), sess, runner.clone());
+    (state, runner)
+}
+
+/// A child's permission: never wider than the parent's, and a child without
+/// its own worktree never writes, because it shares the user's tree.
+fn child_policy(parent: Policy, has_worktree: bool) -> Policy {
+    match parent {
+        Policy::AllowAll if has_worktree => Policy::AllowAll,
+        Policy::AllowAll | Policy::ReadOnly => Policy::ReadOnly,
+        Policy::DenyAll => Policy::DenyAll,
+    }
+}
+
+/// Paths a child's diff never counts: our shadow repo and the agent files the
+/// projector writes into every workspace (see CLAUDE.md 7.11).
+const DIFF_EXCLUDES: &[&str] = &[
+    ":(exclude).chorus",
+    ":(exclude)CLAUDE.md",
+    ":(exclude)AGENTS.md",
+    ":(exclude)GEMINI.md",
+];
+
+/// What a writing child changed in its worktree, untracked files included:
+/// `git diff --numstat HEAD` misses every file the child created, which for a
+/// builder is most of its work. Untracked files count as all-added lines.
+pub fn worktree_diff_stat(dir: &Path) -> (String, Vec<String>) {
+    let git = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .args(["--"])
+            .args(["."])
+            .args(DIFF_EXCLUDES)
+            .current_dir(dir)
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let mut files = Vec::new();
+    let (mut ins, mut del) = (0u64, 0u64);
+    for line in git(&["diff", "--numstat", "HEAD"])
+        .unwrap_or_default()
+        .lines()
+    {
+        let mut f = line.splitn(3, '\t');
+        let (a, d, path) = (f.next(), f.next(), f.next());
+        if let Some(path) = path {
+            ins += a.and_then(|v| v.parse().ok()).unwrap_or(0);
+            del += d.and_then(|v| v.parse().ok()).unwrap_or(0);
+            files.push(path.to_string());
+        }
+    }
+    let untracked = git(&["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
+    for path in untracked.lines().map(str::trim).filter(|p| !p.is_empty()) {
+        if let Ok(text) = std::fs::read(dir.join(path)) {
+            ins += text.iter().filter(|b| **b == b'\n').count() as u64;
+        }
+        if !files.iter().any(|f| f == path) {
+            files.push(path.to_string());
+        }
+    }
+    let n = files.len();
+    let stat = format!(
+        "{n} file{} changed, {ins} insertion{}(+), {del} deletion{}(-)",
+        if n == 1 { "" } else { "s" },
+        if ins == 1 { "" } else { "s" },
+        if del == 1 { "" } else { "s" },
+    );
+    (stat, files)
+}
+
+/// The prompt a child starts from: its role's instructions, then the task.
+fn child_prompt(role: Option<&chorus_core::roles::AgentRole>, task: &str) -> String {
+    match role
+        .map(|r| r.system_prompt.trim())
+        .filter(|p| !p.is_empty())
+    {
+        Some(sp) => format!("{sp}\n\n---\nTask:\n{task}"),
+        None => task.to_string(),
+    }
+}
+
+/// Run one child to the end on the calling thread. Everything it spawns is
+/// filed under the subagent id, so stopping it stops only it.
+#[allow(clippy::too_many_arguments)]
+fn run_child_turn(
+    db_path: &Path,
+    child_sess_id: i64,
+    tag: i64,
+    forced_bridge: Option<Vec<String>>,
+    preset: chorus_core::router::RoutePreset,
+    route: &crate::orchestra::ChildRoute,
+    chain: &[AgentSpec],
+    prompt: &str,
+    policy: Policy,
+    has_worktree: bool,
+) -> Result<(String, String, Vec<String>)> {
+    let _scope = chorus_acp::scope::cancel_scope(tag);
+    let mut child = Session::open(db_path, child_sess_id)?;
+    if let Some(fb) = forced_bridge {
+        child = child.with_bridge(fb);
+    }
+    child.set_route_preset(preset);
+    child.set_model(&route.agent, &route.model);
+    let rep = child.run_relay(chain, prompt, policy)?;
+    let (stat, files) = if has_worktree {
+        worktree_diff_stat(&child.cwd)
+    } else {
+        ("0 files changed".to_string(), Vec::new())
+    };
+    Ok((rep.turn.message, stat, files))
+}
+
+impl SessionChildRunner {
+    fn tag_of(&self, subagent_id: i64) -> Option<i64> {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|s| s.tags.get(&subagent_id).copied())
+    }
 }
 
 impl chorus_core::agent_control::ChildRunner for SessionChildRunner {
@@ -310,118 +485,189 @@ impl chorus_core::agent_control::ChildRunner for SessionChildRunner {
         subagent: &chorus_core::agent_control::Subagent,
         weight: Option<&str>,
     ) -> chorus_core::Result<()> {
-        let child_sess_id = match subagent.child_sess {
-            Some(id) => id,
-            None => return Ok(()),
+        use chorus_core::agent_control::{self as ac, SubagentStatus};
+        let Some(child_sess_id) = subagent.child_sess else {
+            return Ok(());
         };
-        let (db_path, forced_bridge, parent_policy, _route_preset) = {
-            let s = self.state.lock().unwrap();
-            (
-                s.db_path.clone(),
-                s.forced_bridge.clone(),
-                s.parent_policy,
-                s.route_preset,
-            )
-        };
-        let subagent_id = subagent.id;
-        let role_name = subagent.role.clone();
-        let task = subagent.task.clone();
-        let _weight = weight.map(|s| s.to_string());
+        let tag = next_cancel_tag();
+        let st = self
+            .state
+            .lock()
+            .map(|mut s| {
+                s.tags.insert(subagent.id, tag);
+                s.clone()
+            })
+            .map_err(|_| chorus_core::ChorusError::Invalid("child runner state poisoned".into()))?;
+        // Route here, before any thread: a role that pins a model nobody
+        // offers, or no ready agent at all, fails the spawn where the
+        // orchestrator can see it.
+        let candidates = st
+            .candidates
+            .clone()
+            .unwrap_or_else(|| crate::orchestra::candidates_from(&crate::agents::list_agents()));
+        let role = chorus_core::roles::find_role(&st.cwd, &subagent.role);
+        let route = crate::orchestra::route_child(
+            &candidates,
+            &subagent.role,
+            weight,
+            st.route_preset,
+            role.as_ref().and_then(|r| r.model.as_deref()),
+        )
+        .map_err(|e| chorus_core::ChorusError::Invalid(format!("{e:#}")))?;
+        let chain = crate::orchestra::child_chain(&route, &candidates);
+        let prompt = child_prompt(role.as_ref(), &subagent.task);
         let has_worktree = subagent.worktree.is_some();
+        let policy = child_policy(st.parent_policy, has_worktree);
+        let subagent_id = subagent.id;
+        let parent = subagent.parent_sess.unwrap_or_default();
+        let deadline = {
+            let store = Store::open(&st.db_path)?;
+            ac::wall_deadline_ms(store.conn(), parent, &st.caps)?
+        };
 
         std::thread::spawn(move || {
-            let res = (|| -> Result<()> {
-                let mut child_sess = Session::open(&db_path, child_sess_id)?;
-                if let Some(fb) = forced_bridge {
-                    child_sess = child_sess.with_bridge(fb);
-                }
-
-                // Child permissions are never wider than the parent's.
-                let child_policy = match parent_policy {
-                    Policy::DenyAll => Policy::DenyAll,
-                    Policy::ReadOnly => Policy::ReadOnly,
-                    Policy::AllowAll => {
-                        if has_worktree {
-                            Policy::AllowAll
-                        } else {
-                            Policy::ReadOnly
-                        }
-                    }
-                };
-
-                let role = chorus_core::roles::find_role(&child_sess.cwd, &role_name);
-                let pinned = role.as_ref().and_then(|r| r.model.clone());
-
-                let (agent_name, provider) = if let Some(ref m) = pinned {
-                    child_sess.set_model("codex", m);
-                    ("codex", "openai")
-                } else {
-                    let _kind = match role_name.as_str() {
-                        "investigator" => chorus_core::router::TaskKind::Think,
-                        "reviewer" => chorus_core::router::TaskKind::Review,
-                        _ => chorus_core::router::TaskKind::Do,
-                    };
-                    ("codex", "openai")
-                };
-
-                let turn_rep = child_sess.run_turn(agent_name, provider, &task, child_policy)?;
-
-                let mut diff_stat = "0 files changed".to_string();
-                let mut files_touched = Vec::new();
-
-                let output = std::process::Command::new("git")
-                    .args(["diff", "--name-only", "HEAD"])
-                    .current_dir(&child_sess.cwd)
-                    .output();
-                if let Ok(out) = output {
-                    if out.status.success() {
-                        let text = String::from_utf8_lossy(&out.stdout);
-                        for line in text.lines() {
-                            let trimmed = line.trim();
-                            if !trimmed.is_empty() {
-                                files_touched.push(trimmed.to_string());
+            // Wall time is a cap on running children too, not only on the
+            // next spawn: past the deadline the child is stopped and waits
+            // for the user's Continue (which restarts the clock).
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            if let Some(deadline) = deadline {
+                let (done, db, caps) = (done.clone(), st.db_path.clone(), st.caps);
+                std::thread::spawn(move || {
+                    use std::sync::atomic::Ordering::SeqCst;
+                    while !done.load(SeqCst) {
+                        if epoch_ms() >= deadline {
+                            if let Ok(store) = Store::open(&db) {
+                                if ac::pause_for_wall_time(store.conn(), subagent_id, &caps)
+                                    .is_ok_and(|s| s.status == SubagentStatus::Waiting)
+                                {
+                                    chorus_acp::cancel_tag(tag);
+                                }
                             }
+                            return;
                         }
-                        if !files_touched.is_empty() {
-                            diff_stat = format!("{} files changed", files_touched.len());
-                        }
+                        std::thread::sleep(std::time::Duration::from_millis(200));
                     }
-                }
-
-                chorus_core::agent_control::complete_agent(
-                    child_sess.store.conn(),
-                    subagent_id,
-                    &turn_rep.message,
-                    Some(&diff_stat),
-                    &files_touched,
-                )?;
-
-                Ok(())
-            })();
-
-            if let Err(e) = res {
-                if let Ok(store) = Store::open(&db_path) {
-                    let _ = chorus_core::agent_control::fail_agent(
-                        store.conn(),
-                        subagent_id,
-                        &format!("Failed: {e}"),
-                    );
-                }
+                });
             }
+            let res = run_child_turn(
+                &st.db_path,
+                child_sess_id,
+                tag,
+                st.forced_bridge.clone(),
+                st.route_preset,
+                &route,
+                &chain,
+                &prompt,
+                policy,
+                has_worktree,
+            );
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            let Ok(store) = Store::open(&st.db_path) else {
+                return;
+            };
+            // A child stopped by the user or paused at the wall clock keeps
+            // that status; only a child still `running` gets an outcome.
+            let still_running = ac::get_subagent(store.conn(), subagent_id)
+                .is_ok_and(|s| s.status == SubagentStatus::Running);
+            if !still_running {
+                return;
+            }
+            let _ = match res {
+                Ok((message, stat, files)) => {
+                    ac::complete_agent(store.conn(), subagent_id, &message, Some(&stat), &files)
+                }
+                Err(e) => ac::fail_agent(store.conn(), subagent_id, &format!("Failed: {e:#}")),
+            };
         });
 
         Ok(())
     }
 
-    fn cancel_child(&self, _subagent_id: i64) -> chorus_core::Result<()> {
-        chorus_acp::cancel_all();
+    fn cancel_child(&self, subagent_id: i64) -> chorus_core::Result<()> {
+        if let Some(tag) = self.tag_of(subagent_id) {
+            chorus_acp::cancel_tag(tag);
+        }
         Ok(())
     }
 
     fn cancel_all(&self, _parent_sess: i64) -> chorus_core::Result<()> {
-        chorus_acp::cancel_all();
+        // This runner belongs to one orchestrating session, so every tag it
+        // handed out is one of that session's children.
+        let tags: Vec<i64> = self
+            .state
+            .lock()
+            .map(|s| s.tags.values().copied().collect())
+            .unwrap_or_default();
+        for tag in tags {
+            chorus_acp::cancel_tag(tag);
+        }
         Ok(())
     }
+
+    fn caps(&self) -> chorus_core::agent_control::OrchestraCaps {
+        self.state.lock().map(|s| s.caps).unwrap_or_default()
+    }
+}
+
+/// Files Chorus itself writes into a workspace before a turn: the projected
+/// agent files and Claude skills (CLAUDE.md 7.11, 7.16).
+fn is_projected_file(path: &str) -> bool {
+    matches!(path, "CLAUDE.md" | "AGENTS.md" | "GEMINI.md") || path.starts_with(".claude/skills/")
+}
+
+/// One agent event as a ledger row. `children` maps a provider subagent's
+/// bridge key to the child session that holds its transcript.
+fn event_row(
+    ev: &AgentEvent,
+    children: &std::collections::HashMap<String, i64>,
+) -> (EventKind, String) {
+    match ev {
+        AgentEvent::Message(m) => (EventKind::Msg, m.clone()),
+        AgentEvent::ToolCall { title, kind } => (EventKind::ToolCall, format!("{kind}: {title}")),
+        AgentEvent::ToolResult { title, status } => {
+            (EventKind::ToolResult, format!("{title} → {status}"))
+        }
+        AgentEvent::SubagentSpawned {
+            session_id,
+            parent_session_id,
+            name,
+            task,
+        } => (
+            EventKind::ToolCall,
+            serde_json::json!({
+                "event": "subagent_spawned",
+                "sessionId": session_id,
+                "parentSessionId": parent_session_id,
+                "childSession": children.get(session_id),
+                "name": name,
+                "task": task,
+            })
+            .to_string(),
+        ),
+        AgentEvent::SubagentState {
+            session_id,
+            state,
+            message,
+        } => (
+            EventKind::ToolResult,
+            serde_json::json!({
+                "event": "subagent_state_update",
+                "sessionId": session_id,
+                "childSession": children.get(session_id),
+                "state": state,
+                "message": message,
+            })
+            .to_string(),
+        ),
+        AgentEvent::Diff { path, old, new } => (EventKind::Diff, render_diff(path, old, new)),
+    }
+}
+
+/// What an orchestra-mode turn did: the relay result, and the chain it led
+/// with (`lead[0]` is who was asked first; `relay.handoffs` says who took over).
+pub struct OrchestraReport {
+    pub relay: RelayReport,
+    pub lead: Vec<crate::orchestra::Lead>,
 }
 
 pub struct Session {
@@ -460,7 +706,22 @@ pub struct Session {
     /// project: one store shared by every folder in it. `None` = the
     /// session's own store, as before projects existed.
     memory: Option<Store>,
-    runner_state: std::sync::Arc<std::sync::Mutex<ChildRunnerState>>,
+    runner_state: RunnerState,
+    /// This session's entry in the child-runner registry, removed on drop.
+    runner: std::sync::Arc<dyn chorus_core::agent_control::ChildRunner>,
+    /// Set while the orchestrator's own turn runs: the user's permission,
+    /// which caps its children, while the turn itself is read-only.
+    lead_policy: Option<Policy>,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        chorus_core::agent_control::unregister_child_runner(
+            self.store.conn(),
+            self.sess,
+            &self.runner,
+        );
+    }
 }
 
 pub fn real_git_head(cwd: &Path) -> Option<String> {
@@ -513,17 +774,7 @@ impl Session {
         let base_ckpt = default_base;
         let turn_end_git_head = real_git_head(&cwd);
         let mcp = McpServer::start_for_session(&db.to_string_lossy(), sess).ok();
-        let runner_state = std::sync::Arc::new(std::sync::Mutex::new(ChildRunnerState {
-            db_path: db.to_path_buf(),
-            forced_bridge: None,
-            parent_policy: Policy::ReadOnly,
-            route_preset: Default::default(),
-        }));
-        chorus_core::agent_control::register_child_runner(std::sync::Arc::new(
-            SessionChildRunner {
-                state: runner_state.clone(),
-            },
-        ));
+        let (runner_state, runner) = register_runner(&store, db, &cwd, sess);
         Ok(Self {
             store,
             sess,
@@ -541,6 +792,8 @@ impl Session {
             mcp,
             memory: None,
             runner_state,
+            runner,
+            lead_policy: None,
         })
     }
 
@@ -569,17 +822,7 @@ impl Session {
         };
         let turn_end_git_head = real_git_head(&cwd);
         let mcp = McpServer::start_for_session(&db.to_string_lossy(), session_id).ok();
-        let runner_state = std::sync::Arc::new(std::sync::Mutex::new(ChildRunnerState {
-            db_path: db.to_path_buf(),
-            forced_bridge: None,
-            parent_policy: Policy::ReadOnly,
-            route_preset: Default::default(),
-        }));
-        chorus_core::agent_control::register_child_runner(std::sync::Arc::new(
-            SessionChildRunner {
-                state: runner_state.clone(),
-            },
-        ));
+        let (runner_state, runner) = register_runner(&store, db, &cwd, session_id);
         Ok(Self {
             store,
             sess: session_id,
@@ -597,6 +840,8 @@ impl Session {
             mcp,
             memory: None,
             runner_state,
+            runner,
+            lead_policy: None,
         })
     }
 
@@ -769,6 +1014,14 @@ impl Session {
             .filter_map(|l| l.strip_prefix("+++ b/"))
             .map(str::to_string)
             .collect();
+        // Agent files the projector writes are ours, not the agent's. With
+        // orchestra children sharing the tree, a sibling's projection lands
+        // in the middle of this turn; blaming the agent for it failed the
+        // turn (and the read-only Seatbelt profile already stops the agent
+        // itself from writing them).
+        if !files.is_empty() && files.iter().all(|f| is_projected_file(f)) {
+            return Ok(());
+        }
         ck.restore(base)?;
         anyhow::bail!(
             "{agent_name} แก้ไฟล์ทั้งที่สั่ง --read-only — ย้อนกลับให้แล้ว ({} ไฟล์: {})
@@ -889,7 +1142,7 @@ impl Session {
         attachment_ids: &[i64],
     ) -> Result<TurnReport> {
         if let Ok(mut s) = self.runner_state.lock() {
-            s.parent_policy = policy;
+            s.parent_policy = self.lead_policy.unwrap_or(policy);
         }
         self.check_user_commit().ok();
         let guard = self.snapshot("turn guard").ok();
@@ -1584,11 +1837,89 @@ impl Session {
         }
     }
 
-    /// Cancel the orchestrating session and reap all of its children process groups.
+    /// Cancel the orchestrating session's children and reap their process
+    /// groups — only theirs: other sessions' agents keep running.
     pub fn cancel_orchestration(&mut self) -> Result<()> {
         chorus_core::agent_control::cancel_orchestration(self.store.conn(), self.sess)?;
-        chorus_acp::cancel_all();
         Ok(())
+    }
+
+    /// Agent processes the current run of child `subagent_id` has alive.
+    pub fn child_pids(&self, subagent_id: i64) -> Vec<u32> {
+        self.runner_state
+            .lock()
+            .ok()
+            .and_then(|s| s.tags.get(&subagent_id).copied())
+            .map(chorus_acp::scope::pids)
+            .unwrap_or_default()
+    }
+
+    /// The caps this session's orchestration runs under (Settings).
+    pub fn set_orchestra_caps(&mut self, caps: chorus_core::agent_control::OrchestraCaps) {
+        let caps = chorus_core::agent_control::OrchestraCaps {
+            max_concurrency: caps.max_concurrency.clamp(1, 8),
+            max_children: caps.max_children.max(1),
+            max_wall_time_secs: caps.max_wall_time_secs.max(1),
+        };
+        if let Ok(mut s) = self.runner_state.lock() {
+            s.caps = caps;
+        }
+    }
+
+    /// Fix who may run this session's children and its orchestrator, instead
+    /// of asking `agents::list_agents()`. For tests and pinned installs.
+    pub fn set_child_candidates(&mut self, candidates: Vec<chorus_core::router::Candidate>) {
+        if let Ok(mut s) = self.runner_state.lock() {
+            s.candidates = Some(candidates);
+        }
+    }
+
+    fn ready_candidates(&self) -> Vec<chorus_core::router::Candidate> {
+        self.runner_state
+            .lock()
+            .ok()
+            .and_then(|s| s.candidates.clone())
+            .unwrap_or_else(|| crate::orchestra::candidates_from(&crate::agents::list_agents()))
+    }
+
+    /// One orchestra-mode turn: the orchestrator answers, plans and spawns.
+    ///
+    /// Everything about *how* is decided here, not in the shell:
+    /// - who leads: `primary` from Settings (`""` = Claude Opus, medium), then
+    ///   `backup` (`""` = the strongest ready model from another provider), as
+    ///   a relay chain, so a limit hands off with the usual brief;
+    /// - that it never writes: the turn runs under [`Policy::ReadOnly`], which
+    ///   puts the bridge in the read-only Seatbelt profile and reverts anything
+    ///   that still lands in the workspace;
+    /// - what its children may do: `user_policy`, the session's permission —
+    ///   never the orchestrator's read-only one, never wider than the user's.
+    pub fn run_orchestrator_turn(
+        &mut self,
+        user_text: &str,
+        attachment_ids: &[i64],
+        primary: &str,
+        backup: &str,
+        user_policy: Policy,
+    ) -> Result<OrchestraReport> {
+        let lead = crate::orchestra::lead_chain(&self.ready_candidates(), primary, backup);
+        anyhow::ensure!(
+            !lead.is_empty(),
+            "ไม่มีโมเดลที่พร้อมเป็น orchestrator — login อย่างน้อยหนึ่งบัญชีที่ ตั้งค่า → บัญชี"
+        );
+        let chain: Vec<AgentSpec> = lead
+            .iter()
+            .map(|l| AgentSpec::new(l.agent.clone(), crate::orchestra::provider_for(&l.agent)))
+            .collect();
+        let saved_models = self.models.clone();
+        for l in &lead {
+            self.set_model(&l.agent, &l.model);
+        }
+        self.lead_policy = Some(user_policy);
+        let out =
+            self.run_relay_with_attachments(&chain, user_text, Policy::ReadOnly, attachment_ids);
+        self.lead_policy = None;
+        self.models = saved_models;
+        Ok(OrchestraReport { relay: out?, lead })
     }
 
     pub fn route_preset(&self) -> chorus_core::router::RoutePreset {
@@ -2039,53 +2370,15 @@ impl Session {
         parent: i64,
     ) -> Result<Vec<i64>> {
         let c = self.store.conn();
+        // Provider subagents first, so the parent's spawn and result events
+        // can name the child session their transcript lives in.
+        let children = self.persist_provider_children(outcome, agent_actor)?;
         let mut seqs = Vec::new();
         // The bridge's turn cost goes on one event only, or the session total
         // would count it once per message.
         let mut cost = outcome.cost_usd;
         for ev in &outcome.events {
-            let (kind, body) = match ev {
-                AgentEvent::Message(m) => (EventKind::Msg, m.clone()),
-                AgentEvent::ToolCall { title, kind } => {
-                    (EventKind::ToolCall, format!("{kind}: {title}"))
-                }
-                AgentEvent::ToolResult { title, status } => {
-                    (EventKind::ToolResult, format!("{title} → {status}"))
-                }
-                AgentEvent::SubagentSpawned {
-                    session_id,
-                    parent_session_id,
-                    name,
-                    task,
-                } => (
-                    EventKind::ToolCall,
-                    serde_json::json!({
-                        "event": "subagent_spawned",
-                        "sessionId": session_id,
-                        "parentSessionId": parent_session_id,
-                        "name": name,
-                        "task": task,
-                    })
-                    .to_string(),
-                ),
-                AgentEvent::SubagentState {
-                    session_id,
-                    state,
-                    message,
-                } => (
-                    EventKind::ToolResult,
-                    serde_json::json!({
-                        "event": "subagent_state_update",
-                        "sessionId": session_id,
-                        "state": state,
-                        "message": message,
-                    })
-                    .to_string(),
-                ),
-                AgentEvent::Diff { path, old, new } => {
-                    (EventKind::Diff, render_diff(path, old, new))
-                }
-            };
+            let (kind, body) = event_row(ev, &children);
             let mut ne = NewEvent::new(self.sess, kind, agent_actor, body).parent(parent);
             if matches!(ev, AgentEvent::Message(_)) {
                 ne.tok_out = outcome.context_used;
@@ -2109,6 +2402,76 @@ impl Session {
             self.announce(last);
         }
         Ok(seqs)
+    }
+
+    /// Store each provider subagent of the turn as its own `kind=provider`
+    /// child session with its whole transcript. The parent keeps only the
+    /// spawn and the final result (its [`AgentEvent::SubagentState`]), which
+    /// is all its assembled context ever needs; a nested child hangs under
+    /// the child that launched it. Returns bridge key → child session id.
+    fn persist_provider_children(
+        &self,
+        outcome: &TurnOutcome,
+        agent_actor: i64,
+    ) -> Result<std::collections::HashMap<String, i64>> {
+        use chorus_core::agent_control::{record_provider_subagent, SubagentStatus};
+        let c = self.store.conn();
+        let mut sessions = std::collections::HashMap::new();
+        // `children` is in spawn order, so a parent is always recorded first.
+        for child in &outcome.children {
+            let parent_sess = sessions
+                .get(&child.parent_session_id)
+                .copied()
+                .unwrap_or(self.sess);
+            let status =
+                SubagentStatus::from_str(&child.state).unwrap_or(SubagentStatus::Completed);
+            let sub = record_provider_subagent(
+                c,
+                parent_sess,
+                &child.name,
+                &child.task,
+                status,
+                (!child.message.is_empty()).then_some(child.message.as_str()),
+            )?;
+            let Some(child_sess) = sub.child_sess else {
+                continue;
+            };
+            sessions.insert(child.session_id.clone(), child_sess);
+            let mut prev: Option<i64> = None;
+            if !child.task.is_empty() {
+                // What the child was asked, as the parent agent said it.
+                let ne = NewEvent::new(child_sess, EventKind::Msg, agent_actor, child.task.clone());
+                prev = Some(ledger::append(c, &ne)?);
+            }
+            for ev in &child.events {
+                let (kind, body) = event_row(ev, &sessions);
+                let mut ne = NewEvent::new(child_sess, kind, agent_actor, body);
+                if let Some(p) = prev {
+                    ne = ne.parent(p);
+                }
+                prev = Some(ledger::append(c, &ne)?);
+            }
+            // Claude's answer is the `Task` tool's result, which need not be
+            // the child's last chunk of prose; the child's own transcript
+            // ends with what it handed back.
+            let last_msg = child.events.iter().rev().find_map(|e| match e {
+                AgentEvent::Message(m) => Some(m.trim()),
+                _ => None,
+            });
+            if !child.message.trim().is_empty() && last_msg != Some(child.message.trim()) {
+                let mut ne = NewEvent::new(
+                    child_sess,
+                    EventKind::Msg,
+                    agent_actor,
+                    child.message.clone(),
+                );
+                if let Some(p) = prev {
+                    ne = ne.parent(p);
+                }
+                ledger::append(c, &ne)?;
+            }
+        }
+        Ok(sessions)
     }
 
     /// Tell the shell this session's ledger now reaches `seq`. A hint only:
@@ -2539,5 +2902,59 @@ mod policy_tests {
             );
             assert_eq!(Policy::DenyAll.decide(&ask), Permission::Deny);
         }
+    }
+}
+
+#[cfg(test)]
+mod child_tests {
+    use super::*;
+
+    #[test]
+    fn child_permission_is_never_wider_than_the_parent() {
+        assert_eq!(child_policy(Policy::AllowAll, true), Policy::AllowAll);
+        assert_eq!(child_policy(Policy::AllowAll, false), Policy::ReadOnly);
+        assert_eq!(child_policy(Policy::ReadOnly, true), Policy::ReadOnly);
+        assert_eq!(child_policy(Policy::DenyAll, true), Policy::DenyAll);
+        assert_eq!(child_policy(Policy::DenyAll, false), Policy::DenyAll);
+    }
+
+    #[test]
+    fn diff_stat_counts_untracked_files_and_skips_our_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(dir.path().join("a.rs"), "one\ntwo\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+
+        std::fs::write(dir.path().join("a.rs"), "one\nTWO\nthree\n").unwrap();
+        std::fs::write(dir.path().join("new.rs"), "fn x() {}\n").unwrap();
+        std::fs::create_dir_all(dir.path().join(".chorus/ckpt")).unwrap();
+        std::fs::write(dir.path().join(".chorus/ckpt/HEAD"), "x\n").unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "projected\n").unwrap();
+
+        let (stat, files) = worktree_diff_stat(dir.path());
+        assert_eq!(files, vec!["a.rs".to_string(), "new.rs".to_string()]);
+        assert_eq!(stat, "2 files changed, 3 insertions(+), 1 deletion(-)");
+    }
+
+    #[test]
+    fn child_prompt_leads_with_the_role() {
+        let role = chorus_core::roles::AgentRole::parse(
+            "---\nname: r\ndescription: \"d\"\n---\nYou review.",
+            "r",
+        );
+        let p = child_prompt(Some(&role), "check auth");
+        assert!(p.ends_with("check auth"), "{p}");
+        assert!(p.len() > "check auth".len());
+        assert_eq!(child_prompt(None, "t"), "t");
     }
 }

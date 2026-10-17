@@ -45,18 +45,154 @@ pub trait ChildRunner: Send + Sync {
     fn run_child(&self, subagent: &Subagent, weight: Option<&str>) -> Result<()>;
     fn cancel_child(&self, subagent_id: i64) -> Result<()>;
     fn cancel_all(&self, parent_sess: i64) -> Result<()>;
-}
-
-static RUNNER: std::sync::Mutex<Option<Arc<dyn ChildRunner>>> = std::sync::Mutex::new(None);
-
-pub fn register_child_runner(runner: Arc<dyn ChildRunner>) {
-    if let Ok(mut r) = RUNNER.lock() {
-        *r = Some(runner);
+    /// The caps this orchestration runs under (the user's Settings). A spawn
+    /// that names none uses these.
+    fn caps(&self) -> OrchestraCaps {
+        OrchestraCaps::default()
     }
 }
 
-pub fn get_child_runner() -> Option<Arc<dyn ChildRunner>> {
-    RUNNER.lock().ok().and_then(|r| r.clone())
+/// One runner per orchestrating session, keyed by database file *and*
+/// session id: every project's store numbers its sessions from 1. A single
+/// global slot used to be overwritten by whichever session opened last —
+/// including each child's own session — so a spawn ran under a stranger's
+/// policy, preset and database.
+type RunnerKey = (String, i64);
+static RUNNERS: std::sync::Mutex<Option<HashMap<RunnerKey, Arc<dyn ChildRunner>>>> =
+    std::sync::Mutex::new(None);
+
+/// Which store `conn` is, as a stable string. SQLite reports the main
+/// database's file; canonicalised so two handles on one file agree.
+fn db_key(conn: &Connection) -> String {
+    match conn.path().filter(|p| !p.is_empty()) {
+        Some(p) => std::fs::canonicalize(p)
+            .map(|c| c.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| p.to_string()),
+        None => format!("memory:{:p}", conn as *const Connection),
+    }
+}
+
+/// Make `runner` the one that runs children spawned by `sess` in `conn`'s store.
+pub fn register_child_runner(conn: &Connection, sess: i64, runner: Arc<dyn ChildRunner>) {
+    if let Ok(mut r) = RUNNERS.lock() {
+        r.get_or_insert_with(HashMap::new)
+            .insert((db_key(conn), sess), runner);
+    }
+}
+
+/// Forget `sess`'s runner, but only if it is still `runner`: a reopened
+/// session registers a new one before the old handle drops.
+pub fn unregister_child_runner(conn: &Connection, sess: i64, runner: &Arc<dyn ChildRunner>) {
+    let key = (db_key(conn), sess);
+    if let Ok(mut r) = RUNNERS.lock() {
+        if let Some(map) = r.as_mut() {
+            if map.get(&key).is_some_and(|cur| Arc::ptr_eq(cur, runner)) {
+                map.remove(&key);
+            }
+        }
+    }
+}
+
+/// The runner for children of `parent_sess`, if that session is open.
+pub fn child_runner_for(conn: &Connection, parent_sess: i64) -> Option<Arc<dyn ChildRunner>> {
+    let key = (db_key(conn), parent_sess);
+    RUNNERS
+        .lock()
+        .ok()
+        .and_then(|r| r.as_ref().and_then(|m| m.get(&key).cloned()))
+}
+
+fn runner_of(conn: &Connection, sub: &Subagent) -> Option<Arc<dyn ChildRunner>> {
+    sub.parent_sess.and_then(|p| child_runner_for(conn, p))
+}
+
+/// `weight` the orchestrator gave each child, so a resume after a cap pause
+/// routes it the same way. Process memory only: the `subagent` table has no
+/// column for it, and after a restart a resumed child routes as `normal`.
+static WEIGHTS: std::sync::Mutex<Option<HashMap<RunnerKey, String>>> = std::sync::Mutex::new(None);
+
+fn remember_weight(conn: &Connection, id: i64, weight: Option<&str>) {
+    if let (Some(w), Ok(mut m)) = (weight, WEIGHTS.lock()) {
+        m.get_or_insert_with(HashMap::new)
+            .insert((db_key(conn), id), w.to_string());
+    }
+}
+
+fn weight_of(conn: &Connection, id: i64) -> Option<String> {
+    let key = (db_key(conn), id);
+    WEIGHTS
+        .lock()
+        .ok()
+        .and_then(|m| m.as_ref().and_then(|m| m.get(&key).cloned()))
+}
+
+/// Summary prefix of a child paused at the wall-time cap. Resuming one of
+/// these restarts the orchestration's clock; any other resume leaves it.
+pub const WALL_TIME_PAUSE: &str = "Orchestration cap reached: wall time";
+
+/// When the wall clock of `parent_sess`'s orchestration was last (re)started,
+/// ms since the epoch. Same process-memory caveat as [`WEIGHTS`].
+static CLOCK_RESTARTS: std::sync::Mutex<Option<HashMap<RunnerKey, i64>>> =
+    std::sync::Mutex::new(None);
+
+/// When `parent_sess`'s orchestration started counting wall time: its first
+/// Chorus child, or the last time the user chose to continue past the cap.
+pub fn orchestration_started_ms(conn: &Connection, parent_sess: i64) -> Result<Option<i64>> {
+    let key = (db_key(conn), parent_sess);
+    let restarted = CLOCK_RESTARTS
+        .lock()
+        .ok()
+        .and_then(|m| m.as_ref().and_then(|m| m.get(&key).copied()));
+    if restarted.is_some() {
+        return Ok(restarted);
+    }
+    Ok(conn
+        .query_row(
+            "SELECT MIN(created_ms) FROM subagent WHERE parent_sess = ?1 AND kind = 'chorus'",
+            [parent_sess],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// The ms timestamp past which `parent_sess`'s children must pause.
+pub fn wall_deadline_ms(
+    conn: &Connection,
+    parent_sess: i64,
+    caps: &OrchestraCaps,
+) -> Result<Option<i64>> {
+    Ok(orchestration_started_ms(conn, parent_sess)?
+        .map(|start| start.saturating_add((caps.max_wall_time_secs as i64).saturating_mul(1000))))
+}
+
+fn restart_clock(conn: &Connection, parent_sess: i64) {
+    if let Ok(mut m) = CLOCK_RESTARTS.lock() {
+        m.get_or_insert_with(HashMap::new)
+            .insert((db_key(conn), parent_sess), now_ms());
+    }
+}
+
+/// Pause a running child at the wall-time cap: it waits for the user's
+/// Continue instead of failing. Only a `running` row moves.
+pub fn pause_for_wall_time(
+    conn: &Connection,
+    subagent_id: i64,
+    caps: &OrchestraCaps,
+) -> Result<Subagent> {
+    conn.execute(
+        "UPDATE subagent SET status = 'waiting', summary = ?1, updated_ms = ?2 \
+         WHERE id = ?3 AND status = 'running'",
+        params![
+            format!(
+                "{WALL_TIME_PAUSE} limit ({} min) hit. Paused for user approval.",
+                caps.max_wall_time_secs / 60
+            ),
+            now_ms(),
+            subagent_id
+        ],
+    )?;
+    get_subagent(conn, subagent_id)
 }
 
 /// Execution status of a spawned subagent.
@@ -242,6 +378,7 @@ fn row_to_subagent(r: &Row) -> rusqlite::Result<Subagent> {
 }
 
 /// Spawn a child agent session with options (role, task, weight, worktree, caps).
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_agent_with_options(
     conn: &Connection,
     parent_sess: Option<i64>,
@@ -258,7 +395,31 @@ pub fn spawn_agent_with_options(
         )));
     }
 
-    let caps = caps.unwrap_or_default();
+    // Only the orchestrator starts Chorus children; a Chorus child may still
+    // have provider subagents, but no Chorus children of its own.
+    if let Some(parent) = parent_sess {
+        let parent_is_chorus_child: bool = conn
+            .query_row(
+                "SELECT 1 FROM subagent WHERE child_sess = ?1 AND kind = 'chorus'",
+                [parent],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if parent_is_chorus_child {
+            return Err(ChorusError::Invalid(
+                "a Chorus child cannot start Chorus children; ask the orchestrator".into(),
+            ));
+        }
+    }
+
+    let caps = caps
+        .or_else(|| {
+            parent_sess
+                .and_then(|p| child_runner_for(conn, p))
+                .map(|r| r.caps())
+        })
+        .unwrap_or_default();
     let now = now_ms();
 
     // Check caps if parent session exists
@@ -286,31 +447,24 @@ pub fn spawn_agent_with_options(
                     "Orchestration cap reached: concurrency limit ({}) hit. Paused for user approval.",
                     caps.max_concurrency
                 ));
-            } else if let Some(first) = existing_orchestrated.first() {
-                let elapsed_secs = (now - first.created_ms).max(0) as u64 / 1000;
-                if elapsed_secs >= caps.max_wall_time_secs {
-                    initial_status = SubagentStatus::Waiting;
-                    initial_summary = Some(format!(
-                        "Orchestration cap reached: wall time limit ({} min) hit. Paused for user approval.",
-                        caps.max_wall_time_secs / 60
-                    ));
-                }
+            } else if wall_deadline_ms(conn, parent, &caps)?.is_some_and(|d| now >= d) {
+                initial_status = SubagentStatus::Waiting;
+                initial_summary = Some(format!(
+                    "{WALL_TIME_PAUSE} limit ({} min) hit. Paused for user approval.",
+                    caps.max_wall_time_secs / 60
+                ));
             }
         }
     }
 
+    // A writing child gets its own worktree or does not start. Falling back
+    // to an empty non-git directory used to "work": the child ran with
+    // nothing to edit, and its diff could never be reviewed or merged.
     let worktree_path = if worktree {
-        // Create an isolated worktree under Application Support (or fallback)
-        let root = Path::new(cwd);
-        match crate::worktrees::create_worktree(root, role) {
-            Ok(wt) => Some(wt.path),
-            Err(_) => {
-                // Fallback for tests or repositories where git worktree is not yet initialized
-                let dir = crate::worktrees::default_worktrees_dir().join(format!("{role}-{now}"));
-                let _ = std::fs::create_dir_all(&dir);
-                Some(dir.display().to_string())
-            }
-        }
+        let wt = crate::worktrees::create_worktree(Path::new(cwd), role).map_err(|e| {
+            ChorusError::Invalid(format!("cannot create a worktree for {role:?}: {e}"))
+        })?;
+        Some(wt.path)
     } else {
         None
     };
@@ -348,10 +502,13 @@ pub fn spawn_agent_with_options(
     let id = conn.last_insert_rowid();
     let subagent = get_subagent(conn, id)?;
 
-    // If running and a runner is registered, launch child execution
+    remember_weight(conn, id, weight);
+    // If running and its parent's runner is registered, launch it.
     if initial_status == SubagentStatus::Running {
-        if let Some(runner) = get_child_runner() {
-            let _ = runner.run_child(&subagent, weight);
+        if let Some(runner) = runner_of(conn, &subagent) {
+            if let Err(e) = runner.run_child(&subagent, weight) {
+                return fail_agent(conn, id, &format!("Failed to start: {e}"));
+            }
         }
     }
 
@@ -642,27 +799,47 @@ pub fn cancel_agent(conn: &Connection, subagent_id: i64, reason: Option<&str>) -
         params![summary_val, now, subagent_id],
     )?;
 
-    if let Some(runner) = get_child_runner() {
+    let sub = get_subagent(conn, subagent_id)?;
+    if let Some(runner) = runner_of(conn, &sub) {
         let _ = runner.cancel_child(subagent_id);
     }
-
-    get_subagent(conn, subagent_id)
+    Ok(sub)
 }
 
 /// Resume a waiting child agent session (e.g. after cap pause or user approval).
+///
+/// Only a `waiting` child moves: resuming a finished one used to run its task
+/// again. Continuing past the wall-time cap restarts the orchestration clock,
+/// otherwise the very next check would pause it again.
 pub fn resume_subagent(conn: &Connection, subagent_id: i64) -> Result<Subagent> {
+    let before = get_subagent(conn, subagent_id)?;
+    if before.status != SubagentStatus::Waiting {
+        return Ok(before);
+    }
+    if let (Some(parent), true) = (
+        before.parent_sess,
+        before
+            .summary
+            .as_deref()
+            .is_some_and(|s| s.starts_with(WALL_TIME_PAUSE)),
+    ) {
+        restart_clock(conn, parent);
+    }
     let now = now_ms();
-    conn.execute(
+    let moved = conn.execute(
         "UPDATE subagent SET status = 'running', summary = NULL, updated_ms = ?1 \
          WHERE id = ?2 AND status = 'waiting'",
         params![now, subagent_id],
     )?;
 
     let subagent = get_subagent(conn, subagent_id)?;
-    if let Some(runner) = get_child_runner() {
-        let _ = runner.run_child(&subagent, None);
+    if moved == 1 {
+        if let Some(runner) = runner_of(conn, &subagent) {
+            if let Err(e) = runner.run_child(&subagent, weight_of(conn, subagent_id).as_deref()) {
+                return fail_agent(conn, subagent_id, &format!("Failed to start: {e}"));
+            }
+        }
     }
-
     Ok(subagent)
 }
 
@@ -675,7 +852,7 @@ pub fn cancel_orchestration(conn: &Connection, parent_sess: i64) -> Result<()> {
         params![now, parent_sess],
     )?;
 
-    if let Some(runner) = get_child_runner() {
+    if let Some(runner) = child_runner_for(conn, parent_sess) {
         let _ = runner.cancel_all(parent_sess);
     }
 
@@ -934,14 +1111,14 @@ mod tests {
             None,
             "investigator",
             "Trace token counting",
-            true,
+            false,
             "/tmp",
         )
         .unwrap();
 
         assert_eq!(agent.role, "investigator");
         assert_eq!(agent.status, SubagentStatus::Running);
-        assert!(agent.worktree.is_some());
+        assert!(agent.worktree.is_none());
 
         // Steering message
         let lead = crate::actor::intern(conn, "lead", "agent").unwrap();
@@ -972,6 +1149,31 @@ mod tests {
             collected.rendered_markdown.contains("Trace token counting")
                 || collected.rendered_markdown.contains("Found token caching")
         );
+    }
+
+    #[test]
+    fn writer_without_a_git_repo_fails_to_spawn() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        let dir = std::env::temp_dir().join(format!("chorus-nogit-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = spawn_agent(conn, None, "builder", "edit", true, &dir.to_string_lossy());
+        assert!(err.is_err(), "no fallback dir for a writer: {err:?}");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM subagent", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "a failed spawn leaves no row behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resume_only_moves_waiting_children() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.conn();
+        let a = spawn_agent(conn, None, "reviewer", "look", false, "/tmp").unwrap();
+        complete_agent(conn, a.id, "done", None, &[]).unwrap();
+        let r = resume_subagent(conn, a.id).unwrap();
+        assert_eq!(r.status, SubagentStatus::Completed);
     }
 
     #[test]

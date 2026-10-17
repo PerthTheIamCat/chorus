@@ -62,6 +62,123 @@ fn log_raw(log: &Log, dir: &str, text: &str) {
 static ACTIVE_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Per-turn cancel scopes, so one orchestra child can be stopped without
+/// touching the orchestrator or its siblings.
+///
+/// [`cancel_active`] / [`cancel_all`] are process-wide: right for the Stop
+/// button, wrong for "stop this one child". A child's turn runs on its own
+/// thread inside [`cancel_scope`]; every agent spawned on that thread is
+/// filed under the scope's tag, and [`cancel_tag`] signals only those
+/// process groups. The global [`ACTIVE_PID`] stays the orchestrator's, so a
+/// child starting up never makes the Stop button point at the child.
+pub mod scope {
+    use std::cell::Cell;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Mutex;
+
+    thread_local! {
+        static TAG: Cell<Option<i64>> = const { Cell::new(None) };
+    }
+    /// pid of a spawned agent → the tag it was spawned under.
+    static PIDS: Mutex<Option<HashMap<u32, i64>>> = Mutex::new(None);
+    /// Tags whose turn was cancelled and not yet reset.
+    static CANCELLED: Mutex<Option<HashSet<i64>>> = Mutex::new(None);
+
+    /// Restores the previous tag when dropped.
+    pub struct Guard {
+        prev: Option<i64>,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            TAG.with(|t| t.set(self.prev));
+        }
+    }
+
+    /// File every agent this thread spawns under `tag` until the guard drops.
+    /// Entering a scope starts it uncancelled; nothing inside it clears the
+    /// mark again, so a cancel that lands between here and the spawn sticks.
+    pub fn cancel_scope(tag: i64) -> Guard {
+        mark(tag, false);
+        let prev = TAG.with(|t| t.replace(Some(tag)));
+        Guard { prev }
+    }
+
+    /// The tag this thread runs under, if any.
+    pub fn current() -> Option<i64> {
+        TAG.with(Cell::get)
+    }
+
+    pub(crate) fn note_spawn(pid: u32) {
+        if let Some(tag) = current() {
+            if let Ok(mut m) = PIDS.lock() {
+                m.get_or_insert_with(HashMap::new).insert(pid, tag);
+            }
+        }
+    }
+
+    pub(crate) fn note_exit(pid: u32) {
+        if let Ok(mut m) = PIDS.lock() {
+            if let Some(m) = m.as_mut() {
+                m.remove(&pid);
+            }
+        }
+    }
+
+    /// Pids currently filed under `tag`.
+    pub fn pids(tag: i64) -> Vec<u32> {
+        PIDS.lock()
+            .ok()
+            .and_then(|m| {
+                m.as_ref().map(|m| {
+                    m.iter()
+                        .filter(|(_, t)| **t == tag)
+                        .map(|(p, _)| *p)
+                        .collect()
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    /// Any tagged agent still running.
+    pub(crate) fn any_running() -> bool {
+        PIDS.lock()
+            .ok()
+            .is_some_and(|m| m.as_ref().is_some_and(|m| !m.is_empty()))
+    }
+
+    pub(crate) fn mark(tag: i64, on: bool) {
+        if let Ok(mut s) = CANCELLED.lock() {
+            let s = s.get_or_insert_with(HashSet::new);
+            if on {
+                s.insert(tag);
+            } else {
+                s.remove(&tag);
+            }
+        }
+    }
+
+    pub(crate) fn is_marked(tag: i64) -> bool {
+        CANCELLED
+            .lock()
+            .ok()
+            .is_some_and(|s| s.as_ref().is_some_and(|s| s.contains(&tag)))
+    }
+}
+
+/// Stop only the agents spawned under `tag` (see [`scope`]). Marks the tag
+/// cancelled even when nothing is running yet, so a turn that is about to
+/// spawn sees [`was_cancelled`] and gives up. Returns how many process
+/// groups were signalled.
+pub fn cancel_tag(tag: i64) -> usize {
+    scope::mark(tag, true);
+    let pids = scope::pids(tag);
+    for pid in &pids {
+        kill_group(*pid, 15);
+    }
+    pids.len()
+}
+
 /// Called with `(context_used, context_window)` on every `usage_update`, on
 /// the thread running the turn. Thread-local, unlike [`PushSink`]: the
 /// session that owns the turn installs it around its own `prompt` call to
@@ -248,17 +365,24 @@ pub fn shutdown() {
 /// True while an agent is answering a turn. The system monitor refuses
 /// `VACUUM` then: it would wait on, or stall, the turn's own writes.
 pub fn turn_running() -> bool {
-    ACTIVE_PID.load(std::sync::atomic::Ordering::SeqCst) != 0
+    ACTIVE_PID.load(std::sync::atomic::Ordering::SeqCst) != 0 || scope::any_running()
 }
 
-/// True if the last turn ended because [`cancel_active`] killed it.
+/// True if the last turn ended because [`cancel_active`] killed it — or,
+/// on a thread inside [`scope::cancel_scope`], because [`cancel_tag`]
+/// stopped that scope.
 pub fn was_cancelled() -> bool {
     CANCELLED.load(std::sync::atomic::Ordering::SeqCst)
+        || scope::current().is_some_and(scope::is_marked)
 }
 
-/// Call before starting a turn.
+/// Call before starting a turn. Inside a cancel scope it does nothing: a
+/// child starting its turn must neither un-press the user's Stop nor forget
+/// a [`cancel_tag`] that arrived before its agent spawned.
 pub fn reset_cancel() {
-    CANCELLED.store(false, std::sync::atomic::Ordering::SeqCst);
+    if scope::current().is_none() {
+        CANCELLED.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// How long an agent may say nothing at all before a turn is treated as hung.
@@ -309,6 +433,10 @@ impl Agent {
     /// chosen (`CODEX_HOME` / `CLAUDE_CONFIG_DIR` pointing at its own dir).
     pub fn spawn_env(cmd: &[String], env: &[(String, String)], log: Log) -> Result<Self> {
         let (program, args) = cmd.split_first().ok_or_else(|| anyhow!("empty command"))?;
+        // A child stopped before its agent started must not start it.
+        if scope::current().is_some_and(scope::is_marked) {
+            return Err(anyhow!("cancelled before the agent started"));
+        }
         let mut command = Command::new(program);
         command.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         // A Finder-launched app has launchd's bare PATH; without the user's
@@ -340,7 +468,11 @@ impl Agent {
             command.process_group(0);
         }
         let mut child = command.spawn().with_context(|| format!("spawn {cmd:?}"))?;
-        ACTIVE_PID.store(child.id(), std::sync::atomic::Ordering::SeqCst);
+        if scope::current().is_some() {
+            scope::note_spawn(child.id());
+        } else {
+            ACTIVE_PID.store(child.id(), std::sync::atomic::Ordering::SeqCst);
+        }
         registry::register(child.id(), registry::label_for(cmd), true);
 
         let stdout = child.stdout.take().expect("piped");
@@ -583,6 +715,7 @@ impl Drop for Agent {
         let _ = self.child.kill();
         let _ = self.child.wait();
         registry::unregister(self.child.id());
+        scope::note_exit(self.child.id());
     }
 }
 
@@ -661,6 +794,30 @@ pub mod mock {
                 .and_then(|i| a.get(i + 1).cloned())
         };
 
+        // `--serve-mock --replay <file.jsonl>` answers every `session/prompt`
+        // by replaying a recorded `session/update` stream: one JSON object per
+        // line, `{"sessionId": ..., "update": {...}}`. A missing `sessionId`,
+        // or `"$ROOT"`, is this session. Fixture tests use it to feed the
+        // client exactly what a real bridge sent.
+        let replay: Option<String> = {
+            let a: Vec<String> = std::env::args().collect();
+            a.iter()
+                .position(|x| x == "--replay")
+                .and_then(|i| a.get(i + 1).cloned())
+        };
+
+        // `--serve-mock --sleep-ms <n>` holds every prompt open for `n` ms
+        // before answering, so cancel and wall-time tests have a turn that is
+        // still running when they act.
+        let sleep_ms: u64 = {
+            let a: Vec<String> = std::env::args().collect();
+            a.iter()
+                .position(|x| x == "--sleep-ms")
+                .and_then(|i| a.get(i + 1))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
+        };
+
         while let Some(Ok(line)) = lines.next() {
             if line.trim().is_empty() {
                 continue;
@@ -728,7 +885,26 @@ pub mod mock {
                     "error":{"code":-32010,"message": fail.clone().unwrap()}}))?;
                 }
 
+                "session/prompt" if replay.is_some() => {
+                    let text = std::fs::read_to_string(replay.as_deref().unwrap_or_default())?;
+                    for l in text.lines().filter(|l| !l.trim().is_empty()) {
+                        let frame: Value = serde_json::from_str(l)?;
+                        let sid = match frame.get("sessionId").and_then(Value::as_str) {
+                            None | Some("$ROOT") => session.to_string(),
+                            Some(other) => other.to_string(),
+                        };
+                        update(&sid, frame["update"].clone())?;
+                    }
+                    if sleep_ms > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+                    }
+                    send(json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}))?;
+                }
+
                 "session/prompt" => {
+                    if sleep_ms > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+                    }
                     if let Some(name) = &rogue {
                         let _ = std::fs::write(std::path::Path::new(&cwd).join(name), "pwned\n");
                     }

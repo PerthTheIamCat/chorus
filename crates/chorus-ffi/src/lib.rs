@@ -1246,6 +1246,85 @@ pub unsafe extern "C" fn chorus_run_relay_with_attachments(
 }
 
 #[derive(Serialize)]
+struct OrchestraJson {
+    ok: bool,
+    answered_by: String,
+    message: String,
+    context_used: Option<i64>,
+    context_window: Option<i64>,
+    stop_reason: String,
+    handoffs: Vec<[String; 3]>,
+    /// The chain the orchestrator led with, as `agent · model` pairs.
+    lead: Vec<[String; 2]>,
+}
+
+/// Run one orchestra-mode turn. Rust decides who leads (`primary`, then
+/// `backup`; `""` = defaults), runs the orchestrator read-only whatever
+/// `allow` says, and caps its children by `allow` and the three caps
+/// (`max_concurrency` 1–8, `max_children`, `max_minutes` of wall time).
+///
+/// # Safety
+/// `e` live; `prompt`, `attachment_ids_json` (a JSON integer array),
+/// `primary`, `backup` valid NUL-terminated UTF-8.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn chorus_run_orchestra(
+    e: *mut ChorusEngine,
+    prompt: *const c_char,
+    attachment_ids_json: *const c_char,
+    primary: *const c_char,
+    backup: *const c_char,
+    max_concurrency: c_int,
+    max_children: c_int,
+    max_minutes: c_int,
+    allow: c_int,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let Some(prompt) = borrow(prompt) else {
+        return err("prompt must be valid UTF-8");
+    };
+    let attachment_ids = match borrow_attachment_ids(attachment_ids_json) {
+        Ok(ids) => ids,
+        Err(e) => return err(e),
+    };
+    let primary = borrow(primary).unwrap_or("");
+    let backup = borrow(backup).unwrap_or("");
+    let caps = chorus_core::agent_control::OrchestraCaps {
+        max_concurrency: max_concurrency.max(1) as usize,
+        max_children: max_children.max(1) as usize,
+        max_wall_time_secs: (max_minutes.max(1) as u64) * 60,
+    };
+    let policy = Policy::from_level(allow);
+    match catch_unwind(AssertUnwindSafe(|| {
+        engine.session.set_orchestra_caps(caps);
+        engine
+            .session
+            .run_orchestrator_turn(prompt, &attachment_ids, primary, backup, policy)
+    })) {
+        Ok(Ok(r)) => out(serde_json::to_string(&OrchestraJson {
+            ok: true,
+            answered_by: r.relay.answered_by,
+            message: r.relay.turn.message,
+            context_used: r.relay.turn.context_used,
+            context_window: r.relay.turn.context_window,
+            stop_reason: r.relay.turn.stop_reason,
+            handoffs: r
+                .relay
+                .handoffs
+                .into_iter()
+                .map(|(f, t, why)| [f, t, why.as_phrase().to_string()])
+                .collect(),
+            lead: r.lead.into_iter().map(|l| [l.agent, l.model]).collect(),
+        })
+        .unwrap()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in run_orchestra"),
+    }
+}
+
+#[derive(Serialize)]
 struct CompareJson {
     ok: bool,
     branches: Vec<CompareBranchJson>,
@@ -2847,7 +2926,7 @@ pub unsafe extern "C" fn chorus_checkpoint_list_json(
         let records =
             chorus_core::checkpoint_dag::CheckpointDag::list_turn_checkpoints(&store, session_id)
                 .map_err(|e| e.to_string())?;
-        Ok(serde_json::to_value(records).map_err(|e| e.to_string())?)
+        serde_json::to_value(records).map_err(|e| e.to_string())
     }));
 
     match result {
@@ -2892,7 +2971,7 @@ pub unsafe extern "C" fn chorus_checkpoint_rewind_json(
             rewind_mode,
         )
         .map_err(|e| e.to_string())?;
-        Ok(serde_json::to_value(summary).map_err(|e| e.to_string())?)
+        serde_json::to_value(summary).map_err(|e| e.to_string())
     }));
 
     match result {
