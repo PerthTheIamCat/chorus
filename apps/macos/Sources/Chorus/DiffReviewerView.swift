@@ -146,7 +146,7 @@ struct DiffReviewerView: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.mini)
-                    .help("วิเคราะห์ AST: แยกโค้ดจริง (Semantic) ออกจาก Whitespace/Formatting (Cosmetic)")
+                    .help("แยกการแก้โค้ดจริงออกจากการจัดรูปแบบ (อ่านจาก AST)")
 
                     // Verification Loop Button
                     Button {
@@ -221,7 +221,7 @@ struct DiffReviewerView: View {
                     Image(systemName: "checkmark.circle")
                         .font(.system(size: 24))
                         .foregroundColor(.secondary)
-                    Text("ยังไม่มีการแก้ไขไฟล์ในเซสชันนี้")
+                    Text("ยังไม่มีการแก้ไขไฟล์ใน session นี้")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
                     Spacer()

@@ -1,8 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// Settings, laid out like System Settings: a list of sections on the left,
-/// the section on the right.
+/// Settings, laid out like System Settings: 13 categories in 4 groups on the
+/// left, the category on the right. Each row is a short label, its control,
+/// and an (i) for anything longer than one line.
 struct SettingsSheet: View {
     @EnvironmentObject var engine: Engine
     @Environment(\.dismiss) private var dismiss
@@ -11,25 +12,89 @@ struct SettingsSheet: View {
     @AppStorage("chorus.autoCatalogUpdates") private var autoCatalogUpdates = true
 
     enum Section: String, CaseIterable, Identifiable {
-        case general = "ทั่วไป"
-        case accounts = "บัญชีและการใช้งาน"
-        case agents = "เอเจนต์และโมเดล"
-        case orchestration = "ออร์เคสตรา (Multi-Agent)"
-        case companion = "Mobile Companion"
-        case skills = "Skills"
-        case integrations = "เครื่องมือเสริม"
+        case general, accounts, routing, orchestration
+        case agents, safety, integrations, skills
+        case review, cost, storage
+        case companion, about
         var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .general: "ทั่วไป"
+            case .accounts: "บัญชี"
+            case .routing: "การส่งงาน"
+            case .orchestration: "Orchestra"
+            case .agents: "โมเดล"
+            case .safety: "สิทธิ์และความปลอดภัย"
+            case .integrations: "เครื่องมือเสริม (MCP)"
+            case .skills: "Skills"
+            case .review: "Review และ checkpoint"
+            case .cost: "การใช้งานและค่าใช้จ่าย"
+            case .storage: "พื้นที่และประสิทธิภาพ"
+            case .companion: "Mobile Companion"
+            case .about: "เกี่ยวกับ"
+            }
+        }
+
+        var subtitle: String {
+            switch self {
+            case .general: "การพิมพ์ การแสดงผล และหน้าต่าง"
+            case .accounts: "บัญชีของแต่ละเจ้าและโควตาที่เหลือ"
+            case .routing: "เทิร์นของคุณถูกส่งไปที่ไหน"
+            case .orchestration: "โมเดลหลักที่วางแผนและแจกงาน"
+            case .agents: "agent ที่ติดตั้งและโมเดลที่มันมี"
+            case .safety: "agent ทำอะไรได้บ้าง"
+            case .integrations: "MCP server ที่ทุก agent ใช้ร่วมกัน"
+            case .skills: "skill ที่ agent ในโฟลเดอร์นี้มองเห็น"
+            case .review: "การตรวจสิ่งที่ agent แก้"
+            case .cost: "token โควตา และเงิน"
+            case .storage: "โมเดลในเครื่อง หน่วยความจำ และข้อมูล"
+            case .companion: "สั่งงานจาก iPhone"
+            case .about: "เวอร์ชันและสัญญาอนุญาต"
+            }
+        }
+
         var icon: String {
             switch self {
             case .general: "gearshape"
-            case .accounts: "person.2.badge.gearshape"
-            case .agents: "cpu"
+            case .accounts: "person.2"
+            case .routing: "arrow.triangle.branch"
             case .orchestration: "point.3.connected.trianglepath.dotted"
-            case .companion: "iphone.and.arrow.forward"
-            case .skills: "sparkles"
+            case .agents: "cpu"
+            case .safety: "lock.shield"
             case .integrations: "puzzlepiece.extension"
+            case .skills: "sparkles"
+            case .review: "plusminus"
+            case .cost: "bahtsign.circle"
+            case .storage: "internaldrive"
+            case .companion: "iphone"
+            case .about: "info.circle"
             }
         }
+
+        var tint: Color {
+            switch self {
+            case .general, .about: .gray
+            case .accounts: .teal
+            case .routing: .blue
+            case .orchestration: .purple
+            case .agents: .indigo
+            case .safety: .red
+            case .integrations: .orange
+            case .skills: .yellow
+            case .review: .green
+            case .cost: .mint
+            case .storage: .brown
+            case .companion: .cyan
+            }
+        }
+
+        static let groups: [(title: String, items: [Section])] = [
+            ("ใช้งาน", [.general, .accounts, .routing, .orchestration]),
+            ("Agent", [.agents, .safety, .integrations, .skills]),
+            ("ข้อมูล", [.review, .cost, .storage]),
+            ("ระบบ", [.companion, .about]),
+        ]
     }
 
     init(workspace: String, section: Section = .accounts) {
@@ -39,71 +104,24 @@ struct SettingsSheet: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("ตั้งค่า").font(.title3.bold()).padding(.horizontal, 10).padding(.bottom, 8)
-                ForEach(Section.allCases) { s in
-                    Button { section = s } label: {
-                        Label(s.rawValue, systemImage: s.icon)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(InteractiveStyle(cornerRadius: 8, selected: section == s,
-                                                  padding: .init(top: 6, leading: 10, bottom: 6, trailing: 10)))
-                }
-                Spacer()
-                Button("เสร็จ") { dismiss() }
-                    .keyboardShortcut(.defaultAction)
-                    .padding(.horizontal, 10)
-            }
-            .padding(14)
-            .frame(width: 210)
-            .background(Color.primary.opacity(0.03))
-
+            sidebar
             Divider()
-
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    switch section {
-                    case .general: GeneralSettings(workspace: workspace)
-                    case .accounts: AccountsSettings()
-                    case .agents: AgentsSettings()
-                    case .orchestration: OrchestrationSettings(workspace: workspace)
-                    case .companion: RemotePairingView()
-                    case .skills: SkillsSettings(workspace: workspace)
-                    case .integrations:
-                        CatalogView(projectName: workspace.isEmpty ? "" : URL(fileURLWithPath: workspace).lastPathComponent,
-                                    entries: engine.catalog,
-                                    automaticUpdates: autoCatalogUpdates,
-                                    backgroundStatus: engine.catalogBackgroundStatus,
-                                    actionResult: engine.catalogActionResult,
-                                    progress: engine.catalogProgress,
-                                    requestedInstall: engine.requestedInstall,
-                                    onRequestHandled: { engine.requestedInstall = nil },
-                                    onLoadPlan: { id, action, done in
-                                        engine.loadCatalogPlan(project: workspace, id: id, action: action, completion: done)
-                                    },
-                                    onAutomaticUpdatesChanged: { value in
-                                        autoCatalogUpdates = value
-                                        if value { engine.loadCatalog(project: workspace, automaticUpdates: true) }
-                                    },
-                                    onInstall: { engine.catalogAction(project: workspace, id: $0,
-                                                                      action: workspace.isEmpty ? "install" : "install_enable") },
-                                    onUpdate: { engine.catalogAction(project: workspace, id: $0, action: "update") },
-                                    onRemove: { engine.catalogAction(project: workspace, id: $0, action: "remove") },
-                                    onProjectEnableChanged: { id, enabled in
-                                        engine.catalogAction(project: workspace, id: id,
-                                                             action: enabled ? "enable" : "disable")
-                                    })
-                        if let error = engine.catalogActionError ?? engine.catalogError {
-                            Text(error).font(.caption).foregroundStyle(.red)
-                        }
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(section.title).font(.title3.bold())
+                        Text(section.subtitle).font(.callout).foregroundStyle(.secondary)
                     }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityAddTraits(.isHeader)
+                    pane
                 }
-                .padding(22)
+                .padding(.horizontal, 22).padding(.vertical, 18)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .chorusScrollIndicators()
         }
-        .frame(width: 760, height: 560)
+        .frame(width: 820, height: 620)
         .onAppear {
             engine.loadAgents()
             engine.loadUsage()
@@ -111,6 +129,111 @@ struct SettingsSheet: View {
             engine.loadCatalog(project: workspace, automaticUpdates: autoCatalogUpdates)
         }
     }
+
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            ForEach(Section.groups, id: \.title) { group in
+                Text(group.title)
+                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 8).padding(.top, 10).padding(.bottom, 2)
+                    .accessibilityAddTraits(.isHeader)
+                ForEach(group.items) { s in
+                    Button { section = s } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: s.icon)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 20, height: 20)
+                                .background(s.tint.gradient, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                            Text(s.title).lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(InteractiveStyle(cornerRadius: 6, selected: section == s,
+                                                  padding: .init(top: 3, leading: 6, bottom: 3, trailing: 6)))
+                    .accessibilityAddTraits(section == s ? .isSelected : [])
+                }
+            }
+            Spacer()
+            Button("เสร็จ") { dismiss() }
+                .keyboardShortcut(.defaultAction)
+                .padding(.horizontal, 8)
+        }
+        .padding(.horizontal, 8).padding(.vertical, 12)
+        .frame(width: 220)
+        .background(Color.primary.opacity(0.03))
+    }
+
+    @ViewBuilder private var pane: some View {
+        switch section {
+        case .general: GeneralSettings()
+        case .accounts: AccountsSettings()
+        case .routing: RoutingSettings(workspace: workspace)
+        case .orchestration: OrchestrationSettings(workspace: workspace)
+        case .agents: AgentsSettings()
+        case .safety: SafetySettings(workspace: workspace)
+        case .integrations: integrations
+        case .skills: SkillsSettings(workspace: workspace)
+        case .review: ReviewSettings()
+        case .cost: CostSettings()
+        case .storage: StorageSettings()
+        case .companion: RemotePairingView()
+        case .about: AboutSettings()
+        }
+    }
+
+    @ViewBuilder private var integrations: some View {
+        CatalogView(projectName: workspace.isEmpty ? "" : URL(fileURLWithPath: workspace).lastPathComponent,
+                    entries: engine.catalog,
+                    automaticUpdates: autoCatalogUpdates,
+                    backgroundStatus: engine.catalogBackgroundStatus,
+                    actionResult: engine.catalogActionResult,
+                    progress: engine.catalogProgress,
+                    requestedInstall: engine.requestedInstall,
+                    onRequestHandled: { engine.requestedInstall = nil },
+                    onLoadPlan: { id, action, done in
+                        engine.loadCatalogPlan(project: workspace, id: id, action: action, completion: done)
+                    },
+                    onAutomaticUpdatesChanged: { value in
+                        autoCatalogUpdates = value
+                        if value { engine.loadCatalog(project: workspace, automaticUpdates: true) }
+                    },
+                    onInstall: { engine.catalogAction(project: workspace, id: $0,
+                                                      action: workspace.isEmpty ? "install" : "install_enable") },
+                    onUpdate: { engine.catalogAction(project: workspace, id: $0, action: "update") },
+                    onRemove: { engine.catalogAction(project: workspace, id: $0, action: "remove") },
+                    onProjectEnableChanged: { id, enabled in
+                        engine.catalogAction(project: workspace, id: id,
+                                             action: enabled ? "enable" : "disable")
+                    })
+        if let error = engine.catalogActionError ?? engine.catalogError {
+            Text(error).font(.caption).foregroundStyle(.red)
+        }
+    }
+}
+
+/// Every key Settings owns, with the default decided for it. Several back
+/// features that have not shipped yet (orchestra caps, route preset, trusted
+/// projects, THB rate): they are stored now so those features can read them.
+enum SettingsKey {
+    // การส่งงาน
+    static let defaultMode = "chorus.defaultMode"                 // "auto" | "orchestra"
+    static let defaultRoutePreset = "chorus.defaultRoutePreset"   // "economy" | "balanced" | "max"
+    // Orchestra
+    static let orchestratorModel = "chorus.orchestratorLeadModel" // "" = Claude Opus 5.5 · medium
+    static let orchestratorBackup = "chorus.orchestratorBackupModel" // "" = strongest ready model elsewhere
+    static let orchestraConcurrency = "chorus.orchestrationLimit"
+    static let orchestraMaxChildren = "chorus.orchestraMaxChildren"
+    static let orchestraMaxMinutes = "chorus.orchestraMaxMinutes"
+    static let orchestraAskBeforePlan = "chorus.orchestraAskBeforePlan"
+    static let orchestraAutoMerge = "chorus.orchestraAutoMerge"
+    static let orchestraCopyEnv = "chorus.orchestraCopyEnv"
+    // สิทธิ์และความปลอดภัย
+    static let trustedProjects = "chorus.trustedProjects"         // newline-separated paths
+    static let dictationOnDevice = "chorus.dictationOnDevice"
+    // ข้อมูล
+    static let showChorusFiles = "chorus.showChorusWrittenFiles"
+    static let thbRate = "chorus.thbRate"                         // "" = not set; baht per 1 USD
 }
 
 // MARK: shared bits
@@ -121,38 +244,89 @@ struct SettingsGroup<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.headline)
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                .padding(.leading, 4)
+                .accessibilityAddTraits(.isHeader)
             VStack(alignment: .leading, spacing: 0) { content() }
-                .padding(.vertical, 4)
-                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .padding(.vertical, 2)
+                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             if let footer {
                 Text(footer).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 4)
             }
         }
     }
 }
 
+/// One row: a short label, an optional (i) with the long explanation, an
+/// optional one-line status under the label, and the control on the right.
 struct SettingsRow<Trailing: View>: View {
     let title: String
     var detail: String?
+    var info: String?
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
+                HStack(spacing: 6) {
+                    Text(title)
+                    if let info { InfoTip(text: info) }
+                }
                 if let detail {
                     Text(detail).font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Spacer(minLength: 8)
             trailing()
         }
-        .padding(.horizontal, 12).padding(.vertical, 9)
+        .padding(.horizontal, 12).padding(.vertical, 7)
+        .frame(minHeight: 38)
     }
+}
+
+/// The (i): the native tooltip on hover, a popover on keyboard focus or click,
+/// and the full text for VoiceOver.
+struct InfoTip: View {
+    let text: String
+    @State private var shown = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        Image(systemName: "info.circle")
+            .font(.system(size: 12))
+            .foregroundStyle(focused || shown ? Color.accentColor : .secondary)
+            .contentShape(Circle())
+            .help(text)
+            .focusable()
+            .focused($focused)
+            // Open on focus but never close on blur: a popover that takes key
+            // would blur the icon and snap itself shut.
+            .onChange(of: focused) { _, f in if f { shown = true } }
+            .onTapGesture { shown.toggle() }
+            .onKeyPress(.space) { shown.toggle(); return .handled }
+            .onKeyPress(.escape) { shown = false; return .handled }
+            .popover(isPresented: $shown, arrowEdge: .trailing) {
+                Text(text)
+                    .font(.callout)
+                    .frame(width: 260, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(12)
+            }
+            .accessibilityElement()
+            .accessibilityLabel("ข้อมูลเพิ่มเติม")
+            .accessibilityValue(text)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { shown.toggle() }
+    }
+}
+
+struct RowDivider: View {
+    var body: some View { Divider().padding(.leading, 12) }
 }
 
 /// A usage bar: green → orange → red as it fills.
@@ -183,21 +357,11 @@ func resetText(_ unix: Int64?) -> String {
     return "รีเซ็ต " + f.string(from: d)
 }
 
-// MARK: general
+// MARK: ทั่วไป
 
 struct GeneralSettings: View {
-    @EnvironmentObject private var engine: Engine
-    var workspace: String = ""
-    @AppStorage("chorus.defaultPermission") private var defaultPermission = Int(PermissionLevel.ask.rawValue)
     @AppStorage("chorus.enterSends") private var enterSends = true
-    @AppStorage(SpotlightIndexer.settingKey) private var spotlightIndexing = false
     @AppStorage("chorus.thinkingOpen") private var thinkingOpen = true
-    @AppStorage("chorus.failoverAccounts") private var failoverAccounts = true
-    @AppStorage("chorus.failoverProviders") private var failoverProviders = true
-    @AppStorage("chorus.autoRoute") private var autoRoute = true
-    @AppStorage("chorus.conserveBatteryOnInference") private var conserveBatteryOnInference = true
-    @AppStorage("chorus.routerModel") private var routerModel = "chorus-openthai-systemone:0.8b"
-    @AppStorage("chorus.routerModelAuto") private var routerModelAuto = true
     @AppStorage("chorus.dismissedSetupCards") private var dismissedSetupCards = ""
     @AppStorage("chorus.scrollbarStyle") private var scrollbarStyle = "hidden"
     @AppStorage("chorus.inspectorPosition") private var inspectorPosition = "trailing"
@@ -206,268 +370,375 @@ struct GeneralSettings: View {
     @AppStorage("chorus.explorerWidth") private var explorerWidth: Double = 260
     @AppStorage("chorus.inspectorWidth") private var inspectorWidth: Double = 330
     @AppStorage("chorus.codeViewerWidth") private var codeViewerWidth: Double = 520
-    @State private var showLearnedRoutes = false
-    @State private var isCheckingUpdate = false
-    @State private var updateStatusText = "ตรวจหาเวอร์ชันล่าสุดจาก GitHub Releases"
 
     var body: some View {
-        Group {
-            SettingsGroup(title: "การทำงาน") {
-                SettingsRow(title: "สิทธิ์เริ่มต้นของเซสชันใหม่", detail: PermissionLevel(rawValue: Int32(defaultPermission))?.hint) {
-                    Picker("", selection: $defaultPermission) {
-                        ForEach(PermissionLevel.allCases, id: \.self) { Text($0.label).tag(Int($0.rawValue)) }
-                    }
-                    .labelsHidden().fixedSize()
-                }
-                Divider().padding(.leading, 12)
-                SettingsRow(title: "กด Enter เพื่อส่ง", detail: enterSends ? "Shift+Enter ขึ้นบรรทัดใหม่" : "⌘Enter ส่ง, Enter ขึ้นบรรทัดใหม่") {
-                    Toggle("", isOn: $enterSends).labelsHidden().toggleStyle(.switch)
-                }
-                Divider().padding(.leading, 12)
-                SettingsRow(title: "เปิดกล่องความคิดระหว่างเอเจนต์ทำงาน") {
-                    Toggle("", isOn: $thinkingOpen).labelsHidden().toggleStyle(.switch)
-                }
-                Divider().padding(.leading, 12)
-                SettingsRow(title: "ค้นหาเซสชันผ่าน Spotlight", detail: "ส่งชื่อและเป้าหมายของเซสชันเข้าดัชนี Spotlight ของระบบ (อยู่นอกข้อมูลของ Chorus)") {
-                    Toggle("", isOn: $spotlightIndexing).labelsHidden().toggleStyle(.switch)
-                        .onChange(of: spotlightIndexing) { _, on in
-                            if !on { SpotlightIndexer.shared.clearAll() }
-                        }
-                }
+        SettingsGroup(title: "การพิมพ์") {
+            SettingsRow(title: "Enter เพื่อส่ง",
+                        info: enterSends ? "Shift+Enter ขึ้นบรรทัดใหม่" : "⌘Enter ส่ง · Enter ขึ้นบรรทัดใหม่") {
+                Toggle("Enter เพื่อส่ง", isOn: $enterSends).labelsHidden().toggleStyle(.switch)
             }
-            SettingsGroup(title: "รูปแบบหน้าต่างและแถบเลื่อน",
-                          footer: "ปรับแต่งการจัดวางและแถบเลื่อนให้เหมาะกับการทำงานของคุณ สามารถลากเส้นแบ่งขอบเพื่อยืด/ขยายแต่ละแผงได้ตามต้องการ") {
-                SettingsRow(title: "รูปแบบแถบเลื่อน (Scrollbar)",
-                            detail: ScrollbarStyle(rawValue: scrollbarStyle)?.hint) {
-                    Picker("", selection: $scrollbarStyle) {
-                        ForEach(ScrollbarStyle.allCases) { style in
-                            Text(style.label).tag(style.rawValue)
-                        }
-                    }
-                    .labelsHidden().fixedSize()
-                }
-                Divider().padding(.leading, 12)
-                SettingsRow(title: "ตำแหน่งแผงข้อมูล (Inspector)", detail: "เลือกแสดงแผงบริบท/สิ่งที่แก้ไข/ความจำ ด้านขวาหรือซ้ายของหน้าจอ") {
-                    Picker("", selection: $inspectorPosition) {
-                        Text("ด้านขวา (Right)").tag("trailing")
-                        Text("ด้านซ้าย (Left)").tag("leading")
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 170)
-                }
-                Divider().padding(.leading, 12)
-                SettingsRow(title: "ตำแหน่งแผงไฟล์ (Explorer)", detail: "เลือกแสดงโครงสร้างไฟล์และ Git Worktrees ด้านซ้ายหรือขวา") {
-                    Picker("", selection: $explorerPosition) {
-                        Text("ด้านซ้าย (Left)").tag("leading")
-                        Text("ด้านขวา (Right)").tag("trailing")
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 170)
-                }
-                Divider().padding(.leading, 12)
-                SettingsRow(title: "ขนาดแผงที่ปรับแต่งไว้", detail: "ความกว้างของแถบโปรเจกต์, ไฟล์, แผงข้อมูล และโค้ด") {
-                    Button("คืนค่าขนาดเริ่มต้น") {
-                        sidebarWidth = 260
-                        explorerWidth = 260
-                        inspectorWidth = 330
-                        codeViewerWidth = 520
-                    }
-                }
+            RowDivider()
+            SettingsRow(title: "เปิดกล่องความคิดไว้",
+                        info: "แสดงสิ่งที่ agent คิดระหว่างทำงาน ปิดไว้ก็กดเปิดดูทีหลังได้") {
+                Toggle("เปิดกล่องความคิดไว้", isOn: $thinkingOpen).labelsHidden().toggleStyle(.switch)
             }
-            SettingsGroup(title: "เมื่อชนลิมิต",
-                          footer: "Chorus ส่ง brief (เป้าหมาย สิ่งที่ทำแล้ว diff) ให้ตัวถัดไปทำต่อจากจุดเดิม ความจำและเซสชันเป็นชุดเดียวกัน") {
-                SettingsRow(title: "สลับไปบัญชีอื่นของเจ้าเดียวกันก่อน", detail: "เช่น Claude งาน → Claude ส่วนตัว") {
-                    Toggle("", isOn: $failoverAccounts).labelsHidden().toggleStyle(.switch)
+        }
+        SettingsGroup(title: "หน้าต่าง") {
+            SettingsRow(title: "แถบเลื่อน", info: ScrollbarStyle(rawValue: scrollbarStyle)?.hint) {
+                Picker("แถบเลื่อน", selection: $scrollbarStyle) {
+                    ForEach(ScrollbarStyle.allCases) { Text($0.label).tag($0.rawValue) }
                 }
-                Divider().padding(.leading, 12)
-                SettingsRow(title: "แล้วค่อยสลับไปเอเจนต์เจ้าอื่น", detail: "เช่น Claude → Codex") {
-                    Toggle("", isOn: $failoverProviders).labelsHidden().toggleStyle(.switch)
-                }
+                .labelsHidden().fixedSize()
             }
-            SettingsGroup(title: "ระบบเลือกโมเดลอัตโนมัติ (Zero-Ollama Auto Router)",
-                          footer: "Chorus รันโมเดลวิเคราะห์งานในเครื่องแบบ In-Process ผ่าน Apple Silicon Metal ออฟไลน์ 100% โดยไม่ต้องติดตั้งหรือเปิดโปรแกรม Ollama หากยังไม่ได้ดาวน์โหลดโมเดล ระบบจะใช้ Fast In-Process Classifier (3–8 ms) ทำงานให้อัตโนมัติ") {
-                SettingsRow(title: "ใช้ Auto Router ก่อนส่งงานใหม่") {
-                    Toggle("", isOn: $autoRoute).labelsHidden().toggleStyle(.switch)
+            RowDivider()
+            SettingsRow(title: "แผงบริบท", info: "แผงบริบท สิ่งที่แก้ และความจำ") {
+                Picker("แผงบริบท", selection: $inspectorPosition) {
+                    Text("ขวา").tag("trailing")
+                    Text("ซ้าย").tag("leading")
                 }
-                Divider().padding(.leading, 12)
-
-                SettingsRow(title: "ประหยัดพลังงานเมื่อใช้แบตเตอรี่",
-                            detail: "สลับไปใช้ Fast In-Process Classifier (0ms) อัตโนมัติเมื่ออยู่ในโหมดประหยัดพลังงาน (Low Power Mode) หรืออุณหภูมิเครื่องสูง") {
-                    Toggle("", isOn: $conserveBatteryOnInference).labelsHidden().toggleStyle(.switch)
-                }
-                Divider().padding(.leading, 12)
-
-                // Smart Unified Memory Ceiling
-                let totalRamBytes = ProcessInfo.processInfo.physicalMemory
-                let totalRamGB = Int(round(Double(totalRamBytes) / (1024 * 1024 * 1024)))
-                let isCompactRam = totalRamGB <= 16
-
-                SettingsRow(
-                    title: "หน่วยความจำ Unified Memory (\(totalRamGB) GB)",
-                    detail: isCompactRam
-                        ? "Mac รุ่น \(totalRamGB) GB: เหมาะสำหรับ OpenThai 0.8B (529 MB) และ Extractive Summarizer (0 MB) เพื่อความเร็วสูงสุดและหลีกเลี่ยง Memory Paging"
-                        : "Mac รุ่น \(totalRamGB) GB: มีหน่วยความจำกว้างขวางสำหรับรันทั้ง Local Router และ AI Compactor พร้อมกันได้อย่างเต็มประสิทธิภาพ"
-                ) {
-                    Label(isCompactRam ? "\(totalRamGB) GB (แนะนำโมเดล 0.8B)" : "\(totalRamGB) GB (พร้อมทุกโมเดล)", systemImage: "memorychip")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(isCompactRam ? .orange : .green)
-                }
-                Divider().padding(.leading, 12)
-
-                // 1-Click Local Router Model Card
-                let routerModelStatus = engine.localModels.first { $0.id.contains("openthai") }
-                if let rm = routerModelStatus {
-                    if engine.isDownloadingLocalModel {
-                        SettingsRow(
-                            title: "กำลังดาวน์โหลด OpenThai System One",
-                            detail: engine.localModelDownloadStatusText
-                        ) {
-                            HStack(spacing: 8) {
-                                ProgressView(value: engine.localModelDownloadProgress)
-                                    .progressViewStyle(.linear)
-                                    .frame(width: 140)
-                                Button("ยกเลิก") {
-                                    engine.cancelLocalModelDownload()
-                                }
-                                .buttonStyle(.bordered)
-                                .disabled(!engine.canCancelLocalModelDownload)
-                            }
-                        }
-                    } else if rm.isInstalled {
-                        SettingsRow(
-                            title: "OpenThai System One 0.8B",
-                            detail: "พร้อมใช้งานในเครื่อง (ขนาด \(rm.size_bytes.map { String(format: "%.1f MB", Double($0) / (1024 * 1024)) } ?? "529 MB")) · Metal Acceleration"
-                        ) {
-                            HStack(spacing: 8) {
-                                Label("ติดตั้งแล้ว", systemImage: "checkmark.circle.fill")
-                                    .foregroundStyle(.green)
-                                    .font(.caption.weight(.medium))
-                                Button("ลบโมเดล") {
-                                    engine.deleteLocalModel(modelId: rm.id)
-                                }
-                                .buttonStyle(.bordered)
-                            }
-                        }
-                    } else {
-                        SettingsRow(
-                            title: "OpenThai System One 0.8B (แนะนำ)",
-                            detail: "โมเดล Router สำหรับงานภาษาไทยและอังกฤษ · ดาวน์โหลดคลิกเดียว (~529 MB) ติดตั้งใน Application Support"
-                        ) {
-                            Button {
-                                engine.downloadLocalModel(rm.spec)
-                            } label: {
-                                Label("ดาวน์โหลดคลิกเดียว (529 MB)", systemImage: "arrow.down.circle.fill")
-                            }
-                            .buttonStyle(.borderedProminent)
-                        }
-                    }
-                } else {
-                    SettingsRow(
-                        title: "โมเดล Local Router ในเครื่อง",
-                        detail: "กำลังตรวจสอบสถานะโมเดลในเครื่อง..."
-                    ) {
-                        Button("ตรวจใหม่") {
-                            engine.loadLocalModels()
-                        }
-                    }
-                }
-
-                if let err = engine.localModelError {
-                    Divider().padding(.leading, 12)
-                    SettingsRow(title: "ข้อผิดพลาด", detail: err) {
-                        EmptyView()
-                    }
-                }
-
-                Divider().padding(.leading, 12)
-
-                // Optional AI Compactor Model Card
-                let compactorStatus = engine.localModels.first { $0.id.contains("qwen2.5-coder") }
-                if let cm = compactorStatus {
-                    if cm.isInstalled {
-                        SettingsRow(
-                            title: "AI Conversation Compactor",
-                            detail: "Qwen 2.5 Coder 1.5B ติดตั้งแล้ว · ย่อบริบทประวัติแชทด้วย AI"
-                        ) {
-                            Button("ลบโมเดล") {
-                                engine.deleteLocalModel(modelId: cm.id)
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                    } else {
-                        SettingsRow(
-                            title: "AI Conversation Compactor (อุปกรณ์เสริม)",
-                            detail: isCompactRam
-                                ? "ปัจจุบันใช้ Extractive สรุปประวัติแชทรวดเร็ว (0 MB) · สำหรับ Mac \(totalRamGB) GB แนะนำใช้ Extractive หรือโหลด Qwen 2.5 Coder (~893 MB) หากต้องการสรุปเชิงลึก"
-                                : "ปัจจุบันใช้ Extractive สรุปประวัติแชทรวดเร็วเป็นค่าเริ่มต้น (0 MB) · สามารถโหลด Qwen 2.5 Coder (~893 MB) เพื่อเพิ่มประสิทธิภาพการสรุปข้อความ"
-                        ) {
-                            Button("ดาวน์โหลด (893 MB)") {
-                                engine.downloadLocalModel(cm.spec)
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(engine.isDownloadingLocalModel)
-                        }
-                    }
-                }
-                Divider().padding(.leading, 12)
-                SettingsRow(
-                    title: "สิ่งที่ Auto Route เรียนรู้แล้ว",
-                    detail: engine.learnedRoutes.isEmpty
-                        ? "ยังไม่มีประวัติการเรียนรู้ (ระบบจะเรียนรู้อัตโนมัติจากการเลือกหรือยืนยันโมเดลของคุณ)"
-                        : "จดจำความต้องการไว้แล้ว \(engine.learnedRoutes.count) รายการ เพื่อเลือกโมเดลให้ตรงใจคุณยิ่งขึ้น"
-                ) {
-                    Button {
-                        showLearnedRoutes = true
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "brain.head.profile")
-                            Text("ดูสิ่งที่เรียนรู้ (\(engine.learnedRoutes.count))")
-                        }
-                    }
-                }
-                Divider().padding(.leading, 12)
-                SettingsRow(title: "คำแนะนำการตั้งค่าที่ปิดไว้", detail: "แสดงการ์ดสำหรับ agent, Auto และเครื่องมือเสริมอีกครั้ง") {
-                    Button("แสดงอีกครั้ง") { dismissedSetupCards = "" }
-                        .disabled(dismissedSetupCards.isEmpty)
-                }
+                .pickerStyle(.segmented).labelsHidden().frame(width: 120)
             }
-            SettingsGroup(title: "ข้อมูล") {
-                SettingsRow(title: "โฟลเดอร์ข้อมูลของ Chorus", detail: "~/.chorus — บัญชีเพิ่มเติม, สถานะลิมิต") {
-                    Button("เปิด") {
-                        let u = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".chorus")
-                        try? FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
-                        NSWorkspace.shared.open(u)
-                    }
+            RowDivider()
+            SettingsRow(title: "แผงไฟล์", info: "โครงสร้างไฟล์และ Git worktree") {
+                Picker("แผงไฟล์", selection: $explorerPosition) {
+                    Text("ซ้าย").tag("leading")
+                    Text("ขวา").tag("trailing")
                 }
+                .pickerStyle(.segmented).labelsHidden().frame(width: 120)
             }
-            SettingsGroup(title: "เวอร์ชันและการอัปเดต") {
-                SettingsRow(title: "เวอร์ชันปัจจุบัน", detail: "Chorus v0.1.0 (Desktop Agent Harness)") {
-                    Text("v0.1.0")
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                }
-                Divider().padding(.leading, 12)
-                SettingsRow(title: "ตรวจสอบการอัปเดต", detail: updateStatusText) {
-                    Button(isCheckingUpdate ? "กำลังตรวจ…" : "ตรวจหาเวอร์ชันใหม่") {
-                        checkForUpdates()
-                    }
-                    .disabled(isCheckingUpdate)
+            RowDivider()
+            SettingsRow(title: "ขนาดแผง", info: "ลากเส้นแบ่งเพื่อปรับความกว้างของแต่ละแผง ปุ่มนี้คืนค่าเดิมทั้งหมด") {
+                Button("คืนค่าเริ่มต้น") {
+                    sidebarWidth = 260
+                    explorerWidth = 260
+                    inspectorWidth = 330
+                    codeViewerWidth = 520
                 }
             }
         }
-        .onAppear {
-            engine.loadLocalModels()
-            engine.loadLearnedRoutes(workspace: workspace)
+        SettingsGroup(title: "คำแนะนำ") {
+            SettingsRow(title: "การ์ดแนะนำที่ปิดไว้", info: "การ์ดตั้งค่า agent, Auto route และเครื่องมือเสริม") {
+                Button("แสดงอีกครั้ง") { dismissedSetupCards = "" }
+                    .disabled(dismissedSetupCards.isEmpty)
+            }
         }
+    }
+}
+
+// MARK: การส่งงาน
+
+struct RoutingSettings: View {
+    @EnvironmentObject private var engine: Engine
+    let workspace: String
+    @AppStorage(SettingsKey.defaultMode) private var defaultMode = "auto"
+    @AppStorage(SettingsKey.defaultRoutePreset) private var defaultPreset = "balanced"
+    @AppStorage("chorus.autoRoute") private var autoRoute = true
+    @AppStorage("chorus.failoverAccounts") private var failoverAccounts = true
+    @AppStorage("chorus.failoverProviders") private var failoverProviders = true
+    @AppStorage("chorus.conserveBatteryOnInference") private var conserveBattery = true
+    @State private var showLearnedRoutes = false
+
+    var body: some View {
+        SettingsGroup(title: "ค่าเริ่มต้นของ session ใหม่") {
+            SettingsRow(title: "โหมด",
+                        info: "Auto route: router เลือกโมเดลให้ทุกเทิร์น · Orchestra: โมเดลหลักวางแผนแล้วแจกงานให้ agent ย่อย เปลี่ยนราย session ได้ที่ช่องพิมพ์") {
+                Picker("โหมด", selection: $defaultMode) {
+                    Text("Auto route").tag("auto")
+                    Text("Orchestra").tag("orchestra")
+                }
+                .pickerStyle(.segmented).labelsHidden().frame(width: 190)
+            }
+            RowDivider()
+            SettingsRow(title: "Route preset",
+                        info: "ประหยัด: โมเดลเล็กลงหนึ่งขั้น · สมดุล: ตามความยากของงาน · เต็มกำลัง: ใหญ่ขึ้นหนึ่งขั้น") {
+                Picker("Route preset", selection: $defaultPreset) {
+                    Text("ประหยัด").tag("economy")
+                    Text("สมดุล").tag("balanced")
+                    Text("เต็มกำลัง").tag("max")
+                }
+                .pickerStyle(.segmented).labelsHidden().frame(width: 230)
+            }
+            RowDivider()
+            SettingsRow(title: "ให้ router เลือกโมเดล",
+                        info: "ปิด = ใช้โมเดลที่เลือกเองในช่องพิมพ์ทุกเทิร์น") {
+                Toggle("ให้ router เลือกโมเดล", isOn: $autoRoute).labelsHidden().toggleStyle(.switch)
+            }
+        }
+        SettingsGroup(title: "เมื่อชนลิมิต") {
+            SettingsRow(title: "สลับบัญชีของเจ้าเดิมก่อน",
+                        info: "เช่น Claude งาน → Claude ส่วนตัว Chorus ส่ง brief (เป้าหมาย สิ่งที่ทำแล้ว diff) ให้ทำต่อจากจุดเดิม") {
+                Toggle("สลับบัญชีของเจ้าเดิมก่อน", isOn: $failoverAccounts).labelsHidden().toggleStyle(.switch)
+            }
+            RowDivider()
+            SettingsRow(title: "แล้วสลับไปเจ้าอื่น", info: "เช่น Claude → Codex ความจำและ session เป็นชุดเดียวกัน") {
+                Toggle("แล้วสลับไปเจ้าอื่น", isOn: $failoverProviders).labelsHidden().toggleStyle(.switch)
+            }
+        }
+        SettingsGroup(title: "Router") {
+            SettingsRow(title: "ประหยัดแบตตอนถอดสาย",
+                        info: "ใช้ตัวจัดประเภทแบบเร็วแทนโมเดลในเครื่อง เมื่อเปิด Low Power Mode หรือเครื่องร้อน") {
+                Toggle("ประหยัดแบตตอนถอดสาย", isOn: $conserveBattery).labelsHidden().toggleStyle(.switch)
+            }
+            RowDivider()
+            SettingsRow(title: "สิ่งที่เรียนรู้แล้ว",
+                        detail: engine.learnedRoutes.isEmpty ? "ยังไม่มี" : "\(engine.learnedRoutes.count) รายการ",
+                        info: "จำจากตอนที่คุณเปลี่ยนโมเดลเอง เพื่อเลือกให้ตรงใจขึ้นในงานแบบเดียวกัน") {
+                Button("ดู") { showLearnedRoutes = true }
+            }
+        }
+        .onAppear { engine.loadLearnedRoutes(workspace: workspace) }
         .sheet(isPresented: $showLearnedRoutes) {
-            LearnedRoutesSheet(workspace: workspace)
-                .environmentObject(engine)
+            LearnedRoutesSheet(workspace: workspace).environmentObject(engine)
+        }
+    }
+}
+
+// MARK: สิทธิ์และความปลอดภัย
+
+struct SafetySettings: View {
+    let workspace: String
+    @AppStorage("chorus.defaultPermission") private var defaultPermission = Int(PermissionLevel.ask.rawValue)
+    @AppStorage(SpotlightIndexer.settingKey) private var spotlightIndexing = false
+    @AppStorage(SettingsKey.dictationOnDevice) private var dictationOnDevice = true
+    @AppStorage(SettingsKey.trustedProjects) private var trustedRaw = ""
+
+    private var projects: [String] {
+        var seen = Set<String>()
+        let recents = UserDefaults.standard.stringArray(forKey: "chorus.recentWorkspaces") ?? []
+        return ([workspace] + recents).filter { !$0.isEmpty && seen.insert($0).inserted }.prefix(4).map { $0 }
+    }
+
+    private var trusted: Set<String> { Set(trustedRaw.split(separator: "\n").map(String.init)) }
+
+    private func setTrusted(_ path: String, _ on: Bool) {
+        var t = trusted
+        if on { t.insert(path) } else { t.remove(path) }
+        trustedRaw = t.sorted().joined(separator: "\n")
+    }
+
+    var body: some View {
+        SettingsGroup(title: "สิทธิ์") {
+            SettingsRow(title: "ค่าเริ่มต้น",
+                        info: (PermissionLevel(rawValue: Int32(defaultPermission))?.hint ?? "")
+                            + " · ทั้งสองโหมดยังอยู่ใน sandbox เขียนได้เฉพาะ workspace") {
+                Picker("สิทธิ์เริ่มต้น", selection: $defaultPermission) {
+                    ForEach(PermissionLevel.allCases, id: \.self) { Text($0.label).tag(Int($0.rawValue)) }
+                }
+                .pickerStyle(.segmented).labelsHidden().frame(width: 170)
+            }
+        }
+        SettingsGroup(title: "โปรเจกต์ที่เชื่อถือ",
+                      footer: "repo ใหม่จะไม่รันอะไรจนกว่าคุณเปิดเอง") {
+            if projects.isEmpty {
+                SettingsRow(title: "ยังไม่มีโปรเจกต์") { EmptyView() }
+            }
+            ForEach(Array(projects.enumerated()), id: \.element) { i, path in
+                if i > 0 { RowDivider() }
+                SettingsRow(title: URL(fileURLWithPath: path).lastPathComponent,
+                            info: i == 0 ? "เปิดแล้ว Chorus จะรัน cargo check / linter / .chorus/hooks หลังทุกเทิร์น ภายใน sandbox" : nil) {
+                    Toggle("เชื่อถือ \(URL(fileURLWithPath: path).lastPathComponent)",
+                           isOn: Binding(get: { trusted.contains(path) }, set: { setTrusted(path, $0) }))
+                        .labelsHidden().toggleStyle(.switch)
+                        .help(path)
+                }
+            }
+        }
+        SettingsGroup(title: "ความเป็นส่วนตัว") {
+            SettingsRow(title: "ให้ Spotlight ค้นหา session",
+                        info: "ชื่อและเป้าหมายของ session จะไปอยู่ใน index ของระบบ ซึ่งอยู่นอกข้อมูลของ Chorus ปิดแล้วลบออกทันที") {
+                Toggle("ให้ Spotlight ค้นหา session", isOn: $spotlightIndexing).labelsHidden().toggleStyle(.switch)
+                    .onChange(of: spotlightIndexing) { _, on in
+                        if !on { SpotlightIndexer.shared.clearAll() }
+                    }
+            }
+            RowDivider()
+            SettingsRow(title: "พิมพ์ด้วยเสียงในเครื่องเท่านั้น",
+                        info: "ถอดเสียงบน Mac ไม่ส่งเสียงออกไปนอกเครื่อง ถ้าภาษานั้นไม่มีโมเดลในเครื่อง การพิมพ์ด้วยเสียงจะใช้ไม่ได้") {
+                Toggle("พิมพ์ด้วยเสียงในเครื่องเท่านั้น", isOn: $dictationOnDevice).labelsHidden().toggleStyle(.switch)
+            }
+        }
+    }
+}
+
+// MARK: Review และ checkpoint
+
+struct ReviewSettings: View {
+    @AppStorage(SettingsKey.showChorusFiles) private var showChorusFiles = false
+
+    var body: some View {
+        SettingsGroup(title: "Review") {
+            SettingsRow(title: "แสดงไฟล์ที่ Chorus เขียนเอง",
+                        info: "CLAUDE.md, AGENTS.md, GEMINI.md และ .claude/skills ที่ Chorus ฉายจากความจำ ปิด = ซ่อนจากรายการที่แก้") {
+                Toggle("แสดงไฟล์ที่ Chorus เขียนเอง", isOn: $showChorusFiles).labelsHidden().toggleStyle(.switch)
+            }
+        }
+        SettingsGroup(title: "Checkpoint") {
+            SettingsRow(title: "จุดย้อนกลับก่อนทุกเทิร์น",
+                        info: "Chorus snapshot โปรเจกต์ลง repo เงาที่ .chorus/ckpt ก่อน agent เริ่ม ตาม .gitignore ของคุณ ย้อนได้จากแผง Changes") {
+                Text("เปิดเสมอ").foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+// MARK: การใช้งานและค่าใช้จ่าย
+
+struct CostSettings: View {
+    @AppStorage(SettingsKey.thbRate) private var thbRate = ""
+
+    private var rateIsValid: Bool {
+        let t = thbRate.trimmingCharacters(in: .whitespaces)
+        return t.isEmpty || (Double(t).map { $0 > 0 } ?? false)
+    }
+
+    var body: some View {
+        SettingsGroup(title: "สกุลเงิน") {
+            SettingsRow(title: "อัตราบาท",
+                        detail: rateIsValid ? nil : "ใส่ตัวเลขมากกว่า 0",
+                        info: "แสดง USD ก่อนเสมอ ใส่อัตราแล้วจะแปลงเป็นบาทให้ด้วย Chorus ไม่ดึงอัตราจากเน็ต") {
+                HStack(spacing: 6) {
+                    Text("1 USD =").foregroundStyle(.secondary)
+                    TextField("ยังไม่ตั้ง", text: $thbRate)
+                        .textFieldStyle(.roundedBorder)
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 80)
+                        .accessibilityLabel("อัตราบาทต่อ 1 USD")
+                    Text("บาท").foregroundStyle(.secondary)
+                }
+            }
+        }
+        SettingsGroup(title: "ตัวเลขที่แสดง") {
+            SettingsRow(title: "Token", info: "แสดงทุกเจ้า ทั้งต่อเทิร์นและต่อ session") {
+                Text("เสมอ").foregroundStyle(.secondary)
+            }
+            RowDivider()
+            SettingsRow(title: "มูลค่าเทียบ API",
+                        info: "แสดงเฉพาะเมื่อ bridge รายงานราคามาเอง (ตอนนี้มีแค่ Claude) ผู้ใช้แบบ subscription ไม่ได้จ่ายตาม token จริง") {
+                Text("เมื่อมีข้อมูล").foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+// MARK: พื้นที่และประสิทธิภาพ
+
+struct StorageSettings: View {
+    @EnvironmentObject private var engine: Engine
+
+    var body: some View {
+        let totalRamGB = Int(round(Double(ProcessInfo.processInfo.physicalMemory) / (1024 * 1024 * 1024)))
+        let isCompactRam = totalRamGB <= 16
+        SettingsGroup(title: "โมเดลในเครื่อง") {
+            SettingsRow(title: "หน่วยความจำ \(totalRamGB) GB",
+                        info: isCompactRam
+                            ? "เหมาะกับ router 0.8B (529 MB) คู่กับการย่อแบบ Extractive (0 MB) เพื่อไม่ให้เครื่อง swap"
+                            : "พอสำหรับรันทั้ง router และตัวย่อบริบทในเครื่องพร้อมกัน") {
+                Label(isCompactRam ? "แนะนำ 0.8B" : "พร้อมทุกโมเดล", systemImage: "memorychip")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(isCompactRam ? .orange : .green)
+            }
+            RowDivider()
+            routerRow
+            if let err = engine.localModelError {
+                RowDivider()
+                SettingsRow(title: "ข้อผิดพลาด", detail: err) { EmptyView() }
+            }
+            RowDivider()
+            compactorRow(isCompactRam: isCompactRam)
+        }
+        SettingsGroup(title: "ข้อมูล") {
+            SettingsRow(title: "โฟลเดอร์ข้อมูล", info: "~/.chorus เก็บบัญชีเพิ่มเติมและสถานะลิมิต") {
+                Button("เปิด") {
+                    let u = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".chorus")
+                    try? FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
+                    NSWorkspace.shared.open(u)
+                }
+            }
+        }
+        .onAppear { engine.loadLocalModels() }
+    }
+
+    @ViewBuilder private var routerRow: some View {
+        if let rm = engine.localModels.first(where: { $0.id.contains("openthai") }) {
+            if engine.isDownloadingLocalModel {
+                SettingsRow(title: "กำลังดาวน์โหลด router", detail: engine.localModelDownloadStatusText) {
+                    HStack(spacing: 8) {
+                        ProgressView(value: engine.localModelDownloadProgress)
+                            .progressViewStyle(.linear).frame(width: 120)
+                        Button("ยกเลิก") { engine.cancelLocalModelDownload() }
+                            .disabled(!engine.canCancelLocalModelDownload)
+                    }
+                }
+            } else if rm.isInstalled {
+                SettingsRow(title: "Router (OpenThai 0.8B)",
+                            detail: rm.size_bytes.map { String(format: "%.0f MB · ติดตั้งแล้ว", Double($0) / (1024 * 1024)) } ?? "ติดตั้งแล้ว",
+                            info: "โมเดลเล็กที่ใช้เลือก agent และโมเดลให้แต่ละเทิร์น รันบน Metal ไม่ใช้โควตา ไม่ส่งข้อมูลออก") {
+                    Button("ลบ") { engine.deleteLocalModel(modelId: rm.id) }
+                }
+            } else {
+                SettingsRow(title: "Router (OpenThai 0.8B)",
+                            info: "เลือก agent และโมเดลให้แต่ละเทิร์น ภาษาไทยและอังกฤษ ยังไม่ติดตั้งก็ใช้ตัวจัดประเภทแบบเร็ว (3–8 ms) แทน") {
+                    Button("ดาวน์โหลด 529 MB") { engine.downloadLocalModel(rm.spec) }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+        } else {
+            SettingsRow(title: "Router", detail: "กำลังตรวจ…") {
+                Button("ตรวจใหม่") { engine.loadLocalModels() }
+            }
         }
     }
 
-    private func checkForUpdates() {
-        isCheckingUpdate = false
-        updateStatusText = "ยังไม่ได้ตั้งค่าแหล่งตรวจสอบการอัปเดต"
+    @ViewBuilder private func compactorRow(isCompactRam: Bool) -> some View {
+        if let cm = engine.localModels.first(where: { $0.id.contains("qwen2.5-coder") }) {
+            if cm.isInstalled {
+                SettingsRow(title: "ตัวย่อบริบท (Qwen 2.5 Coder)", detail: "ติดตั้งแล้ว",
+                            info: "ย่อประวัติแชทเก่าด้วย AI ตอนเครื่องว่าง") {
+                    Button("ลบ") { engine.deleteLocalModel(modelId: cm.id) }
+                }
+            } else {
+                SettingsRow(title: "ตัวย่อบริบท (ไม่บังคับ)",
+                            detail: "ตอนนี้ใช้ Extractive",
+                            info: isCompactRam
+                                ? "Extractive ย่อได้เร็วและไม่กินแรม เหมาะกับเครื่องนี้ โหลด Qwen 2.5 Coder ถ้าอยากได้สรุปที่ละเอียดกว่า"
+                                : "Extractive ย่อได้เร็วและไม่กินแรม โหลด Qwen 2.5 Coder เพื่อสรุปที่ละเอียดกว่า") {
+                    Button("ดาวน์โหลด 893 MB") { engine.downloadLocalModel(cm.spec) }
+                        .disabled(engine.isDownloadingLocalModel)
+                }
+            }
+        }
+    }
+}
+
+// MARK: เกี่ยวกับ
+
+struct AboutSettings: View {
+    private var version: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
+    }
+
+    var body: some View {
+        SettingsGroup(title: "Chorus") {
+            SettingsRow(title: "เวอร์ชัน") {
+                Text("v\(version)").font(.callout.monospaced()).foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            RowDivider()
+            SettingsRow(title: "ตรวจหาอัปเดต", info: "Sparkle ตรวจลายเซ็นของไฟล์อัปเดตก่อนติดตั้งทุกครั้ง") {
+                Text("เมนู Chorus › Check for Updates…").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        SettingsGroup(title: "สัญญาอนุญาต") {
+            SettingsRow(title: "ไอคอนไฟล์",
+                        detail: "Catppuccin Icons for VS Code v1.26.0 · MIT",
+                        info: "© 2023 Catppuccin, © 2023 thang-nm") {
+                Link(destination: URL(string: "https://github.com/catppuccin/vscode-icons")!) {
+                    Image(systemName: "arrow.up.forward.square")
+                }
+                .help("github.com/catppuccin/vscode-icons")
+                .accessibilityLabel("เปิดหน้า Catppuccin Icons")
+            }
+        }
     }
 }
 
@@ -658,7 +929,7 @@ struct AgentsSettings: View {
                         if engine.refreshingModels { ProgressView().controlSize(.small) }
                         else { Image(systemName: "arrow.clockwise") }
                     }
-                    .help("ถามรายการโมเดลล่าสุดจากเอเจนต์")
+                    .help("ถามรายการโมเดลล่าสุดจาก agent")
                 }
             }
         }
@@ -680,7 +951,7 @@ struct SkillsSettings: View {
             q.isEmpty || $0.name.localizedCaseInsensitiveContains(q) || $0.description.localizedCaseInsensitiveContains(q)
         }
         let titles = [
-            "chorus": "Chorus — ส่งให้ทุกเอเจนต์",
+            "chorus": "Chorus — ส่งให้ทุก agent",
             "project": "โปรเจกต์นี้ (.claude/skills, .agents/skills)",
             "agents": "Global ใช้ร่วมกัน (~/.agents/skills)",
             "user": "Claude (~/.claude/skills)",
@@ -688,7 +959,7 @@ struct SkillsSettings: View {
             "gemini": "Gemini / Antigravity (~/.gemini/skills)",
         ]
         TextField("ค้นหา skill…", text: $query).textFieldStyle(.roundedBorder)
-        Text("\(engine.skills.count) skill ที่เอเจนต์ในโฟลเดอร์นี้มองเห็น")
+        Text("\(engine.skills.count) skill ที่ agent ในโฟลเดอร์นี้มองเห็น")
             .font(.caption).foregroundStyle(.secondary)
         ForEach(["chorus", "project", "agents", "user", "codex", "gemini"], id: \.self) { src in
             let group = shown.filter { $0.source == src }
@@ -708,135 +979,98 @@ struct SkillsSettings: View {
             }
         }
         if shown.isEmpty {
-            Text("ไม่พบ skill — วางไว้ที่ .chorus/skills/<ชื่อ>/SKILL.md เพื่อให้ทุกเอเจนต์ใช้ร่วมกัน")
+            Text("ไม่พบ skill — วางไว้ที่ .chorus/skills/<ชื่อ>/SKILL.md เพื่อให้ทุก agent ใช้ร่วมกัน")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
 }
 
-// MARK: - Orchestration Settings
+// MARK: Orchestra
+
+/// Defaults from the Orchestra mode decision: caps 3 / 10 / 30 min, plan
+/// starts without asking, merges wait for Review, `.env` stays put. Rust will
+/// enforce the caps; these are only what it reads.
 struct OrchestrationSettings: View {
     let workspace: String
     @EnvironmentObject var engine: Engine
 
-    @AppStorage("chorus.orchestrationEnabled") private var orchestrationEnabled = true
-    @AppStorage("chorus.orchestrationLimit") private var orchestrationLimit = 3
-    @AppStorage("chorus.orchestrationBasePort") private var orchestrationBasePort = 3000
-    @AppStorage("chorus.autoMergeWorktrees") private var autoMergeWorktrees = true
-    @AppStorage("chorus.orchestratorLeadModel") private var orchestratorLeadModel = ""
-
-    @State private var worktrees: [Engine.WorktreeInfo] = []
+    @AppStorage(SettingsKey.orchestratorModel) private var orchestrator = ""
+    @AppStorage(SettingsKey.orchestratorBackup) private var backup = ""
+    @AppStorage(SettingsKey.orchestraConcurrency) private var concurrency = 3
+    @AppStorage(SettingsKey.orchestraMaxChildren) private var maxChildren = 10
+    @AppStorage(SettingsKey.orchestraMaxMinutes) private var maxMinutes = 30
+    @AppStorage(SettingsKey.orchestraAskBeforePlan) private var askBeforePlan = false
+    @AppStorage(SettingsKey.orchestraAutoMerge) private var autoMerge = false
+    @AppStorage(SettingsKey.orchestraCopyEnv) private var copyEnv = false
+    @State private var showRoles = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            SettingsGroup(title: "โมเดลหลักสำหรับ Orchestrator (Lead Conductor)") {
-                SettingsRow(title: "โมเดลผู้คุมงาน (Lead Orchestrator)",
-                            detail: "โมเดลสำหรับวางแผน แตกงาน และสรุปผลรวม (แนะนำโมเดลที่เก่งที่สุดที่มี)") {
-                    Picker("", selection: $orchestratorLeadModel) {
-                        Text("ตามที่เลือกใน Composer (ค่าเริ่มต้น)").tag("")
-                        ForEach(engine.knownBaseModels(keeping: orchestratorLeadModel), id: \.id) { m in
-                            Text(m.label).tag(m.id)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(maxWidth: 240)
-                }
+        SettingsGroup(title: "โมเดลหลัก") {
+            SettingsRow(title: "Orchestrator", info: "วางแผน ตอบคำถามง่าย และแจกงาน แต่ไม่เขียนไฟล์เอง") {
+                modelPicker("Orchestrator", selection: $orchestrator, automatic: "Claude Opus 5.5 · medium")
             }
-
-            SettingsGroup(title: "การทำงานขนาน (Parallel Multi-Agent)") {
-                SettingsRow(title: "เปิดใช้งาน Multi-Agent Worktrees",
-                            detail: "อนุญาตให้เอเจนต์แตกงานขนานไปยัง Git Worktree แยกอัตโนมัติ") {
-                    Toggle("", isOn: $orchestrationEnabled)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                }
-
-                Divider().padding(.leading, 12)
-
-                SettingsRow(title: "จำนวนเอเจนต์ขนานสูงสุด",
-                            detail: "จำกัดจำนวนเอเจนต์ที่รันพร้อมกันเพื่อป้องกัน Token หมดไว") {
-                    Stepper("\(orchestrationLimit) ตัว", value: $orchestrationLimit, in: 1...8)
-                }
-
-                Divider().padding(.leading, 12)
-
-                SettingsRow(title: "ผสานโค้ดกลับอัตโนมัติ (Auto-Merge)",
-                            detail: "เมื่อเอเจนต์ใน Worktree ทำงานสำเร็จ ให้รวมเข้ากับกิ่งหลักทันที") {
-                    Toggle("", isOn: $autoMergeWorktrees)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                }
-            }
-
-            SettingsGroup(title: "สภาพแวดล้อม Worktrees (.chorus/worktrees/)") {
-                SettingsRow(title: "พอร์ตเริ่มต้นสำหรับ Dev Server",
-                            detail: "กำหนด dynamic port เริ่มต้น (เช่น 3000, 3001, ...) ป้องกันพอร์ตชนกัน") {
-                    Stepper(":\(orchestrationBasePort)", value: $orchestrationBasePort, in: 1000...9000, step: 100)
-                }
-
-                Divider().padding(.leading, 12)
-
-                SettingsRow(title: "จัดการโฟลเดอร์ Worktrees",
-                            detail: workspace.isEmpty ? "เลือกโปรเจกต์ก่อนเพื่อดู Worktrees" : "ตำแหน่ง: .chorus/worktrees/") {
-                    HStack(spacing: 8) {
-                        Button("เปิดใน Finder") {
-                            openWorktreesFolder()
-                        }
-                        .disabled(workspace.isEmpty)
-
-                        Button("ล้าง Worktree ทั้งหมด") {
-                            cleanWorktrees()
-                        }
-                        .disabled(workspace.isEmpty)
-                    }
-                }
-            }
-
-            Text("การทำงานขนานจะเกิดขึ้นเมื่อเอเจนต์เรียกคำสั่ง `chorus_spawn_agent` หรือเมื่อกดปุ่มสลับโหมดขนานข้างกล่องข้อความ โดยโค้ดจะถูกแยกใน Git Worktree ต่างหากไม่รบกวนโค้ดหลัก")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Divider().padding(.vertical, 4)
-
-            SettingsGroup(title: "ภาพรวมการทำงานคู่ขนานและบทบาทเอเจนต์") {
-                OrchestratorView(
-                    engine: engine,
-                    workspace: workspace,
-                    onSelectWorktree: { _ in },
-                    onDispatchParallelPrompt: { _ in }
-                )
-                .frame(minHeight: 400)
+            RowDivider()
+            SettingsRow(title: "ตัวสำรอง", info: "ใช้เมื่อตัวหลักชนลิมิต ส่งต่อด้วย handoff brief และบอกใน thread") {
+                modelPicker("ตัวสำรอง", selection: $backup, automatic: "อัตโนมัติ (แรงสุดของเจ้าอื่น)")
             }
         }
-        .onAppear {
-            refreshWorktrees()
+        SettingsGroup(title: "ขีดจำกัด") {
+            SettingsRow(title: "ทำงานพร้อมกัน") {
+                Stepper("\(concurrency) ตัว", value: $concurrency, in: 1...8)
+            }
+            RowDivider()
+            SettingsRow(title: "agent ย่อยต่อครั้ง") {
+                Stepper("\(maxChildren) ตัว", value: $maxChildren, in: 1...50)
+            }
+            RowDivider()
+            SettingsRow(title: "เวลาสูงสุด", info: "ถึงเพดานแล้วจะหยุดรอถาม ไม่ตัดทิ้ง") {
+                Stepper("\(maxMinutes) นาที", value: $maxMinutes, in: 5...240, step: 5)
+            }
+        }
+        SettingsGroup(title: "การรวมงาน") {
+            SettingsRow(title: "ถามก่อนเริ่มแผน", info: "ปิด = แผนขึ้นใน thread แล้วเริ่มทันที กด Stop ได้ตลอด") {
+                Toggle("ถามก่อนเริ่มแผน", isOn: $askBeforePlan).labelsHidden().toggleStyle(.switch)
+            }
+            RowDivider()
+            SettingsRow(title: "Merge อัตโนมัติเมื่อไม่มี conflict", info: "ปิด = ต้องกดอนุมัติใน Review ทุกครั้ง") {
+                Toggle("Merge อัตโนมัติ", isOn: $autoMerge).labelsHidden().toggleStyle(.switch)
+            }
+            RowDivider()
+            SettingsRow(title: "คัดลอก .env ไป worktree", info: "ปิดไว้เพื่อไม่ให้ secret กระจายไปทุก worktree") {
+                Toggle("คัดลอก .env ไป worktree", isOn: $copyEnv).labelsHidden().toggleStyle(.switch)
+            }
+        }
+        SettingsGroup(title: "บทบาท") {
+            SettingsRow(title: "บทบาทและ worktree", info: "บทบาทใน .chorus/agents และ worktree ของงานย่อย") {
+                Button("เปิด") { showRoles = true }
+                    .disabled(workspace.isEmpty)
+            }
+        }
+        .sheet(isPresented: $showRoles) {
+            VStack(spacing: 0) {
+                HStack {
+                    Text("บทบาทและ worktree").font(.headline)
+                    Spacer()
+                    Button("เสร็จ") { showRoles = false }.keyboardShortcut(.defaultAction)
+                }
+                .padding(14)
+                Divider()
+                OrchestratorView(engine: engine, workspace: workspace,
+                                 onSelectWorktree: { _ in }, onDispatchParallelPrompt: { _ in })
+            }
+            .frame(minWidth: 760, minHeight: 560)
         }
     }
 
-    private func refreshWorktrees() {
-        guard !workspace.isEmpty else { return }
-        engine.fetchWorktrees(cwd: workspace) { list in
-            self.worktrees = list
-        }
-    }
-
-    private func openWorktreesFolder() {
-        guard !workspace.isEmpty else { return }
-        let path = (workspace as NSString).appendingPathComponent(".chorus/worktrees")
-        let url = URL(fileURLWithPath: path)
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        NSWorkspace.shared.open(url)
-    }
-
-    private func cleanWorktrees() {
-        guard !workspace.isEmpty else { return }
-        let path = (workspace as NSString).appendingPathComponent(".chorus/worktrees")
-        if let contents = try? FileManager.default.contentsOfDirectory(atPath: path) {
-            for item in contents {
-                try? FileManager.default.removeItem(atPath: (path as NSString).appendingPathComponent(item))
+    private func modelPicker(_ label: String, selection: Binding<String>, automatic: String) -> some View {
+        Picker(label, selection: selection) {
+            Text(automatic).tag("")
+            ForEach(engine.knownBaseModels(keeping: selection.wrappedValue), id: \.id) { m in
+                Text(m.label).tag(m.id)
             }
         }
-        refreshWorktrees()
+        .labelsHidden()
+        .frame(maxWidth: 250)
     }
 }
 
@@ -909,7 +1143,7 @@ struct LearnedRoutesSheet: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("สิ่งที่ Auto Route เรียนรู้แล้ว")
                         .font(.headline)
-                    Text("ความจำการเลือกโมเดลและเอเจนต์ที่ระบบบันทึกไว้ ช่วยให้ Chorus แนะนำโมเดลสำหรับงานลักษณะเดียวกันได้ทันที (<5ms)")
+                    Text("ความจำการเลือกโมเดลและ agent ที่ระบบบันทึกไว้ ช่วยให้ Chorus แนะนำโมเดลสำหรับงานลักษณะเดียวกันได้ทันที (<5ms)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -948,7 +1182,7 @@ struct LearnedRoutesSheet: View {
                 .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
                 Picker("", selection: $filterAgent) {
-                    Text("เอเจนต์ทั้งหมด").tag("all")
+                    Text("agent ทั้งหมด").tag("all")
                     Text("Claude").tag("claude")
                     Text("Codex").tag("codex")
                     Text("Antigravity").tag("antigravity")
@@ -999,7 +1233,7 @@ struct LearnedRoutesSheet: View {
                         .font(.callout.weight(.medium))
                     Text(search.isEmpty
                          ? "เมื่อคุณส่งคำถามหรือเลือกเปลี่ยนโมเดลในกล่องแชท Auto Route จะจดจำไว้เพื่อแนะนำโมเดลที่แม่นยำยิ่งขึ้นในครั้งถัดไป"
-                         : "ลองเปลี่ยนคำค้นหาหรือเลือกดูเอเจนต์ทั้งหมด")
+                         : "ลองเปลี่ยนคำค้นหาหรือเลือกดู agent ทั้งหมด")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)

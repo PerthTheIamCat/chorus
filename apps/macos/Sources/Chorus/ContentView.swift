@@ -112,7 +112,6 @@ struct ContentView: View {
 
     @AppStorage("chorus.showSidebar") private var showSidebar = true
     @AppStorage("chorus.showExplorer") private var showExplorer = true
-    @AppStorage("chorus.orchestrationEnabled") private var orchestrationEnabled = false
     @State private var selectedFile: String? = nil
     @State private var diffReviewMode = true
     @State private var showSearchSheet = false
@@ -140,7 +139,7 @@ struct ContentView: View {
         switch maximizedPanel {
         case .codeViewer: return "แผงดูโค้ด (เต็มจอ)"
         case .diffReviewer: return "แผงตรวจสอบ Git Diff (เต็มจอ)"
-        case .thread: return "บทสนทนา (Focus Mode)"
+        case .thread: return "บทสนทนาเต็มจอ"
         case .explorer: return "แผงโครงสร้างไฟล์ (เต็มจอ)"
         case .orchestrator: return "แผงควบคุม Multi-Agent Orchestrator (เต็มจอ)"
         case .livePreview: return "แผงพรีวิวเว็บ Live Preview (เต็มจอ)"
@@ -345,7 +344,7 @@ struct ContentView: View {
                     },
                     onDismiss: { dismissSetup(need) },
                     secondaryTitle: "ตั้งค่าโมเดล",
-                    onSecondary: { settingsSection = .general; showSettings = true })
+                    onSecondary: { settingsSection = .storage; showSettings = true })
             case .catalogUnavailable:
                 SetupPromptCard(
                     title: "ยังตรวจเครื่องมือเสริมไม่ได้",
@@ -402,7 +401,7 @@ struct ContentView: View {
         var tooltip: String {
             switch self {
             case .context: "ตรวจสอบบริบท Token และ Repo Map"
-            case .changes: "ตรวจสอบการแก้ไขไฟล์ (Diff Reviewer)"
+            case .changes: "ตรวจสิ่งที่แก้"
             case .memory: "ความจำและข้อเท็จจริงของโปรเจกต์"
             case .checkpoints: "Time-Travel Checkpoints & ย้อนเวลา"
             }
@@ -761,9 +760,9 @@ struct ContentView: View {
             }
             ToolbarItem(placement: .navigation) {
                 HStack(spacing: 6) {
-                    Text(engine.sessionID < 0 ? "ยังไม่ได้เปิดเซสชัน"
+                    Text(engine.sessionID < 0 ? "ยังไม่ได้เปิด session"
                          : (engine.sessionsByDB[dbPath]?.first { $0.id == engine.sessionID }).map(displayTitle)
-                            ?? "เซสชัน \(engine.sessionID)")
+                            ?? "session \(engine.sessionID)")
                         .lineLimit(1)
                         .font(.headline)
 
@@ -772,7 +771,7 @@ struct ContentView: View {
                         if isRenaming {
                             ProgressView()
                                 .controlSize(.mini)
-                                .help("กำลังตั้งชื่อเซสชันด้วย AI…")
+                                .help("กำลังตั้งชื่อ session ด้วย AI…")
                         } else {
                             Button {
                                 if let s = engine.sessionsByDB[dbPath]?.first(where: { $0.id == engine.sessionID }) {
@@ -784,7 +783,7 @@ struct ContentView: View {
                                     .foregroundColor(.accentColor)
                             }
                             .buttonStyle(.plain)
-                            .help("ตั้งชื่อเซสชันด้วย AI อัตโนมัติ (AI Rename ✨)")
+                            .help("ให้ AI ตั้งชื่อ session")
                         }
                     }
                 }
@@ -820,7 +819,7 @@ struct ContentView: View {
                 Button { showSearchSheet = true } label: {
                     Label("ค้นหา", systemImage: "magnifyingglass")
                 }
-                .help("ค้นหาบทสนทนาข้ามเซสชัน (⇧⌘F)")
+                .help("ค้นหาบทสนทนาข้าม session (⇧⌘F)")
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -1002,7 +1001,7 @@ struct ContentView: View {
         .onChange(of: engine.agents) { _, _ in syncModelSelection(); engine.refreshModels() }
         .onChange(of: model) { _, m in applyModel(m) }
         .sheet(isPresented: $showPalette) { palette }
-        .alert("เปลี่ยนชื่อเซสชัน", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+        .alert("เปลี่ยนชื่อ session", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("ชื่อ", text: $renameText)
             let isRenamingAlert = renaming.map { engine.renamingSessionIDs.contains($0.s.id) } ?? false
             Button(isRenamingAlert ? "กำลังสร้างชื่อด้วย AI…" : "สร้างชื่อด้วย AI ✨") {
@@ -1023,7 +1022,7 @@ struct ContentView: View {
             Button("ยกเลิก", role: .cancel) { renaming = nil }
         }
         .confirmationDialog(
-            "ลบเซสชันนี้?",
+            "ลบ session นี้?",
             isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
             presenting: deleting
         ) { d in
@@ -1185,7 +1184,7 @@ struct ContentView: View {
             HStack(spacing: 6) {
                 HStack(spacing: 5) {
                     Image(systemName: "magnifyingglass").font(.caption).foregroundStyle(.secondary)
-                    TextField("ค้นหาเซสชัน", text: $sessionQuery).textFieldStyle(.plain)
+                    TextField("ค้นหา session", text: $sessionQuery).textFieldStyle(.plain)
                     if !sessionQuery.isEmpty {
                         Button { sessionQuery = "" } label: { Image(systemName: "xmark.circle.fill") }
                             .buttonStyle(.plain).foregroundStyle(.tertiary)
@@ -1263,7 +1262,7 @@ struct ContentView: View {
             HStack(spacing: 6) {
                 if engine.agents.isEmpty {
                     ProgressView().controlSize(.mini)
-                    Text("กำลังตรวจเอเจนต์…").font(.caption2).foregroundStyle(.secondary)
+                    Text("กำลังตรวจ agent…").font(.caption2).foregroundStyle(.secondary)
                 } else {
                     Button {
                         showProvidersPopover.toggle()
@@ -1300,7 +1299,7 @@ struct ContentView: View {
                     .popover(isPresented: $showProvidersPopover, arrowEdge: .top) {
                         providersPopoverContent
                     }
-                    .help("คลิกเพื่อดูรายการสถานะเอเจนต์และโควตาทั้งหมด")
+                    .help("คลิกเพื่อดูรายการสถานะ agent และโควตาทั้งหมด")
                 }
 
                 Spacer(minLength: 4)
@@ -1340,7 +1339,7 @@ struct ContentView: View {
                 Image(systemName: "cpu")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(.secondary)
-                Text("เอเจนต์และโควตา")
+                Text("agent และโควตา")
                     .font(.system(size: 13, weight: .bold))
                 Spacer()
                 Text("\(readyAgentsCount)/\(engine.agents.count) พร้อมใช้")
@@ -1695,7 +1694,7 @@ struct ContentView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "bubble.left.and.bubble.right.fill")
                             .foregroundStyle(Color.accentColor)
-                        Text("โหมดแชทอิสระ (Free-Floating Chat)")
+                        Text("แชทลอย")
                             .font(.caption.weight(.medium))
                         Spacer()
                         if let p = projects.projects.first, let firstFolder = p.folders.first {
@@ -1740,8 +1739,8 @@ struct ContentView: View {
             Spacer()
             Image(systemName: "bubble.left.and.bubble.right")
                 .font(.system(size: 36)).foregroundStyle(.tertiary)
-            Text("ยังไม่ได้เปิดเซสชัน").font(.title3.weight(.semibold))
-            Text("เลือกโฟลเดอร์โปรเจกต์ทางซ้าย แล้วกดเริ่มเซสชัน")
+            Text("ยังไม่ได้เปิด session").font(.title3.weight(.semibold))
+            Text("เลือกโฟลเดอร์โปรเจกต์ทางซ้าย แล้วกดเริ่ม session")
                 .font(.callout).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             Spacer()
@@ -1761,7 +1760,7 @@ struct ContentView: View {
                         .font(.system(size: 26, weight: .medium))
                         .foregroundStyle(Color.accentColor)
                 }
-                Text("พร้อมเริ่มงานในเซสชันนี้")
+                Text("พร้อมเริ่มงานใน session นี้")
                     .font(.title3.weight(.semibold))
                 Text("สั่งงาน ถามคำถามเกี่ยวกับโค้ด หรือเลือกแนวทางเริ่มต้นด้านล่าง")
                     .font(.callout)
@@ -1837,7 +1836,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(InteractiveStyle(cornerRadius: 99, selected: autoRoute,
                                               padding: .init(top: 4, leading: 9, bottom: 4, trailing: 9)))
-                .help(autoRoute ? "ให้โมเดลในเครื่องเลือกเอเจนต์ โมเดล และระดับคิด" : "ใช้โมเดลที่เลือกเอง")
+                .help(autoRoute ? "ให้โมเดลในเครื่องเลือก agent โมเดล และระดับคิด" : "ใช้โมเดลที่เลือกเอง")
                 if !autoRoute {
                     ModelPicker(model: $model, onNeedsLogin: { settingsSection = .agents; showSettings = true })
                 }
@@ -1849,24 +1848,6 @@ struct ContentView: View {
                     selected: "\(permission.rawValue)"
                 ) { v in if let p = PermissionLevel(rawValue: Int32(v) ?? 0) { permission = p } }
                 .help(permission.hint)
-                Button { orchestrationEnabled.toggle() } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "point.3.connected.trianglepath.dotted")
-                        Text(orchestrationEnabled ? "ขนาน (เปิด)" : "ขนาน (ปิด)")
-                    }
-                    .font(.caption.weight(.medium))
-                }
-                .buttonStyle(InteractiveStyle(cornerRadius: 99, selected: orchestrationEnabled,
-                                              padding: .init(top: 4, leading: 9, bottom: 4, trailing: 9)))
-                .help(orchestrationEnabled
-                      ? "การทำงานคู่ขนานเปิดอยู่: เอเจนต์สามารถแตกงานย่อยไปยัง Git Worktrees แยกกันได้ (คลิกเพื่อปิด · คลิกขวาเพื่อตั้งค่า)"
-                      : "การทำงานคู่ขนานปิดอยู่: เอเจนต์จะทำงานเดี่ยวในกิ่งปัจจุบัน (คลิกเพื่อเปิดใช้งาน · คลิกขวาเพื่อตั้งค่า)")
-                .contextMenu {
-                    Button("ตั้งค่าออร์เคสตรา…") {
-                        settingsSection = .orchestration
-                        showSettings = true
-                    }
-                }
                 Spacer()
                 Button(action: submit) {
                     Image(systemName: engine.busy ? "text.badge.plus" : "arrow.up")
@@ -1975,7 +1956,7 @@ struct ContentView: View {
 
     private func importFiles(_ urls: [URL]) {
         guard ensureSessionReady() && engine.sessionID >= 0 else {
-            hint = workspace.isEmpty ? "สร้างหรือเลือกโปรเจกต์ก่อนแนบไฟล์" : "เปิดเซสชันก่อนแนบไฟล์"
+            hint = workspace.isEmpty ? "สร้างหรือเลือกโปรเจกต์ก่อนแนบไฟล์" : "เปิด session ก่อนแนบไฟล์"
             return
         }
         let room = max(0, 5 - draftBox.attachments.count - importingFiles)
@@ -1992,7 +1973,7 @@ struct ContentView: View {
 
     private func importPastedImage(_ data: Data, mime: String) {
         guard ensureSessionReady() && engine.sessionID >= 0 else {
-            hint = workspace.isEmpty ? "สร้างหรือเลือกโปรเจกต์ก่อนแนบรูป" : "เปิดเซสชันก่อนแนบรูป"
+            hint = workspace.isEmpty ? "สร้างหรือเลือกโปรเจกต์ก่อนแนบรูป" : "เปิด session ก่อนแนบรูป"
             return
         }
         guard draftBox.attachments.count + importingFiles < 5 else { hint = "แนบได้สูงสุด 5 ไฟล์ต่อข้อความ"; return }
@@ -2103,7 +2084,7 @@ struct ContentView: View {
                 prompt: send.text,
                 model: send.model,
                 agent: agentFor(send.model)?.id ?? "agent",
-                reason: send.explicitAgent ? "ผู้ใช้ระบุเอเจนต์เจาะจง" : "ผู้ใช้เลือกโมเดลเองโดยตรง"
+                reason: send.explicitAgent ? "ผู้ใช้ระบุ agent เจาะจง" : "ผู้ใช้เลือกโมเดลเองโดยตรง"
             )
             dispatch(send.model, send.text, attachments: send.attachments.map(\.id))
             return
@@ -2286,10 +2267,10 @@ struct ContentView: View {
                 })
             }
         }
-        out.append(.init(title: "/new", detail: "เซสชันใหม่ในโฟลเดอร์นี้", icon: "square.and.pencil") {
+        out.append(.init(title: "/new", detail: "session ใหม่ในโฟลเดอร์นี้", icon: "square.and.pencil") {
             if !workspace.isEmpty { startSession() }
         })
-        out.append(.init(title: "/compare", detail: "ถามทุกเอเจนต์แล้วเทียบ", icon: "square.split.2x1") { runCompare() })
+        out.append(.init(title: "/compare", detail: "ถามทุก agent แล้วเทียบ", icon: "square.split.2x1") { runCompare() })
         out.append(.init(title: "/snapshot", detail: "บันทึกจุดย้อนกลับตอนนี้", icon: "camera") { engine.snapshot() })
         out.append(.init(title: "/ask", detail: "ถามก่อนเขียนไฟล์", icon: "hand.raised") { permission = .ask })
         out.append(.init(title: "/auto", detail: "ให้ทำเลยไม่ต้องถาม", icon: "bolt.fill") { permission = .allowAll })
@@ -2350,7 +2331,7 @@ struct ContentView: View {
         let files = Dictionary(grouping: hunks, by: \.file)
         let order = engine.diffFiles
         return VStack(spacing: 0) {
-            PaneHeader(title: "ที่แก้ไปในเซสชันนี้",
+            PaneHeader(title: "ที่แก้ไปใน session นี้",
                        subtitle: hunks.isEmpty ? nil
                            : "\(order.count) ไฟล์ · +\(hunks.map(\.addCount).reduce(0, +)) −\(hunks.map(\.delCount).reduce(0, +))") {
                 Button { engine.snapshot() } label: { Image(systemName: "camera") }
@@ -2360,7 +2341,7 @@ struct ContentView: View {
             }
             if hunks.isEmpty {
                 EmptyPane(icon: "checkmark.seal", title: "ยังไม่มีไฟล์ถูกแก้",
-                          hint: "เมื่อเอเจนต์แก้ไฟล์ จะเห็นทีละก้อนที่นี่ เก็บหรือตีกลับได้ทีละก้อน")
+                          hint: "เมื่อ agent แก้ไฟล์ จะเห็นทีละก้อนที่นี่ เก็บหรือตีกลับได้ทีละก้อน")
             } else {
                 ScrollView {
                     // Lazy and flat: one row per file header and per hunk,
@@ -2398,13 +2379,13 @@ struct ContentView: View {
                         .background(Color.red.opacity(0.85), in: RoundedRectangle(cornerRadius: 8))
                     }
                     Button { confirmRevert = true } label: {
-                        Label("ย้อนทุกอย่างกลับไปตอนเริ่มเซสชัน", systemImage: "clock.arrow.circlepath")
+                        Label("ย้อนทุกอย่างกลับไปตอนเริ่ม session", systemImage: "clock.arrow.circlepath")
                             .frame(maxWidth: .infinity)
                             .foregroundStyle(.red)
                     }
                     .buttonStyle(InteractiveStyle(cornerRadius: 8))
                     .confirmationDialog(
-                        "ทิ้งทุกอย่างที่เอเจนต์แก้ในเซสชันนี้?",
+                        "ทิ้งทุกอย่างที่ agent แก้ใน session นี้?",
                         isPresented: $confirmRevert, titleVisibility: .visible
                     ) {
                         Button("ย้อนทั้งหมด", role: .destructive) { engine.revertToStart() }
@@ -2420,10 +2401,10 @@ struct ContentView: View {
     private var memoryPane: some View {
         VStack(spacing: 0) {
             PaneHeader(title: engine.memoryScope.map { "ความจำร่วม · \($0)" } ?? "ความจำของโฟลเดอร์นี้",
-                       subtitle: "ทุกเอเจนต์ในเซสชันนี้อ่านชุดเดียวกัน") { EmptyView() }
+                       subtitle: "ทุก agent ใน session นี้อ่านชุดเดียวกัน") { EmptyView() }
             if engine.facts.isEmpty && engine.pending.isEmpty {
                 EmptyPane(icon: "brain", title: "ยังไม่มีความจำ",
-                          hint: "เอเจนต์เสนอเรื่องที่ควรจำผ่าน memory_propose แล้วจะมารอให้คุณอนุมัติที่นี่")
+                          hint: "agent เสนอเรื่องที่ควรจำผ่าน memory_propose แล้วจะมารอให้คุณอนุมัติที่นี่")
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
@@ -2554,7 +2535,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(InteractiveStyle(cornerRadius: 8, selected: isCurrent, padding: .init(top: 6, leading: 6, bottom: 6, trailing: 8)))
                 .contextMenu {
-                    Button("เซสชันใหม่") { newSession(in: p) }
+                    Button("session ใหม่") { newSession(in: p) }
                     Button("แก้ไขโปรเจกต์…") { editing = p; editingIsNew = false }
                     Menu("เปิดใน Finder") {
                         ForEach(p.folders, id: \.self) { f in
@@ -2577,7 +2558,7 @@ struct ContentView: View {
                     .buttonStyle(InteractiveStyle(cornerRadius: 7))
                     .padding(.leading, 18)
                 } else if rows.isEmpty {
-                    Text(sessionQuery.isEmpty ? "ยังไม่มีเซสชัน — กด ✎ เพื่อเริ่ม" : "ไม่พบ")
+                    Text(sessionQuery.isEmpty ? "ยังไม่มี session — กด ✎ เพื่อเริ่ม" : "ไม่พบ")
                         .font(.caption).foregroundStyle(.tertiary)
                         .padding(.leading, 30).padding(.vertical, 4)
                 }
@@ -2610,7 +2591,7 @@ struct ContentView: View {
         if p.folders.count > 1 {
             Button { pickingFolderFor = p.id } label: { label }
                 .buttonStyle(style)
-                .help("เซสชันใหม่ — เลือกโฟลเดอร์")
+                .help("session ใหม่ — เลือกโฟลเดอร์")
                 .popover(isPresented: Binding(get: { pickingFolderFor == p.id },
                                               set: { if !$0 { pickingFolderFor = nil } })) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -2628,7 +2609,7 @@ struct ContentView: View {
         } else {
             Button { newSession(in: p) } label: { label }
                 .buttonStyle(style)
-                .help("เซสชันใหม่")
+                .help("session ใหม่")
                 .disabled(p.folders.isEmpty || engine.busy || engine.switching)
         }
     }
@@ -2637,7 +2618,7 @@ struct ContentView: View {
     private func displayTitle(_ s: Engine.SessionSummary) -> String {
         let t = s.title.trimmingCharacters(in: .whitespaces)
         if !t.isEmpty && t != "session" { return t }
-        return s.goal.isEmpty ? "เซสชัน #\(s.id)" : s.goal
+        return s.goal.isEmpty ? "session #\(s.id)" : s.goal
     }
 
     private func matches(_ s: Engine.SessionSummary) -> Bool {
@@ -2687,7 +2668,7 @@ struct ContentView: View {
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: folder)])
             }
             Divider()
-            Button("ลบเซสชัน…", role: .destructive) { deleting = (folder, s) }
+            Button("ลบ session…", role: .destructive) { deleting = (folder, s) }
         }
     }
 
@@ -2704,10 +2685,10 @@ struct ContentView: View {
             return (e, r)
         }
         return VStack(spacing: 0) {
-          PaneHeader(title: "งานย่อย", subtitle: children.isEmpty && calls.isEmpty ? nil : "\(children.isEmpty ? calls.count : children.count) งานที่เอเจนต์แตกออกไป") { EmptyView() }
+          PaneHeader(title: "งานย่อย", subtitle: children.isEmpty && calls.isEmpty ? nil : "\(children.isEmpty ? calls.count : children.count) งานที่ agent แตกออกไป") { EmptyView() }
           if children.isEmpty && calls.isEmpty {
             EmptyPane(icon: "point.3.connected.trianglepath.dotted", title: "ยังไม่มีงานย่อย",
-                      hint: "เมื่อเอเจนต์แตกงานให้ subagent (Task/Agent) จะขึ้นที่นี่พร้อมผลลัพธ์")
+                      hint: "เมื่อ agent แตกงานให้ subagent (Task/Agent) จะขึ้นที่นี่พร้อมผลลัพธ์")
           } else {
           ScrollView {
             VStack(alignment: .leading, spacing: 10) {
@@ -2725,7 +2706,7 @@ struct ContentView: View {
                             if let parent = children.first(where: { $0.id == child.parentSessionId }) {
                                 Text("แตกงานจาก \(parent.name)").font(.caption2).foregroundStyle(.secondary)
                             } else if !child.parentSessionId.isEmpty {
-                                Text("แตกงานจากเอเจนต์หลัก").font(.caption2).foregroundStyle(.secondary)
+                                Text("แตกงานจาก agent หลัก").font(.caption2).foregroundStyle(.secondary)
                             }
                             if !child.task.isEmpty { Text(child.task).font(.caption) }
                             if !child.message.isEmpty {
@@ -2820,7 +2801,7 @@ struct ContentView: View {
 
     private var contextPane: some View {
         VStack(spacing: 0) {
-            PaneHeader(title: "คอนเท็กซ์", subtitle: "สิ่งที่เอเจนต์ถัดไปจะได้รับ") { EmptyView() }
+            PaneHeader(title: "คอนเท็กซ์", subtitle: "สิ่งที่ agent ถัดไปจะได้รับ") { EmptyView() }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     let frac: Double? = {
@@ -2865,7 +2846,7 @@ struct ContentView: View {
                                     .font(.caption.monospacedDigit())
                                     .foregroundStyle(.secondary)
                             } else {
-                                Text("ยังไม่มีเทิร์น (ขึ้นหลังเอเจนต์ตอบ)")
+                                Text("ยังไม่มีเทิร์น (ขึ้นหลัง agent ตอบ)")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -2884,7 +2865,7 @@ struct ContentView: View {
                     // Real-Time Monetary Cost Accounting Card ($ USD)
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
-                            Label("ต้นทุนเซสชัน (USD)", systemImage: "dollarsign.circle.fill")
+                            Label("ต้นทุน session · USD", systemImage: "dollarsign.circle.fill")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.green)
                             Spacer()
@@ -2928,7 +2909,7 @@ struct ContentView: View {
                                 Image(systemName: v.passed ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
                                     .foregroundStyle(v.passed ? .green : .red)
                                     .font(.caption)
-                                Text(v.passed ? "โค้ดผ่านการคอมไพล์ (Clean)" : "พบข้อผิดพลาด \(v.diagnostics.count) จุด")
+                                Text(v.passed ? "คอมไพล์ผ่าน" : "พบข้อผิดพลาด \(v.diagnostics.count) จุด")
                                     .font(.caption.weight(.semibold))
                                     .foregroundStyle(v.passed ? .green : .red)
                             } else {
@@ -2998,7 +2979,7 @@ struct ContentView: View {
                             } label: {
                                 HStack(spacing: 4) {
                                     Image(systemName: "bolt.fill")
-                                    Text("สั่งเอเจนต์แก้ทันที (Self-Heal ⚡)")
+                                    Text("ให้ agent แก้เลย")
                                 }
                                 .font(.caption.weight(.semibold))
                                 .frame(maxWidth: .infinity)
@@ -3007,7 +2988,7 @@ struct ContentView: View {
                             .tint(.red)
                             .disabled(engine.busy)
                         } else {
-                            Text("รันคอมไพเลอร์อัตโนมัติหลังเอเจนต์ตอบ เพื่อป้องกันโค้ดพัง")
+                            Text("รันคอมไพเลอร์อัตโนมัติหลัง agent ตอบ เพื่อป้องกันโค้ดพัง")
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
                         }
@@ -3019,7 +3000,7 @@ struct ContentView: View {
                     Button {
                         engine.assembledContext { text, tokens in inspected = (text, tokens) }
                     } label: {
-                        Label("ดูสิ่งที่เอเจนต์เห็นจริง ๆ", systemImage: "doc.text.magnifyingglass")
+                        Label("ดูสิ่งที่ agent เห็นจริง ๆ", systemImage: "doc.text.magnifyingglass")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(InteractiveStyle(cornerRadius: 8))
@@ -3303,7 +3284,7 @@ struct EventRow: View {
                         } else {
                             Button("ลบ", role: .destructive) { onDeleteAttachment(file.id) }
                                 .buttonStyle(.link)
-                                .accessibilityLabel("ลบไฟล์ \(file.name) จากเซสชัน")
+                                .accessibilityLabel("ลบไฟล์ \(file.name) จาก session")
                         }
                     }
                     .font(.caption)

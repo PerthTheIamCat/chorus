@@ -246,7 +246,7 @@ final class Engine: ObservableObject {
                 guard let h else {
                     self.sessionID = -1
                     self.events = []
-                    self.lastError = "เปิดเซสชันไม่ได้ (โฟลเดอร์ยังอยู่ไหม?)"
+                    self.lastError = "เปิด session ไม่ได้ (โฟลเดอร์ยังอยู่ไหม?)"
                     return
                 }
                 self.handle = Handle(raw: h)
@@ -354,7 +354,7 @@ final class Engine: ObservableObject {
 
     nonisolated private static func fallbackTitle(from prompt: String) -> String {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return "เซสชันใหม่" }
+        if trimmed.isEmpty { return "session ใหม่" }
         let words = trimmed.split(separator: " ").prefix(4).joined(separator: " ")
         return String(words.prefix(30))
     }
@@ -512,7 +512,7 @@ final class Engine: ObservableObject {
     /// Copy a selected file into the session immediately. PDF text and image
     /// normalization stay local; the original bytes remain in the session.
     func importFile(_ url: URL, completion: @escaping (DraftAttachment?, String?) -> Void) {
-        guard let h = handle else { completion(nil, "เปิดเซสชันก่อนแนบไฟล์"); return }
+        guard let h = handle else { completion(nil, "เปิด session ก่อนแนบไฟล์"); return }
         do {
             let access = url.startAccessingSecurityScopedResource()
             defer { if access { url.stopAccessingSecurityScopedResource() } }
@@ -548,7 +548,7 @@ final class Engine: ObservableObject {
     }
 
     func importImage(_ data: Data, mime: String, completion: @escaping (DraftAttachment?, String?) -> Void) {
-        guard let h = handle else { completion(nil, "เปิดเซสชันก่อนแนบรูป"); return }
+        guard let h = handle else { completion(nil, "เปิด session ก่อนแนบรูป"); return }
         queue.async {
             let prepared = Self.prepareAttachment(data, mime: mime, filename: "pasted-image.png")
             let json = Self.callImport(h.raw, name: "pasted-image.png", mime: mime, bytes: data,
@@ -1580,7 +1580,7 @@ final class Engine: ObservableObject {
     /// it, the thing itself. The app claims to carry context between agents;
     /// this is the button that lets someone check.
     func assembledContext(budget: Int64 = 120_000, completion: @escaping (String, Int64) -> Void) {
-        guard let h = handle else { return completion("(ยังไม่ได้เปิดเซสชัน)", 0) }
+        guard let h = handle else { return completion("(ยังไม่ได้เปิด session)", 0) }
         queue.async {
             let json = Self.string(from: chorus_assembled_context(h.raw, budget))
             let r = Self.decode(AssembledContext.self, json)
@@ -2238,7 +2238,7 @@ final class Engine: ObservableObject {
 
     func rewindCheckpoint(db: String, ws: String, sessionID: Int64, targetSeq: Int64, mode: String, completion: @escaping (Bool, String?) -> Void) {
         guard sessionID >= 0, !db.isEmpty, !ws.isEmpty else {
-            completion(false, "เซสชันหรือโฟลเดอร์ไม่ถูกต้อง")
+            completion(false, "session หรือโฟลเดอร์ไม่ถูกต้อง")
             return
         }
         ioQueue.async {

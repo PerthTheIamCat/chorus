@@ -200,7 +200,7 @@ struct OrchestratorView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Lead Orchestrator (ตัวคุมงาน)")
                             .font(.system(size: 11, weight: .bold))
-                        Text("ตามหลักการควรเลือกโมเดลที่ฉลาดและมี Reasoning สูงที่สุด ที่มีอยู่ เพื่อทำหน้าที่วิเคราะห์เป้าหมาย แตกงานย่อย (Decomposition) ควบคุมลำดับงาน และสังเคราะห์ข้อสรุปรวม")
+                        Text("ตามหลักการควรเลือกโมเดลที่ฉลาดและมี Reasoning สูงที่สุด ที่มีอยู่ เพื่อทำหน้าที่วิเคราะห์เป้าหมาย แตกงานย่อย ควบคุมลำดับงาน และสังเคราะห์ข้อสรุปรวม")
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -335,7 +335,7 @@ struct OrchestratorView: View {
                     Text("ยังไม่มีการเรียกงานย่อยในเทิร์นปัจจุบัน")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
-                    Text("เมื่อเอเจนต์เรียกใช้ Task หรือ subagent ผลลัพธ์และการประสานงานจะปรากฏที่นี่")
+                    Text("เมื่อ agent เรียกใช้ Task หรือ subagent ผลลัพธ์และการประสานงานจะปรากฏที่นี่")
                         .font(.system(size: 9.5))
                         .foregroundColor(.secondary.opacity(0.8))
                         .multilineTextAlignment(.center)
@@ -526,7 +526,7 @@ struct OrchestratorView: View {
 
                     // Model quick assignment dropdown
                     Menu {
-                        Button("ค่าเริ่มต้น (Default Agent)") {
+                        Button("ค่าเริ่มต้น") {
                             quickAssignModel(role: role, model: nil)
                         }
                         Divider()
@@ -656,7 +656,7 @@ struct OrchestratorView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "bolt.badge.automatic.fill")
                         .foregroundColor(.accentColor)
-                    Text("สั่งงานขนาน (Spawn Parallel Agents)")
+                    Text("สั่งงานขนาน")
                         .font(.system(size: 11, weight: .semibold))
                     Spacer()
                     Image(systemName: "arrow.up.right")
@@ -884,7 +884,7 @@ struct RoleEditorSheet: View {
                 .font(.system(size: 11))
 
             HStack(spacing: 14) {
-                Toggle("อนุญาตให้แก้ไขไฟล์ (Write Mode)", isOn: $aiWriteMode)
+                Toggle("ให้แก้ไฟล์ได้", isOn: $aiWriteMode)
                     .font(.system(size: 10.5))
                     .toggleStyle(.switch)
 
@@ -957,7 +957,7 @@ struct RoleEditorSheet: View {
 
             // Description
             VStack(alignment: .leading, spacing: 4) {
-                Text("คำอธิบาย (Description)").font(.system(size: 10.5, weight: .medium))
+                Text("คำอธิบาย").font(.system(size: 10.5, weight: .medium))
                 TextField("สรุปขอบเขตภารกิจสั้นๆ", text: $description)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 11))
@@ -965,7 +965,7 @@ struct RoleEditorSheet: View {
 
             // Tools Selection
             VStack(alignment: .leading, spacing: 6) {
-                Text("สิทธิ์เครื่องมือที่อนุญาต (Tools)").font(.system(size: 10.5, weight: .medium))
+                Text("เครื่องมือที่ใช้ได้").font(.system(size: 10.5, weight: .medium))
                 HStack(spacing: 6) {
                     ForEach(standardTools, id: \.self) { tool in
                         let isSelected = selectedTools.contains(tool)

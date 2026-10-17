@@ -112,7 +112,7 @@ struct ModelPicker: View {
             }
             .buttonStyle(InteractiveStyle(cornerRadius: 99, selected: open,
                                           padding: .init(top: 4, leading: 9, bottom: 4, trailing: 9)))
-            .help("เลือกเอเจนต์และโมเดล (⌘⇧I)")
+            .help("เลือก agent และโมเดล (⌘⇧I)")
             .popover(isPresented: $open, arrowEdge: .top) { popover }
 
             if let a = agent {
@@ -191,7 +191,7 @@ struct ModelPicker: View {
                     else { Image(systemName: "arrow.clockwise") }
                 }
                 .buttonStyle(InteractiveStyle(cornerRadius: 6, padding: .init(top: 3, leading: 6, bottom: 3, trailing: 6)))
-                .help("ถามรายการโมเดลล่าสุดจากแต่ละเอเจนต์")
+                .help("ถามรายการโมเดลล่าสุดจากแต่ละ agent")
             }
             .padding(6)
         }
