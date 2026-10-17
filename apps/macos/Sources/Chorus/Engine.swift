@@ -233,6 +233,7 @@ final class Engine: ObservableObject {
         queue.async { [weak self] in
             let h = make()
             let eventsJSON = h.map { Self.string(from: chorus_transcript_json($0)) } ?? ""
+            let presetJSON = h.map { Self.initialRoutePreset($0) } ?? ""
             let attachmentsJSON = h.map { Self.string(from: chorus_list_attachments($0)) } ?? ""
             let usageJSON = h.map { Self.string(from: chorus_session_usage($0)) } ?? ""
             if let old { chorus_engine_free(old.raw) }
@@ -257,6 +258,7 @@ final class Engine: ObservableObject {
                 self.sessionID = chorus_engine_session_id(h)
                 self.events = Self.decode([LedgerEvent].self, eventsJSON) ?? []
                 self.attachments = Self.decode(SessionAttachmentList.self, attachmentsJSON)?.attachments ?? []
+                self.applyRoutePreset(presetJSON)
                 self.refresh()
             }
         }
@@ -647,11 +649,14 @@ final class Engine: ObservableObject {
     /// summary of this new message, never the session history or file bytes.
     func proposeRoute(taskJSON: String, candidatesJSON: String, routerModel: String,
                       completion: @escaping (String) -> Void) {
+        let preset = routePreset
         ioQueue.async {
             let json = taskJSON.withCString { task in
                 candidatesJSON.withCString { candidates in
                     routerModel.withCString { model in
-                        Self.string(from: chorus_route_json(task, candidates, model))
+                        preset.withCString { p in
+                            Self.string(from: chorus_route_json(task, candidates, model, p))
+                        }
                     }
                 }
             }
@@ -1052,6 +1057,51 @@ final class Engine: ObservableObject {
         let chosen_agent: String
         let reason: String
         let created_ms: Int64
+        let preset: String?
+    }
+
+    struct RoutePresetOption: Codable, Hashable, Identifiable {
+        let id: String
+        let label: String
+        let hint: String
+    }
+    private struct RoutePresetState: Decodable {
+        let ok: Bool
+        let preset: String?
+        let label: String?
+        let presets: [RoutePresetOption]?
+    }
+
+    /// This session's route preset (`economy` | `balanced` | `max`), its Thai
+    /// label, and every option, all as Rust reports them.
+    @Published var routePreset = "balanced"
+    @Published var routePresetLabel = "สมดุล"
+    @Published var routePresets: [RoutePresetOption] = []
+
+    nonisolated static let defaultRoutePresetKey = "chorus.routePreset.default"
+
+    /// Read the session's preset on `queue`; a session that has none yet this
+    /// run gets the Settings default.
+    nonisolated private static func initialRoutePreset(_ h: OpaquePointer) -> String {
+        let json = string(from: chorus_route_preset(h))
+        guard let state = decode(RoutePresetState.self, json), state.preset == nil else { return json }
+        let fallback = UserDefaults.standard.string(forKey: defaultRoutePresetKey) ?? "balanced"
+        return fallback.withCString { string(from: chorus_set_route_preset(h, $0)) }
+    }
+
+    private func applyRoutePreset(_ json: String) {
+        guard let state = Self.decode(RoutePresetState.self, json), state.ok else { return }
+        if let presets = state.presets { routePresets = presets }
+        if let preset = state.preset { routePreset = preset }
+        if let label = state.label { routePresetLabel = label }
+    }
+
+    func setRoutePreset(_ id: String) {
+        guard let h = handle else { return }
+        queue.async { [weak self] in
+            let json = id.withCString { Self.string(from: chorus_set_route_preset(h.raw, $0)) }
+            DispatchQueue.main.async { self?.applyRoutePreset(json) }
+        }
     }
 
     @Published var learnedRoutes: [LearnedRoute] = []
@@ -1075,16 +1125,21 @@ final class Engine: ObservableObject {
         }
     }
 
+    /// Record a choice the user made, under this session's preset. Never
+    /// call it with the router's own pick.
     func recordLearnedRoute(workspace: String? = nil, prompt: String, model: String, agent: String, reason: String) {
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let ws = workspace ?? ""
+        let preset = routePreset
         routerSetupQueue.async { [weak self] in
             let _ = ws.withCString { cWs in
                 prompt.withCString { cP in
                     model.withCString { cM in
                         agent.withCString { cA in
                             reason.withCString { cR in
-                                Self.string(from: chorus_router_record_learned_json(cWs, cP, cM, cA, cR))
+                                preset.withCString { cPr in
+                                    Self.string(from: chorus_router_record_learned_json(cWs, cP, cM, cA, cR, cPr))
+                                }
                             }
                         }
                     }

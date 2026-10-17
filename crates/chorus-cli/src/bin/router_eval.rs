@@ -44,6 +44,7 @@ fn candidates() -> CandidateSet {
                 media_types: vec!["text/*".into()],
                 integrations: vec![],
                 ready: true,
+                tier: None,
             });
         }
     }

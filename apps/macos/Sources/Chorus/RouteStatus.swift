@@ -5,7 +5,7 @@ import SwiftUI
 /// sent so the user can see which agent/model took the work and why.
 enum RouteStatus: Equatable {
     case thinking(routerModel: String, candidates: Int)
-    case chosen(agent: String, model: String, effort: String, reason: String)
+    case chosen(agent: String, model: String, effort: String, preset: String, reason: String)
 }
 
 struct RouteStatusCard: View {
@@ -31,7 +31,7 @@ struct RouteStatusCard: View {
             .accessibilityLabel("Auto กำลังเลือกโมเดล จาก \(candidates) ตัวเลือก")
             .accessibilityAddTraits(.updatesFrequently)
 
-        case let .chosen(agent, model, effort, reason):
+        case let .chosen(agent, model, effort, preset, reason):
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "arrow.triangle.branch")
                     .foregroundStyle(Color.accentColor)
@@ -42,7 +42,7 @@ struct RouteStatusCard: View {
                         Text(agent).font(.callout.weight(.semibold))
                         Text("/").foregroundStyle(.tertiary)
                         Text(model).font(.callout)
-                        Text("· คิด \(effort)").font(.caption).foregroundStyle(.secondary)
+                        Text("· คิด \(effort) · \(preset)").font(.caption).foregroundStyle(.secondary)
                     }
                     Text(reason)
                         .font(.caption).foregroundStyle(.secondary)
@@ -60,7 +60,7 @@ struct RouteStatusCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("Auto เลือก \(agent) \(model) ระดับคิด \(effort). เหตุผล: \(reason)")
+            .accessibilityLabel("Auto เลือก \(agent) \(model) ระดับคิด \(effort) โหมด \(preset). เหตุผล: \(reason)")
         }
     }
 }

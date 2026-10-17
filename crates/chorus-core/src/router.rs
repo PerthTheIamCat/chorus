@@ -38,6 +38,7 @@ pub struct RouterConfig {
     decision_min_joint_probability: f64,
     remote_disclosure_acknowledged: bool,
     model_version: Option<String>,
+    preset: RoutePreset,
 }
 
 impl RouterConfig {
@@ -51,6 +52,7 @@ impl RouterConfig {
             decision_min_joint_probability: 0.35,
             remote_disclosure_acknowledged: false,
             model_version: None,
+            preset: RoutePreset::default(),
         }
     }
 
@@ -87,6 +89,7 @@ impl RouterConfig {
             decision_min_joint_probability: 0.35,
             remote_disclosure_acknowledged: true,
             model_version: None,
+            preset: RoutePreset::default(),
         })
     }
 
@@ -115,6 +118,16 @@ impl RouterConfig {
     pub fn with_model_version(mut self, version: impl Into<String>) -> Self {
         self.model_version = Some(version.into());
         self
+    }
+
+    /// How far the pick leans toward cheap or capable. See [`RoutePreset`].
+    pub fn with_preset(mut self, preset: RoutePreset) -> Self {
+        self.preset = preset;
+        self
+    }
+
+    pub fn preset(&self) -> RoutePreset {
+        self.preset
     }
 
     pub fn model(&self) -> &str {
@@ -180,6 +193,10 @@ pub struct Candidate {
     /// are discarded before constructing the constrained schema.
     #[serde(default = "default_ready")]
     pub ready: bool,
+    /// Model tier (0 small, 1 mid, 2 large) from a curated table the caller
+    /// owns. `None` falls back to guessing from the model name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<u8>,
 }
 
 fn default_ready() -> bool {
@@ -562,18 +579,25 @@ impl Router {
             "level",
             Difficulty::NAMES,
         );
+        let preset = self.config.preset;
         let scored = match (&kinds, &difficulties) {
-            (Some(k), Some(d)) => Some(Scored::new(assessment.kind, assessment.difficulty, k, d)),
+            (Some(k), Some(d)) => Some(Scored::new(
+                assessment.kind,
+                assessment.difficulty,
+                k,
+                d,
+                preset,
+            )),
             _ => None,
         };
         // With token probabilities the pick minimises expected distance over
         // everything the router thought plausible; without them it follows the
         // single answer. Either way the router can only say it is unsure, never
         // name a model.
-        let want = wanted(assessment.kind, assessment.difficulty);
+        let want = wanted(assessment.kind, assessment.difficulty, preset);
         let picked = match &scored {
-            Some(scored) => pick_expected(&compatible, &scored.outcomes),
-            None => pick_candidate(&compatible, want),
+            Some(scored) => pick_expected(&compatible, &scored.outcomes, preset),
+            None => pick_candidate(&compatible, want, preset),
         };
         let Some(picked) = picked else {
             return RouteResult::Unavailable(unavailable(
@@ -605,9 +629,10 @@ impl Router {
         RouteResult::Proposal(RouteProposal {
             candidate_id: picked.id.clone(),
             reason: format!(
-                "{reason} [{} · ความยาก {}{odds} → เลือกรุ่น{} ระดับคิด {}]",
+                "{reason} [{} · ความยาก {}{odds} · {} → เลือกรุ่น{} ระดับคิด {}]",
                 assessment.kind.label(),
                 assessment.difficulty.label(),
+                preset.label(),
                 want.tier_label(),
                 picked.effort
             ),
@@ -813,28 +838,30 @@ impl Router {
                 "Ollama returned an unknown task difficulty.",
             ));
         };
-        let scored = Scored::new(kind, level, &kinds, &levels);
+        let preset = self.config.preset;
+        let scored = Scored::new(kind, level, &kinds, &levels, preset);
         if scored.kind_p * scored.difficulty_p < self.config.decision_min_joint_probability {
             return RouteResult::Unavailable(unavailable(
                 RouteUnavailableReason::LowConfidence,
                 "The local router was not confident enough to select a target.",
             ));
         }
-        let Some(picked) = pick_expected(compatible, &scored.outcomes) else {
+        let Some(picked) = pick_expected(compatible, &scored.outcomes, preset) else {
             return RouteResult::Unavailable(unavailable(
                 RouteUnavailableReason::NoCompatibleCandidates,
                 "No ready target supports this task.",
             ));
         };
-        let want = wanted(kind, level);
+        let want = wanted(kind, level, preset);
         RouteResult::Proposal(RouteProposal {
             candidate_id: picked.id.clone(),
             reason: format!(
-                "จัดเป็น{} · ความยาก {} ({}%/{}%) → เลือกรุ่น{} ระดับคิด {}",
+                "จัดเป็น{} · ความยาก {} ({}%/{}%) · {} → เลือกรุ่น{} ระดับคิด {}",
                 kind.label(),
                 level.label(),
                 (scored.kind_p * 100.0).round(),
                 (scored.difficulty_p * 100.0).round(),
+                preset.label(),
                 want.tier_label(),
                 picked.effort,
             ),
@@ -947,9 +974,10 @@ fn valid_task(task: &TaskSummary) -> bool {
             .all(|name| !name.trim().is_empty() && name.len() <= 256)
 }
 
+/// What the task asks for: decide, carry out, or judge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum TaskKind {
+pub enum TaskKind {
     Think,
     Do,
     Review,
@@ -968,9 +996,10 @@ impl TaskKind {
     }
 }
 
+/// How much hard thinking the task needs, not how long it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum Difficulty {
+pub enum Difficulty {
     Trivial,
     Easy,
     Moderate,
@@ -987,6 +1016,17 @@ impl Difficulty {
         Self::VeryHard,
     ];
     const NAMES: &'static [&'static str] = &["trivial", "easy", "moderate", "hard", "very_hard"];
+
+    /// An orchestrator's `weight` for a child task. Unknown words are
+    /// `None` so a typo cannot silently pick a tier.
+    pub fn from_weight(weight: &str) -> Option<Self> {
+        match weight.trim().to_ascii_lowercase().as_str() {
+            "light" => Some(Self::Easy),
+            "normal" => Some(Self::Moderate),
+            "heavy" => Some(Self::Hard),
+            _ => None,
+        }
+    }
 
     fn label(self) -> &'static str {
         match self {
@@ -1010,6 +1050,54 @@ struct TaskAssessment {
     confidence: Confidence,
 }
 
+/// How far the router leans toward cheap or capable. It shifts the `Want`
+/// from the `(kind, difficulty)` table and decides which side wins a tie.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoutePreset {
+    /// One tier and one effort step down, floored at 0. Ties go cheaper.
+    Economy,
+    /// The table as it stands. Ties go cheaper.
+    #[default]
+    Balanced,
+    /// One tier and one effort step up, at least mid tier. Ties go dearer.
+    Max,
+}
+
+impl RoutePreset {
+    pub const ALL: [Self; 3] = [Self::Economy, Self::Balanced, Self::Max];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Economy => "economy",
+            Self::Balanced => "balanced",
+            Self::Max => "max",
+        }
+    }
+
+    /// Parse the stored or FFI name. Unknown names are `None`; callers pick
+    /// the default themselves so the fallback is visible at the call site.
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|p| p.as_str().eq_ignore_ascii_case(name.trim()))
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Economy => "ประหยัด",
+            Self::Balanced => "สมดุล",
+            Self::Max => "เต็มกำลัง",
+        }
+    }
+
+    /// When two candidates are equally far from the `Want`, take the dearer
+    /// one: a Max session would rather miss above than below.
+    fn prefers_up(self) -> bool {
+        self == Self::Max
+    }
+}
+
 /// What the task needs: a model tier (0 small, 1 mid, 2 large) and an effort
 /// rank (see `effort_rank`). Thinking work (plan, review) wants the big model;
 /// execution of an already-decided job runs on the small one, and a large
@@ -1030,17 +1118,22 @@ impl Want {
     }
 }
 
-fn wanted(kind: TaskKind, difficulty: Difficulty) -> Want {
+const MAX_TIER: u8 = 2;
+const MAX_EFFORT: u8 = 4;
+
+fn wanted(kind: TaskKind, difficulty: Difficulty, preset: RoutePreset) -> Want {
     use Difficulty::*;
-    let (tier, effort) = match kind {
+    let (tier, effort): (u8, u8) = match kind {
         TaskKind::Think => match difficulty {
             Trivial | Easy => (0, 2),
             Moderate => (1, 3),
             Hard => (2, 3),
             VeryHard => (2, 4),
         },
+        // No floor for easy review: checking a typo fix does not need the
+        // large model. Max still lifts it to mid.
         TaskKind::Review => match difficulty {
-            Trivial | Easy => (1, 2),
+            Trivial | Easy => (0, 2),
             Moderate | Hard => (2, 3),
             VeryHard => (2, 4),
         },
@@ -1050,6 +1143,11 @@ fn wanted(kind: TaskKind, difficulty: Difficulty) -> Want {
             Hard => (1, 3),
             VeryHard => (2, 3),
         },
+    };
+    let (tier, effort) = match preset {
+        RoutePreset::Economy => (tier.saturating_sub(1), effort.saturating_sub(1)),
+        RoutePreset::Balanced => (tier, effort),
+        RoutePreset::Max => ((tier + 1).clamp(1, MAX_TIER), (effort + 1).min(MAX_EFFORT)),
     };
     Want { tier, effort }
 }
@@ -1096,21 +1194,55 @@ fn lower_confidence(a: Confidence, b: Confidence) -> Confidence {
     }
 }
 
+/// The caller's curated tier when it gave one, else the name guess.
+fn candidate_tier(candidate: &Candidate) -> u8 {
+    candidate
+        .tier
+        .map(|t| t.min(MAX_TIER))
+        .unwrap_or_else(|| model_tier(&candidate.model))
+}
+
 fn distance(candidate: &Candidate, want: Want) -> u32 {
-    let tier = model_tier(&candidate.model);
+    let tier = candidate_tier(candidate);
     let effort = effort_rank(&candidate.effort);
     tier.abs_diff(want.tier) as u32 * 10 + effort.abs_diff(want.effort) as u32 * 3
 }
 
-/// Closest candidate to what the task needs; ties go to the cheaper one.
-fn pick_candidate<'a>(candidates: &[&'a Candidate], want: Want) -> Option<&'a Candidate> {
-    candidates.iter().copied().min_by_key(|c| {
-        (
-            distance(c, want),
-            model_tier(&c.model) + effort_rank(&c.effort),
-            c.id.clone(),
-        )
-    })
+/// Tie-break order between equally distant candidates: cheaper first,
+/// unless the preset prefers to miss above.
+fn tie_cost(candidate: &Candidate, preset: RoutePreset) -> i32 {
+    let cost = (candidate_tier(candidate) + effort_rank(&candidate.effort)) as i32;
+    if preset.prefers_up() {
+        -cost
+    } else {
+        cost
+    }
+}
+
+/// Closest candidate to what the task needs; ties follow the preset.
+fn pick_candidate<'a>(
+    candidates: &[&'a Candidate],
+    want: Want,
+    preset: RoutePreset,
+) -> Option<&'a Candidate> {
+    candidates
+        .iter()
+        .copied()
+        .min_by_key(|c| (distance(c, want), tie_cost(c, preset), c.id.clone()))
+}
+
+/// Pick for one orchestra child: the orchestrator names the kind and a
+/// `weight`, the session preset applies like it does for a user send.
+/// `None` when `weight` is unknown or no candidate is ready.
+pub fn pick_for_weight<'a>(
+    candidates: &'a [Candidate],
+    kind: TaskKind,
+    weight: &str,
+    preset: RoutePreset,
+) -> Option<&'a Candidate> {
+    let difficulty = Difficulty::from_weight(weight)?;
+    let ready: Vec<&Candidate> = candidates.iter().filter(|c| c.ready).collect();
+    pick_candidate(&ready, wanted(kind, difficulty, preset), preset)
 }
 
 /// Candidate with the lowest probability-weighted distance over every
@@ -1118,6 +1250,7 @@ fn pick_candidate<'a>(candidates: &[&'a Candidate], want: Want) -> Option<&'a Ca
 fn pick_expected<'a>(
     candidates: &[&'a Candidate],
     outcomes: &[(Want, f64)],
+    preset: RoutePreset,
 ) -> Option<&'a Candidate> {
     let expected = |c: &Candidate| -> f64 {
         outcomes
@@ -1128,10 +1261,7 @@ fn pick_expected<'a>(
     candidates.iter().copied().min_by(|a, b| {
         expected(a)
             .total_cmp(&expected(b))
-            .then_with(|| {
-                (model_tier(&a.model) + effort_rank(&a.effort))
-                    .cmp(&(model_tier(&b.model) + effort_rank(&b.effort)))
-            })
+            .then_with(|| tie_cost(a, preset).cmp(&tie_cost(b, preset)))
             .then_with(|| a.id.cmp(&b.id))
     })
 }
@@ -1145,7 +1275,13 @@ struct Scored {
 }
 
 impl Scored {
-    fn new(kind: TaskKind, difficulty: Difficulty, kinds: &[f64], difficulties: &[f64]) -> Self {
+    fn new(
+        kind: TaskKind,
+        difficulty: Difficulty,
+        kinds: &[f64],
+        difficulties: &[f64],
+        preset: RoutePreset,
+    ) -> Self {
         let kind_p = kinds[TaskKind::ALL.iter().position(|k| *k == kind).unwrap_or(0)];
         let difficulty_p = difficulties[Difficulty::ALL
             .iter()
@@ -1156,7 +1292,7 @@ impl Scored {
             for (d, pd) in Difficulty::ALL.iter().zip(difficulties) {
                 let p = pk * pd;
                 if p >= 0.01 {
-                    outcomes.push((wanted(*k, *d), p));
+                    outcomes.push((wanted(*k, *d, preset), p));
                 }
             }
         }
@@ -1233,15 +1369,25 @@ mod scoring_tests {
             media_types: vec![],
             integrations: vec![],
             ready: true,
+            tier: None,
         }
     }
 
-    fn pick(all: &[Candidate], kind: TaskKind, difficulty: Difficulty) -> String {
+    fn pick_with(
+        all: &[Candidate],
+        kind: TaskKind,
+        difficulty: Difficulty,
+        preset: RoutePreset,
+    ) -> String {
         let refs: Vec<&Candidate> = all.iter().collect();
-        pick_candidate(&refs, wanted(kind, difficulty))
+        pick_candidate(&refs, wanted(kind, difficulty, preset), preset)
             .unwrap()
             .id
             .clone()
+    }
+
+    fn pick(all: &[Candidate], kind: TaskKind, difficulty: Difficulty) -> String {
+        pick_with(all, kind, difficulty, RoutePreset::Balanced)
     }
 
     fn grid() -> Vec<Candidate> {
@@ -1307,6 +1453,225 @@ mod scoring_tests {
         );
     }
 
+    /// Expected pick on `grid()` (luna=0, 5.5=1, astra=2 × low..xhigh) for
+    /// every kind × difficulty, one table per preset. Effort 0 has no
+    /// candidate, so it lands on `low`; effort 2 is `medium`.
+    fn expected(preset: RoutePreset) -> [[&'static str; 5]; 3] {
+        use RoutePreset::*;
+        // rows: Think, Do, Review · columns: Trivial, Easy, Moderate, Hard, VeryHard
+        match preset {
+            Economy => [
+                [
+                    "gpt-5.6-luna[low]",
+                    "gpt-5.6-luna[low]",
+                    "gpt-5.6-luna[medium]",
+                    "gpt-5.5[medium]",
+                    "gpt-5.5[high]",
+                ],
+                [
+                    "gpt-5.6-luna[low]",
+                    "gpt-5.6-luna[low]",
+                    "gpt-5.6-luna[low]",
+                    "gpt-5.6-luna[medium]",
+                    "gpt-5.5[medium]",
+                ],
+                [
+                    "gpt-5.6-luna[low]",
+                    "gpt-5.6-luna[low]",
+                    "gpt-5.5[medium]",
+                    "gpt-5.5[medium]",
+                    "gpt-5.5[high]",
+                ],
+            ],
+            Balanced => [
+                [
+                    "gpt-5.6-luna[medium]",
+                    "gpt-5.6-luna[medium]",
+                    "gpt-5.5[high]",
+                    "gpt-6-astra[high]",
+                    "gpt-6-astra[xhigh]",
+                ],
+                [
+                    "gpt-5.6-luna[low]",
+                    "gpt-5.6-luna[low]",
+                    "gpt-5.6-luna[medium]",
+                    "gpt-5.5[high]",
+                    "gpt-6-astra[high]",
+                ],
+                [
+                    "gpt-5.6-luna[medium]",
+                    "gpt-5.6-luna[medium]",
+                    "gpt-6-astra[high]",
+                    "gpt-6-astra[high]",
+                    "gpt-6-astra[xhigh]",
+                ],
+            ],
+            Max => [
+                [
+                    "gpt-5.5[high]",
+                    "gpt-5.5[high]",
+                    "gpt-6-astra[xhigh]",
+                    "gpt-6-astra[xhigh]",
+                    "gpt-6-astra[xhigh]",
+                ],
+                [
+                    "gpt-5.5[medium]",
+                    "gpt-5.5[medium]",
+                    "gpt-5.5[high]",
+                    "gpt-6-astra[xhigh]",
+                    "gpt-6-astra[xhigh]",
+                ],
+                [
+                    "gpt-5.5[high]",
+                    "gpt-5.5[high]",
+                    "gpt-6-astra[xhigh]",
+                    "gpt-6-astra[xhigh]",
+                    "gpt-6-astra[xhigh]",
+                ],
+            ],
+        }
+    }
+
+    #[test]
+    fn every_preset_picks_the_expected_cell() {
+        let all = grid();
+        let kinds = [TaskKind::Think, TaskKind::Do, TaskKind::Review];
+        for preset in RoutePreset::ALL {
+            let table = expected(preset);
+            for (row, kind) in kinds.iter().enumerate() {
+                for (col, difficulty) in Difficulty::ALL.iter().enumerate() {
+                    assert_eq!(
+                        pick_with(&all, *kind, *difficulty, preset),
+                        table[row][col],
+                        "{preset:?} {kind:?} {difficulty:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preset_shifts_stay_in_range() {
+        for kind in [TaskKind::Think, TaskKind::Do, TaskKind::Review] {
+            for difficulty in Difficulty::ALL {
+                let base = wanted(kind, difficulty, RoutePreset::Balanced);
+                let low = wanted(kind, difficulty, RoutePreset::Economy);
+                let high = wanted(kind, difficulty, RoutePreset::Max);
+                assert_eq!(low.tier, base.tier.saturating_sub(1));
+                assert_eq!(low.effort, base.effort.saturating_sub(1));
+                assert_eq!(high.tier, (base.tier + 1).clamp(1, 2));
+                assert_eq!(high.effort, (base.effort + 1).min(4));
+            }
+        }
+    }
+
+    #[test]
+    fn easy_review_has_no_large_floor() {
+        // Balanced used to force mid tier on trivial/easy review.
+        for difficulty in [Difficulty::Trivial, Difficulty::Easy] {
+            assert_eq!(
+                wanted(TaskKind::Review, difficulty, RoutePreset::Balanced),
+                Want { tier: 0, effort: 2 }
+            );
+        }
+        assert_eq!(
+            pick(&grid(), TaskKind::Review, Difficulty::Easy),
+            "gpt-5.6-luna[medium]"
+        );
+        // Max lifts it to mid, Economy drops effort.
+        assert_eq!(
+            wanted(TaskKind::Review, Difficulty::Easy, RoutePreset::Max),
+            Want { tier: 1, effort: 3 }
+        );
+        assert_eq!(
+            wanted(TaskKind::Review, Difficulty::Easy, RoutePreset::Economy),
+            Want { tier: 0, effort: 1 }
+        );
+    }
+
+    #[test]
+    fn tie_direction_follows_the_preset() {
+        // Do/Moderate wants effort 2 under Balanced; low and high tie.
+        let efforts = [cand("gpt-5.5", "high"), cand("gpt-5.5", "low")];
+        assert_eq!(
+            pick_with(
+                &efforts,
+                TaskKind::Do,
+                Difficulty::Moderate,
+                RoutePreset::Balanced
+            ),
+            "gpt-5.5[low]"
+        );
+        // Think/Easy wants effort 3 under Max; medium and xhigh tie.
+        let efforts = [cand("gpt-5.5", "medium"), cand("gpt-5.5", "xhigh")];
+        assert_eq!(
+            pick_with(
+                &efforts,
+                TaskKind::Think,
+                Difficulty::Easy,
+                RoutePreset::Max
+            ),
+            "gpt-5.5[xhigh]"
+        );
+        // Economy Think/Hard wants mid tier: small and large miss by one.
+        let tiers = [cand("gpt-6-astra", "medium"), cand("haiku", "medium")];
+        assert_eq!(
+            pick_with(
+                &tiers,
+                TaskKind::Think,
+                Difficulty::Hard,
+                RoutePreset::Economy
+            ),
+            "haiku[medium]"
+        );
+        // Max Do/Easy wants mid tier: the same pair resolves upward.
+        assert_eq!(
+            pick_with(&tiers, TaskKind::Do, Difficulty::Easy, RoutePreset::Max),
+            "gpt-6-astra[medium]"
+        );
+    }
+
+    #[test]
+    fn curated_tier_beats_the_name_guess() {
+        // "luna" guesses small; a curated tier of 2 makes it the large pick.
+        let mut luna = cand("gpt-6-luna", "high");
+        luna.tier = Some(2);
+        let all = [luna, cand("gpt-5.5", "high")];
+        assert_eq!(
+            pick(&all, TaskKind::Think, Difficulty::Hard),
+            "gpt-6-luna[high]"
+        );
+    }
+
+    #[test]
+    fn weight_maps_to_difficulty() {
+        assert_eq!(Difficulty::from_weight("light"), Some(Difficulty::Easy));
+        assert_eq!(
+            Difficulty::from_weight("Normal"),
+            Some(Difficulty::Moderate)
+        );
+        assert_eq!(Difficulty::from_weight("heavy"), Some(Difficulty::Hard));
+        assert_eq!(Difficulty::from_weight("huge"), None);
+        let all = grid();
+        assert_eq!(
+            pick_for_weight(&all, TaskKind::Do, "heavy", RoutePreset::Balanced)
+                .unwrap()
+                .id,
+            "gpt-5.5[high]"
+        );
+        assert!(pick_for_weight(&all, TaskKind::Do, "huge", RoutePreset::Balanced).is_none());
+    }
+
+    #[test]
+    fn preset_names_round_trip() {
+        for preset in RoutePreset::ALL {
+            assert_eq!(RoutePreset::parse(preset.as_str()), Some(preset));
+        }
+        assert_eq!(RoutePreset::parse("MAX"), Some(RoutePreset::Max));
+        assert_eq!(RoutePreset::parse("turbo"), None);
+        assert_eq!(RoutePreset::default(), RoutePreset::Balanced);
+    }
+
     fn tok(token: &str, alts: &[(&str, f64)]) -> TokenLogprob {
         TokenLogprob {
             token: token.into(),
@@ -1349,15 +1714,28 @@ mod scoring_tests {
         let all = grid();
         let refs: Vec<&Candidate> = all.iter().collect();
         let hard = [0.0, 0.0, 0.0, 1.0, 0.0];
-        let sure = Scored::new(TaskKind::Review, Difficulty::Hard, &[0.0, 0.0, 1.0], &hard);
+        let balanced = RoutePreset::Balanced;
+        let sure = Scored::new(
+            TaskKind::Review,
+            Difficulty::Hard,
+            &[0.0, 0.0, 1.0],
+            &hard,
+            balanced,
+        );
         assert_eq!(
-            pick_expected(&refs, &sure.outcomes).unwrap().id,
+            pick_expected(&refs, &sure.outcomes, balanced).unwrap().id,
             "gpt-6-astra[high]"
         );
         // Torn between review (large model) and do (mid model): take the mid one.
-        let torn = Scored::new(TaskKind::Review, Difficulty::Hard, &[0.0, 0.5, 0.5], &hard);
+        let torn = Scored::new(
+            TaskKind::Review,
+            Difficulty::Hard,
+            &[0.0, 0.5, 0.5],
+            &hard,
+            balanced,
+        );
         assert_eq!(
-            pick_expected(&refs, &torn.outcomes).unwrap().id,
+            pick_expected(&refs, &torn.outcomes, balanced).unwrap().id,
             "gpt-5.5[high]"
         );
         assert_eq!(torn.confidence(), Confidence::Medium);
@@ -1388,6 +1766,7 @@ mod decision_tests {
                 media_types: vec!["text/*".into()],
                 integrations: vec![],
                 ready: true,
+                tier: None,
             },
             Candidate {
                 id: "large".into(),
@@ -1397,6 +1776,7 @@ mod decision_tests {
                 media_types: vec!["text/*".into()],
                 integrations: vec![],
                 ready: true,
+                tier: None,
             },
         ])
     }
