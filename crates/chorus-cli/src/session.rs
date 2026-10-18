@@ -1507,7 +1507,7 @@ impl Session {
     /// The last usage this session reported (`session_usage`), so a reopened
     /// session's context meter starts where it left off instead of empty.
     pub fn usage(&self) -> Result<Option<usage::SessionUsage>> {
-        Ok(usage::get(self.store.conn(), self.sess)?)
+        Ok(usage::last_known(self.store.conn(), self.sess)?)
     }
 
     /// Rebuild the hot context from the ledger, sized to `budget` tokens.
@@ -2648,7 +2648,7 @@ impl SessionReader {
     }
 
     pub fn usage(&self) -> Result<Option<usage::SessionUsage>> {
-        Ok(usage::get(self.store.conn(), self.sess)?)
+        Ok(usage::last_known(self.store.conn(), self.sess)?)
     }
 
     pub fn review_base(&self) -> String {

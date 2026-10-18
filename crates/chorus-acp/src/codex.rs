@@ -93,9 +93,10 @@ pub fn bridge_for(agent_name: &str) -> Vec<String> {
             }
         }
     } else if n.contains("antigravity") || n.contains("agy") {
-        if let Some(p) = find_binary("antigravity-acp") {
-            return vec![p.to_string_lossy().to_string()];
-        }
+        // The copy built with this app wins over one on PATH: the bridge is
+        // ours, not a third-party CLI, and an old install keeps old
+        // behaviour silently (a 9 Oct copy in ~/.local/bin still put the
+        // prompt in argv and dropped token usage, 18 Oct 2026).
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
                 let candidate = dir.join("antigravity-acp");
@@ -103,6 +104,9 @@ pub fn bridge_for(agent_name: &str) -> Vec<String> {
                     return vec![candidate.to_string_lossy().to_string()];
                 }
             }
+        }
+        if let Some(p) = find_binary("antigravity-acp") {
+            return vec![p.to_string_lossy().to_string()];
         }
         // No cwd-relative `target/*/antigravity-acp` fallback: the process
         // cwd may be a cloned repo, and its committed binary would run as the

@@ -11,6 +11,7 @@
 //! Transport is newline-delimited JSON over the agent's stdin/stdout — one JSON
 //! object per line, no Content-Length headers.
 
+pub mod agy;
 pub mod codex;
 pub mod env;
 pub mod registry;
