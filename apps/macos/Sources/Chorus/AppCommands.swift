@@ -94,8 +94,11 @@ struct ChorusCommands: Commands {
     @ObservedObject var center: AppCommandCenter
 
     var body: some Commands {
-        // "System Monitor" in the Window menu comes from its `Window` scene
-        // (ChorusApp), which also carries ⌥⌘M — a button here listed it twice.
+        CommandGroup(before: .windowSize) {
+            Button("System Monitor") { center.send(.systemMonitor) }
+                .keyboardShortcut(AppCommand.systemMonitor.shortcut)
+            Divider()
+        }
 
         CommandGroup(replacing: .appSettings) {
             Button("Settings…") { center.send(.settings) }

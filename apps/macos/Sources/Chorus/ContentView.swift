@@ -106,6 +106,7 @@ struct ContentView: View {
     @State private var reviewModel = ""
     @State private var showSettings = false
     @State private var showProvidersPopover = false
+    @State private var showSystemMonitorPopover = false
     /// A tool's own page shown in place of the thread (nil = the thread).
     @State private var toolPage: String?
     /// Thread follows new output only while the reader is at the bottom.
@@ -1416,7 +1417,7 @@ struct ContentView: View {
 
                 Spacer(minLength: 4)
 
-                ChorusRAMLabel()
+                ChorusRAMLabel(isPresented: $showSystemMonitorPopover)
 
                 Button {
                     settingsSection = .accounts
@@ -2161,7 +2162,17 @@ struct ContentView: View {
         case .chooseModel, .nextEffort, .sendReview, .openInEditor:
             break // handled by ModelPicker / DiffReviewerView / CodeViewerView
         case .systemMonitor:
-            break // the menu item opens its own window
+            if !showSidebar || maximizedPanel != .none {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                    maximizedPanel = .none
+                    showSidebar = true
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    showSystemMonitorPopover.toggle()
+                }
+            } else {
+                showSystemMonitorPopover.toggle()
+            }
         }
     }
 
