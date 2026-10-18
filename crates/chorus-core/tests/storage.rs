@@ -689,3 +689,86 @@ fn deleting_parent_session_cascades_subagents_and_children() {
     let subs2 = chorus_core::agent_control::list_subagents(c, Some(parent)).unwrap();
     assert_eq!(subs2.len(), 0);
 }
+
+/// Sessions from before `session_usage` (v7) reopened with an empty meter
+/// even though every agent message had recorded context pressure in
+/// `tok_out`. Reopen reads that; the window stays unknown, never guessed.
+#[test]
+fn reopen_meter_falls_back_to_the_ledger_for_pre_v7_sessions() {
+    use chorus_core::usage;
+    let store = setup();
+    let c = store.conn();
+    let sess = ledger::new_session(c, "old", "/tmp").unwrap();
+    let agent = actor::intern(c, "antigravity", "google").unwrap();
+    assert!(usage::last_known(c, sess).unwrap().is_none());
+
+    for used in [9_000, 15_207] {
+        let mut ev = NewEvent::new(sess, EventKind::Msg, agent, "ok");
+        ev.tok_out = Some(used);
+        ledger::append(c, &ev).unwrap();
+    }
+    ledger::append(c, &NewEvent::new(sess, EventKind::ToolCall, agent, "read")).unwrap();
+    let u = usage::last_known(c, sess).unwrap().unwrap();
+    assert_eq!(u.context_used, Some(15_207));
+    assert_eq!(u.context_window, None);
+
+    // A stored row with a reading wins over the ledger.
+    usage::record_context(c, sess, Some(20_000), Some(1_048_576)).unwrap();
+    let u = usage::last_known(c, sess).unwrap().unwrap();
+    assert_eq!((u.context_used, u.context_window), (Some(20_000), Some(1_048_576)));
+}
+
+/// "ลบ session ที่ว่าง" deletes only sessions nothing points at: an event,
+/// an attachment, a fork, a subagent on either side each keep a session.
+#[test]
+fn empty_session_cleanup_never_touches_a_session_with_anything_in_it() {
+    use chorus_core::{session_cleanup, usage};
+    let store = setup();
+    let c = store.conn();
+    let new = |t: &str| ledger::new_session(c, t, "/tmp").unwrap();
+    let agent = actor::intern(c, "codex", "openai").unwrap();
+
+    let empty_a = new("a");
+    let empty_b = new("b");
+    let open_now = new("open in the window");
+    usage::record_context(c, empty_b, None, None).unwrap(); // opened, never used
+
+    let with_event = new("event");
+    let seq = ledger::append(c, &NewEvent::new(with_event, EventKind::Msg, agent, "hi")).unwrap();
+
+    let with_attachment = new("attachment");
+    c.execute(
+        "INSERT INTO attachment(sess, name, media_type, size, hash, status, created_ms) \
+         VALUES (?1, 'a.png', 'image/png', 1, 'h', 'staged', 0)",
+        [with_attachment],
+    )
+    .unwrap();
+
+    let parent = new("parent");
+    let child = new("child");
+    c.execute(
+        "INSERT INTO subagent(parent_sess, child_sess, role, task, status, created_ms, updated_ms) \
+         VALUES (?1, ?2, 'r', 't', 'running', 0, 0)",
+        [parent, child],
+    )
+    .unwrap();
+    let forked = ledger::fork(c, with_event, seq, "fork").unwrap();
+
+    let listed = session_cleanup::empty_sessions(c, &[open_now]).unwrap();
+    assert_eq!(listed, vec![empty_a, empty_b]);
+
+    let deleted = session_cleanup::delete_empty_sessions(c, &[open_now]).unwrap();
+    assert_eq!(deleted, vec![empty_a, empty_b]);
+    let left: Vec<i64> = c
+        .prepare("SELECT id FROM session ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    for keep in [open_now, with_event, with_attachment, parent, child, forked] {
+        assert!(left.contains(&keep), "{keep} was deleted; left {left:?}");
+    }
+    assert!(usage::get(c, empty_b).unwrap().is_none());
+    assert!(session_cleanup::empty_sessions(c, &[open_now]).unwrap().is_empty());
+}

@@ -246,11 +246,77 @@ final class Engine: ObservableObject {
         swap { chorus_engine_reopen(db, sessionID) }
     }
 
+    /// A new session before its first message: in-memory only (Rust
+    /// `drafts`), so pressing ✎ and walking away leaves no empty row.
+    struct DraftInfo: Codable, Equatable { let id: UInt64; let db: String; let cwd: String }
+    private struct DraftResult: Codable { let ok: Bool; let draft: DraftInfo?; let reused: Bool?; let error: String? }
+    @Published private(set) var draft: DraftInfo?
+
+    /// ✎ / "session ใหม่": show the draft for `cwd` — the unsent one if there
+    /// is one (Rust decides). The open session is closed; nothing is written.
+    func openDraft(db: String, cwd: String) {
+        guard !busy, !switching else { return }
+        let json = db.withCString { d in cwd.withCString { Self.string(from: chorus_draft_open(d, $0)) } }
+        guard let d = Self.decode(DraftResult.self, json)?.draft else {
+            lastError = "เปิด session ใหม่ไม่ได้"
+            return
+        }
+        close()
+        live = LiveTurn()
+        lastThoughts = ""
+        contextUsed = nil
+        contextWindow = nil
+        draft = d
+    }
+
+    /// First message of a draft: create its session, then `then()` once the
+    /// handle is live (the caller sends from there). On failure the draft
+    /// stays and the error shows, so the send can be retried.
+    func commitDraft(title: String = "session", then: @escaping () -> Void) {
+        guard let d = draft else { return }
+        loadSubagents(db: d.db)
+        swap(onReady: then) { title.withCString { chorus_draft_commit(d.id, $0) } }
+    }
+
+    private struct IDsResult: Codable { let ok: Bool; let ids: [Int64]?; let error: String? }
+
+    /// Sessions with nothing in them across `dbs` (one per project folder).
+    /// The open session is never counted.
+    func emptySessionCount(dbs: [String], completion: @escaping (Int) -> Void) {
+        let keep = sessionID
+        ioQueue.async {
+            let n = dbs.reduce(0) { sum, db in
+                let json = db.withCString { Self.string(from: chorus_empty_sessions($0, keep)) }
+                return sum + (Self.decode(IDsResult.self, json)?.ids?.count ?? 0)
+            }
+            DispatchQueue.main.async { completion(n) }
+        }
+    }
+
+    /// "ลบ session ที่ว่าง": delete them; Rust re-checks each one first.
+    func deleteEmptySessions(dbs: [String], completion: @escaping (Int) -> Void) {
+        let keep = sessionID
+        ioQueue.async { [weak self] in
+            var deleted = 0
+            var failure: String?
+            for db in dbs {
+                let json = db.withCString { Self.string(from: chorus_delete_empty_sessions($0, keep)) }
+                let r = Self.decode(IDsResult.self, json)
+                if r?.ok == true { deleted += r?.ids?.count ?? 0 } else { failure = r?.error ?? "unknown" }
+            }
+            DispatchQueue.main.async {
+                if let failure { self?.lastError = "ลบ session ที่ว่างไม่ได้: \(failure)" }
+                for db in dbs { self?.loadSessions(db: db) }
+                completion(deleted)
+            }
+        }
+    }
+
     /// Open the new handle and read its transcript off the main thread, then
     /// publish handle + id + events in one main-thread step. The old thread
     /// stays on screen until then: clearing first is what made every switch
     /// blink through an empty view.
-    private func swap(_ make: @escaping @Sendable () -> OpaquePointer?) {
+    private func swap(onReady: (() -> Void)? = nil, _ make: @escaping @Sendable () -> OpaquePointer?) {
         guard !busy, !switching else { return }
         let old = handle
         let oldReader = reader
@@ -291,12 +357,14 @@ final class Engine: ObservableObject {
                 }
                 self.handle = Handle(raw: h)
                 self.reader = r
+                self.draft = nil
                 self.sessionID = chorus_engine_session_id(h)
                 self.events = Self.decode([LedgerEvent].self, eventsJSON) ?? []
                 self.lastSeq = self.events.last(where: { $0.seq > 0 })?.seq ?? 0
                 self.attachments = Self.decode(SessionAttachmentList.self, attachmentsJSON)?.attachments ?? []
                 self.applyRoutePreset(presetJSON)
                 self.refresh()
+                onReady?()
             }
         }
     }
@@ -1797,6 +1865,8 @@ final class Engine: ObservableObject {
         let login: String
         let rate_limits: RateLimits?
         let hit: LimitHit?
+        /// "ไม่ทราบ" text from Rust when the quota cannot be known right now.
+        let quota_note: String?
         var id: String { name }
         var title: String { account.isEmpty ? "ค่าเริ่มต้น" : account }
         /// Limited right now, as far as we know.

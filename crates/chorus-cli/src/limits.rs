@@ -283,6 +283,10 @@ pub struct AccountUsage {
     pub login: String,
     pub rate_limits: Option<RateLimits>,
     pub hit: Option<Hit>,
+    /// Shown instead of a number when the quota cannot be known right now
+    /// (Antigravity without a fresh statusline snapshot). `None` when
+    /// `rate_limits` is the answer, or when "no limit hit" is honest.
+    pub quota_note: Option<String>,
 }
 
 /// `Current session: 18% used · resets Oct 5 at 9:30pm (Asia/Bangkok)` and
@@ -598,42 +602,62 @@ pub fn parse_antigravity_usage(text: &str) -> Option<RateLimits> {
     }
 }
 
-/// Antigravity 5-hour and weekly usage snapshot. Reads only statusline bridge
-/// files (AIUsageBar, Chorus cache, account directory); otherwise unknown.
-pub fn antigravity_rate_limits(dir: &Path) -> Option<RateLimits> {
-    let local_custom = dir.join("antigravity-statusline.json");
-    if local_custom.exists() {
-        if let Ok(text) = std::fs::read_to_string(&local_custom) {
-            if let Some(limits) = parse_antigravity_usage(&text) {
-                return Some(limits);
-            }
-        }
-    }
+/// How old an Antigravity snapshot may be before it is "unknown" rather
+/// than a number. The writers (AIUsageBar, a statusline hook) refresh about
+/// once a minute while they run, so 10 minutes means the writer stopped;
+/// past that a 5-hour window can have moved enough that the old figure
+/// misleads (Chorus 0.1.4 showed day-old percentages as current).
+pub const ANTIGRAVITY_QUOTA_MAX_AGE_SECS: i64 = 10 * 60;
 
+/// When a snapshot was taken: its own `observed_at` (unix seconds) if it
+/// has one, else the file's mtime.
+fn snapshot_age_secs(text: &str, mtime: Option<std::time::SystemTime>, now_secs: i64) -> Option<i64> {
+    let observed = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| v.get("observed_at").and_then(serde_json::Value::as_f64))
+        .map(|t| t as i64);
+    let modified = mtime
+        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64);
+    observed.or(modified).map(|t| now_secs - t)
+}
+
+fn now_secs() -> i64 {
+    now_ms() / 1000
+}
+
+/// Parse `path` if it is a fresh enough Antigravity snapshot.
+fn fresh_antigravity_snapshot(path: &Path, now_secs: i64) -> Option<RateLimits> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    let age = snapshot_age_secs(&text, mtime, now_secs)?;
+    if age > ANTIGRAVITY_QUOTA_MAX_AGE_SECS {
+        return None;
+    }
+    parse_antigravity_usage(&text)
+}
+
+/// Antigravity 5-hour and weekly usage snapshot. Reads only statusline bridge
+/// files (AIUsageBar, Chorus cache, account directory), and only a fresh
+/// one; otherwise unknown.
+pub fn antigravity_rate_limits(dir: &Path) -> Option<RateLimits> {
     // No live query. Antigravity exposes quota only through its language
     // server, and reaching that meant scraping another product's CSRF token
     // out of `ps` (every user's processes) and replaying it with `curl -k`.
     // Chorus never reads another tool's credentials, so without a statusline
     // bridge file the quota is unknown (`None`).
-
-    let mut candidates = Vec::new();
+    let mut candidates = vec![dir.join("antigravity-statusline.json")];
     if let Some(h) = std::env::var_os("HOME").map(PathBuf::from) {
         candidates.push(h.join("Library/Application Support/AIUsageBar/antigravity-statusline.json"));
         candidates.push(h.join(".chorus/cache/antigravity-statusline.json"));
         candidates.push(h.join(".chorus/cache/antigravity-usage.json"));
         candidates.push(h.join(".chorus/cache/antigravity-statusline-raw.json"));
     }
-    candidates.push(dir.join("antigravity-statusline.json"));
     candidates.push(dir.join("cache/antigravity-statusline.json"));
-
-    for path in candidates {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Some(limits) = parse_antigravity_usage(&text) {
-                return Some(limits);
-            }
-        }
-    }
-    None
+    let now = now_secs();
+    candidates
+        .iter()
+        .find_map(|p| fresh_antigravity_snapshot(p, now))
 }
 
 fn account_ready(agent: &str, account: Option<&str>, dir: &Path) -> bool {
@@ -670,18 +694,22 @@ pub fn usage_report() -> Vec<AccountUsage> {
                 None => agent.to_string(),
             };
             let ready = account_ready(agent, a, &dir);
+            let antigravity = agent.contains("antigravity") || agent.contains("agy");
+            let rate_limits = if agent == "codex" {
+                codex_rate_limits(&dir)
+            } else if agent == "claude" && ready {
+                claude_rate_limits(&dir, a.is_some())
+            } else if antigravity {
+                antigravity_rate_limits(&dir)
+            } else {
+                None
+            };
             out.push(AccountUsage {
                 ready,
                 login: crate::accounts::login_command(agent, a),
-                rate_limits: if agent == "codex" {
-                    codex_rate_limits(&dir)
-                } else if agent == "claude" && ready {
-                    claude_rate_limits(&dir, a.is_some())
-                } else if agent.contains("antigravity") || agent.contains("agy") {
-                    antigravity_rate_limits(&dir)
-                } else {
-                    None
-                },
+                quota_note: (antigravity && ready && rate_limits.is_none())
+                    .then(|| "โควตา: ไม่ทราบ (Antigravity ไม่มีข้อมูลล่าสุดให้อ่าน)".to_string()),
+                rate_limits,
                 hit: hits.get(&name).cloned(),
                 agent: agent.to_string(),
                 account: a.unwrap_or("").to_string(),
@@ -750,13 +778,42 @@ mod tests {
     fn usage_report_includes_antigravity_rate_limits() {
         let temp = std::env::temp_dir().join(format!("anti-test-{}", std::process::id()));
         std::fs::create_dir_all(&temp).unwrap();
+        let path = temp.join("antigravity-statusline.json");
         std::fs::write(
-            temp.join("antigravity-statusline.json"),
+            &path,
             r#"{"five_hour_reset":1791564080,"five_hour_used":0,"weekly_reset":1791949101,"weekly_used":46.5}"#,
         ).unwrap();
-        let rl = antigravity_rate_limits(&temp).unwrap();
+        let rl = fresh_antigravity_snapshot(&path, now_secs()).unwrap();
         assert!(rl.secondary.is_some());
         assert_eq!(rl.secondary.unwrap().used_percent, 46.5);
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// Nothing writes the old cache files since the CSRF scraping was
+    /// removed, so 0.1.4 showed whatever they last held as if it were now.
+    #[test]
+    fn an_old_antigravity_snapshot_is_unknown_not_a_number() {
+        let temp = std::env::temp_dir().join(format!("anti-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let path = temp.join("antigravity-statusline.json");
+        let now = now_secs();
+        let snap = |observed: i64| {
+            format!(r#"{{"five_hour_used":12,"weekly_used":40,"observed_at":{observed}.5}}"#)
+        };
+
+        std::fs::write(&path, snap(now - 60)).unwrap();
+        assert!(fresh_antigravity_snapshot(&path, now).is_some());
+
+        // `observed_at` wins over a fresh mtime: rewriting old data is still old.
+        std::fs::write(&path, snap(now - ANTIGRAVITY_QUOTA_MAX_AGE_SECS - 1)).unwrap();
+        assert!(fresh_antigravity_snapshot(&path, now).is_none());
+
+        // No `observed_at`: the file's own age decides.
+        std::fs::write(&path, r#"{"five_hour_used":12,"weekly_used":40}"#).unwrap();
+        assert!(fresh_antigravity_snapshot(&path, now).is_some());
+        assert!(fresh_antigravity_snapshot(&path, now + ANTIGRAVITY_QUOTA_MAX_AGE_SECS + 5).is_none());
+
+        assert!(fresh_antigravity_snapshot(&temp.join("missing.json"), now).is_none());
         let _ = std::fs::remove_dir_all(temp);
     }
 
