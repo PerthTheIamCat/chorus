@@ -169,6 +169,12 @@ impl DaemonServer {
                         let Some(permit) = ConnectionPermit::acquire(&u_active) else {
                             continue;
                         };
+                        // BSD/macOS accept() inherits O_NONBLOCK from the listener;
+                        // left on, a request that hasn't arrived yet reads as
+                        // WouldBlock and the client gets a closed socket, no reply.
+                        if stream.set_nonblocking(false).is_err() {
+                            continue;
+                        }
                         let c = u_conn.clone();
                         let i = u_inter.clone();
                         let b = u_broad.clone();
@@ -203,6 +209,10 @@ impl DaemonServer {
                             let Some(permit) = ConnectionPermit::acquire(&t_active) else {
                                 continue;
                             };
+                            // Same O_NONBLOCK inheritance as the Unix listener above.
+                            if stream.set_nonblocking(false).is_err() {
+                                continue;
+                            }
                             let c = t_conn.clone();
                             let i = t_inter.clone();
                             let b = t_broad.clone();

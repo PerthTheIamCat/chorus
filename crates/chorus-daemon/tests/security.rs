@@ -130,7 +130,10 @@ fn browser_origin_and_ambiguous_or_oversized_headers_are_rejected() {
         let request =
             format!("{method} /ping HTTP/1.1\r\nOrigin: https://untrusted.example\r\n\r\n");
         let response = raw_request(&server, request.as_bytes());
-        assert!(response.starts_with("HTTP/1.1 403"));
+        assert!(
+            response.starts_with("HTTP/1.1 403"),
+            "{method}: {response:?}"
+        );
         assert!(!response.contains("Access-Control-Allow-Origin"));
     }
     for headers in [
