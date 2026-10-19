@@ -875,6 +875,12 @@ struct AccountRow: View {
                     if let p = rl.primary { window("5 ชั่วโมง", p) }
                     if let s = rl.secondary { window("สัปดาห์", s) }
                 }
+            } else if let note = account.quota_note {
+                HStack(spacing: 6) {
+                    Image(systemName: "questionmark.circle").foregroundStyle(.secondary)
+                    Text(note).font(.caption).foregroundStyle(.secondary)
+                }
+                .help("Chorus ไม่อ่าน token ของ Antigravity เอง — ตัวเลขจะขึ้นเมื่อมี statusline (เช่น AIUsageBar) เขียนข้อมูลภายใน 10 นาทีล่าสุด")
             } else if let hit = account.hit, account.limited {
                 HStack(spacing: 6) {
                     Image(systemName: "hourglass").foregroundStyle(.red)

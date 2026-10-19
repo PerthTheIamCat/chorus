@@ -468,6 +468,111 @@ pub unsafe extern "C" fn chorus_engine_reopen(
     }
 }
 
+// ---- drafts: a new session has no row until its first message ------
+
+fn drafts() -> &'static std::sync::Mutex<chorus_cli::drafts::DraftBook> {
+    static BOOK: std::sync::OnceLock<std::sync::Mutex<chorus_cli::drafts::DraftBook>> =
+        std::sync::OnceLock::new();
+    BOOK.get_or_init(Default::default)
+}
+
+/// ✎ / "session ใหม่": the draft for `cwd`, reusing an unsent one. Writes
+/// nothing — no row, no store, no snapshot.
+/// JSON: {"ok":true,"draft":{"id":N,"db":"...","cwd":"..."},"reused":bool}
+///
+/// # Safety
+/// `db_path` and `cwd` must be valid NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_draft_open(db_path: *const c_char, cwd: *const c_char) -> *mut c_char {
+    let (Some(db), Some(cwd)) = (borrow(db_path), borrow(cwd)) else {
+        return err("db_path/cwd must be valid UTF-8");
+    };
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let mut book = drafts().lock().map_err(|_| "draft book poisoned")?;
+        Ok::<_, &str>(book.open(Path::new(db), Path::new(cwd)))
+    }));
+    match r {
+        Ok(Ok(o)) => out(
+            serde_json::json!({
+                "ok": true,
+                "draft": {
+                    "id": o.draft.id,
+                    "db": o.draft.db.to_string_lossy(),
+                    "cwd": o.draft.cwd.to_string_lossy(),
+                },
+                "reused": o.reused,
+            })
+            .to_string(),
+        ),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in draft_open"),
+    }
+}
+
+/// The first message of a draft: create its session and return an engine
+/// for it, like `chorus_engine_open`. NULL on failure; the draft then stays
+/// so the send can be retried.
+///
+/// # Safety
+/// `title` must be a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_draft_commit(draft_id: u64, title: *const c_char) -> *mut ChorusEngine {
+    let run = || -> Option<ChorusEngine> {
+        let title = borrow(title)?;
+        let session = drafts().lock().ok()?.commit(draft_id, title).ok()?;
+        Some(ChorusEngine { session })
+    };
+    match catch_unwind(AssertUnwindSafe(run)) {
+        Ok(Some(e)) => Box::into_raw(Box::new(e)),
+        _ => std::ptr::null_mut(),
+    }
+}
+
+/// Sessions in `db_path` with nothing in them (no event, attachment, fork or
+/// child), for the "ลบ session ที่ว่าง" confirmation. `keep` (the open
+/// session, or -1) is never listed. JSON: {"ok":true,"ids":[N,...]}
+///
+/// # Safety
+/// `db_path` must be a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_empty_sessions(db_path: *const c_char, keep: i64) -> *mut c_char {
+    empty_sessions_call(db_path, keep, false)
+}
+
+/// Delete what `chorus_empty_sessions` lists, re-checked in one transaction.
+/// JSON: {"ok":true,"ids":[deleted ids]}
+///
+/// # Safety
+/// `db_path` must be a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_delete_empty_sessions(db_path: *const c_char, keep: i64) -> *mut c_char {
+    empty_sessions_call(db_path, keep, true)
+}
+
+unsafe fn empty_sessions_call(db_path: *const c_char, keep: i64, delete: bool) -> *mut c_char {
+    let Some(db) = borrow(db_path) else {
+        return err("db_path must be valid UTF-8");
+    };
+    // A project folder with no store yet has nothing to clean.
+    if !Path::new(db).exists() {
+        return out(serde_json::json!({ "ok": true, "ids": [] }).to_string());
+    }
+    let r = catch_unwind(AssertUnwindSafe(|| -> chorus_core::Result<Vec<i64>> {
+        let store = chorus_core::store::Store::open(Path::new(db))?;
+        let keep = [keep];
+        Ok(if delete {
+            chorus_core::session_cleanup::delete_empty_sessions(store.conn(), &keep)?
+        } else {
+            chorus_core::session_cleanup::empty_sessions(store.conn(), &keep)?
+        })
+    }));
+    match r {
+        Ok(Ok(ids)) => out(serde_json::json!({ "ok": true, "ids": ids }).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in empty_sessions"),
+    }
+}
+
 /// Free an engine handle.
 ///
 /// # Safety
@@ -2101,7 +2206,7 @@ pub unsafe extern "C" fn chorus_list_skills(cwd: *const c_char) -> *mut c_char {
 
 /// Every account of every agent with what is known about its usage: Codex's
 /// own 5-hour/weekly percentages, and for Claude the last limit it hit.
-/// JSON: {"ok":true,"accounts":[{name,agent,account,dir,ready,login,rate_limits,hit}]}
+/// JSON: {"ok":true,"accounts":[{name,agent,account,dir,ready,login,rate_limits,hit,quota_note}]}
 #[no_mangle]
 pub extern "C" fn chorus_usage_report() -> *mut c_char {
     match catch_unwind(chorus_cli::limits::usage_report) {

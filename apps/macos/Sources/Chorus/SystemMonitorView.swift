@@ -253,19 +253,20 @@ final class MonitorModel: ObservableObject {
     }
 }
 
-// ---- window ------------------------------------------------------------------
+// ---- popover -----------------------------------------------------------------
 
 struct SystemMonitorView: View {
     @EnvironmentObject private var engine: Engine
     @StateObject private var model = MonitorModel()
     @StateObject private var projects = ProjectStore()
     @State private var tab: Tab = .services
-    @State private var confirm: Confirm?
+    @State private var confirming: Confirm?
     @State private var reachFilter: ReachFilter = .all
 
+    enum Tab: String, CaseIterable { case services = "บริการ", chorus = "Chorus", disk = "พื้นที่" }
     enum ReachFilter: String, CaseIterable { case all = "ทั้งหมด", local = "localhost", network = "เครือข่าย" }
 
-    /// The groups the services table is split into, in Rust's `Origin` order.
+    /// The groups the services list is split into, in Rust's `Origin` order.
     struct ServiceGroup: Identifiable {
         let id: String
         let title: String
@@ -293,12 +294,9 @@ struct SystemMonitorView: View {
         }
     }
 
-    enum Tab: String, CaseIterable { case services = "บริการ", chorus = "Chorus", disk = "พื้นที่" }
-
-    struct Confirm: Identifiable {
-        let row: MonRow
+    struct Confirm: Equatable {
+        let pid: Int32
         let group: Bool
-        var id: String { "\(row.pid)-\(group)" }
     }
 
     private var workspaces: [String] {
@@ -309,186 +307,350 @@ struct SystemMonitorView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
+            if let n = model.notice ?? model.error {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                    Text(n)
+                        .font(.caption2)
+                        .lineLimit(2)
+                    Spacer()
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                }
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.orange.opacity(0.1))
+                .contentShape(Rectangle())
+                .onTapGesture { model.notice = nil; model.error = nil }
+            }
+            Divider().opacity(0.5)
             switch tab {
-            case .services: servicesTable
+            case .services: servicesList
             case .chorus: chorusList
             case .disk: DiskPane(model: model, workspaces: workspaces)
             }
         }
-        .frame(minWidth: 860, minHeight: 420)
-        .background(WindowVisibility { model.setVisible($0) })
-        .onAppear { model.engine = engine }
-        .onDisappear { model.setVisible(false) }
-        .alert(item: $confirm) { c in
-            Alert(
-                title: Text(c.group ? "หยุดทุกอย่างที่ \(c.row.startedBy ?? c.row.name) เปิดไว้?" : "หยุด \(c.row.name)?"),
-                message: Text(confirmText(c)),
-                primaryButton: .destructive(Text("หยุด (SIGTERM)")) { model.stop(c.row, group: c.group) },
-                secondaryButton: .cancel(Text("ยกเลิก"))
-            )
+        .frame(width: 390, height: 460)
+        .onAppear {
+            model.engine = engine
+            model.setVisible(true)
         }
-    }
-
-    private func confirmText(_ c: Confirm) -> String {
-        var lines = ["pid \(c.row.pid)", c.row.path]
-        if let by = c.row.startedBy { lines.append("เปิดโดย: \(by) (ข้อมูลประกอบ ไม่ใช่หลักฐาน)") }
-        if let f = c.row.footprint { lines.append("หน่วยความจำ \(MonFormat.bytes(f))") }
-        if c.group { lines.append("ส่งสัญญาณถึงทั้ง process group ที่ Chorus สร้าง") }
-        return lines.joined(separator: "\n")
+        .onDisappear { model.setVisible(false) }
     }
 
     private var header: some View {
-        HStack(spacing: 16) {
-            Picker("", selection: $tab) {
-                ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "memorychip")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.secondary)
+                Text("System Monitor")
+                    .font(.system(size: 12.5, weight: .bold))
+                Spacer()
+                if let s = model.snapshot {
+                    HStack(spacing: 6) {
+                        Label(MonFormat.bytes(s.chorusFootprint), systemImage: "memorychip")
+                        Text(String(format: "CPU %.1f%%", s.chorusCpuPct))
+                        if s.modelFootprint > 0 {
+                            Text("· โมเดล \(MonFormat.bytes(s.modelFootprint))")
+                        }
+                    }
+                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.05), in: Capsule())
+                }
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 260)
-            if let s = model.snapshot {
-                stat("Chorus", MonFormat.bytes(s.chorusFootprint), String(format: "CPU %.1f%%", s.chorusCpuPct))
-                if s.modelFootprint > 0 { stat("โมเดล local", MonFormat.bytes(s.modelFootprint), nil) }
-            }
-            Spacer()
-            if tab == .services {
-                Picker("", selection: $reachFilter) {
-                    ForEach(ReachFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+
+            HStack(spacing: 8) {
+                Picker("", selection: $tab) {
+                    ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 220)
-                .help("localhost = เข้าได้จากเครื่องนี้เท่านั้น · เครือข่าย = เครื่องอื่นใน network เดียวกันก็เข้าได้")
-                Toggle("UDP", isOn: $model.udp).toggleStyle(.checkbox)
-                    .help("แสดง UDP ด้วย (ซ่อนพอร์ต 0 และพอร์ตชั่วคราว 49152 ขึ้นไป)")
-            }
-            if let s = model.snapshot {
-                Text(String(format: "สแกน %.1f ms", s.sweepMs)).font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
-            }
-        }
-        .padding(.horizontal, 14).padding(.vertical, 10)
-        .overlay(alignment: .bottomLeading) {
-            if let n = model.notice ?? model.error {
-                Text(n).font(.caption).foregroundStyle(.orange)
-                    .padding(.horizontal, 14).offset(y: 14)
-                    .onTapGesture { model.notice = nil }
-            }
-        }
-    }
+                .controlSize(.small)
 
-    private func stat(_ title: String, _ value: String, _ sub: String?) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(title).font(.caption2).foregroundStyle(.secondary)
-            HStack(spacing: 6) {
-                Text(value).font(.system(size: 13, weight: .semibold)).monospacedDigit()
-                if let sub { Text(sub).font(.caption).foregroundStyle(.secondary).monospacedDigit() }
-            }
-        }
-    }
+                Spacer()
 
-    // Grouped by who started it; Port · reach · Service · Process · PID · CPU · RAM · started by · uptime
-    private var servicesTable: some View {
-        Table(of: MonService.self) {
-            TableColumn("Port") { r in
-                HStack(spacing: 4) {
-                    Text(verbatim: ":\(r.port)").monospacedDigit()
-                    if r.udp { Text("UDP").font(.caption2).foregroundStyle(.secondary) }
+                if tab == .services {
+                    Toggle("UDP", isOn: $model.udp)
+                        .toggleStyle(.checkbox)
+                        .controlSize(.small)
+                        .font(.caption)
+                        .help("แสดง UDP ด้วย (ซ่อนพอร์ต 0 และพอร์ตชั่วคราว 49152 ขึ้นไป)")
                 }
+                if let s = model.snapshot {
+                    Text(String(format: "%.0f ms", s.sweepMs))
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+    }
+
+    // ---- services compact list -----------------------------------------------
+
+    private var servicesList: some View {
+        let groups = serviceGroups
+        return VStack(spacing: 0) {
+            Picker("", selection: $reachFilter) {
+                ForEach(ReachFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.small)
+            .padding(.horizontal, 10)
+            .padding(.top, 8)
+            .help("localhost = เข้าได้จากเครื่องนี้เท่านั้น · เครือข่าย = เครื่องอื่นใน network เดียวกันก็เข้าได้")
+            if groups.isEmpty {
+                VStack(spacing: 6) {
+                    Image(systemName: "network")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.tertiary)
+                    Text(reachFilter == .all ? "ไม่มีพอร์ตที่เปิดรับการเชื่อมต่อ" : "ไม่มีพอร์ตแบบ \(reachFilter.rawValue)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 6) {
+                        ForEach(groups) { g in
+                            Text(g.title)
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .padding(.top, g.id == groups.first?.id ? 0 : 6)
+                            ForEach(g.rows) { r in
+                                serviceRow(r)
+                            }
+                        }
+                    }
+                    .padding(10)
+                }
+            }
+        }
+    }
+
+    private func serviceRow(_ r: MonService) -> some View {
+        let p = r.process
+        let isConfirming = confirming == Confirm(pid: p.pid, group: false)
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .center, spacing: 6) {
+                HStack(spacing: 3) {
+                    Text(verbatim: ":\(r.port)")
+                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                    if r.udp {
+                        Text("UDP")
+                            .font(.system(size: 8.5, weight: .bold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
                 .help(r.addrs.joined(separator: ", "))
-                .dimmed(!r.process.mine)
-            }.width(min: 60, ideal: 70)
-            TableColumn("เข้าถึงได้") { r in reachCell(r) }.width(min: 90, ideal: 110)
-            TableColumn("Service") { r in
-                Group {
-                    if let s = r.service {
-                        Text(s.source == "port" ? "มักเป็น \(s.name)" : s.name)
-                            .foregroundStyle(s.source == "port" ? .secondary : .primary)
-                    } else { Text("—").foregroundStyle(.tertiary) }
-                }.dimmed(!r.process.mine)
-            }.width(min: 90, ideal: 130)
-            TableColumn("Process") { r in processCell(r.process) }.width(min: 100, ideal: 150)
-            TableColumn("PID") { r in Text(verbatim: "\(r.process.pid)").monospacedDigit().dimmed(!r.process.mine) }
-                .width(min: 50, ideal: 60)
-            TableColumn("CPU") { r in cpuCell(r.process) }.width(min: 50, ideal: 60)
-            TableColumn("RAM") { r in ramCell(r.process) }.width(min: 60, ideal: 80)
-            TableColumn("เปิดโดย") { r in
-                Text(r.process.startedBy ?? "—").foregroundStyle(r.process.startedBy == nil ? .tertiary : .secondary)
-                    .dimmed(!r.process.mine)
-            }.width(min: 80, ideal: 120)
-            TableColumn("Uptime") { r in Text(MonFormat.uptime(r.process.uptimeS)).monospacedDigit().dimmed(!r.process.mine) }
-                .width(min: 60, ideal: 80)
-            TableColumn("") { r in actionCell(r.process, group: false) }.width(min: 90, ideal: 100)
-        } rows: {
-            ForEach(serviceGroups) { g in
-                Section {
-                    ForEach(g.rows) { TableRow($0) }
-                } header: {
-                    Text(g.title).font(.caption.weight(.semibold))
+
+                reachBadge(r)
+
+                Text(p.name)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+
+                if let s = r.service {
+                    Text(s.source == "port" ? "(\(s.name))" : "· \(s.name)")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
+
+                Spacer(minLength: 4)
+
+                actionControl(p, group: false)
+            }
+
+            HStack(spacing: 8) {
+                Text(verbatim: "PID \(p.pid)")
+                if let cpu = p.cpuPct {
+                    Text(String(format: "CPU %.1f%%", cpu))
+                }
+                if let ram = p.footprint {
+                    Text(MonFormat.bytes(ram))
+                        .help("Memory แบบเดียวกับ Activity Monitor (phys_footprint)")
+                }
+                if let u = p.uptimeS {
+                    Text(MonFormat.uptime(u))
+                }
+                if let by = p.startedBy {
+                    Text("· เปิดโดย \(by)")
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .font(.system(size: 10, design: .monospaced))
+            .foregroundStyle(.tertiary)
+
+            if isConfirming {
+                confirmBanner(p, group: false)
             }
         }
+        .padding(8)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .help(([p.path] + (p.cmdline.isEmpty ? [] : [p.cmdline.joined(separator: " ")])).joined(separator: "\n"))
+        .dimmed(!p.mine)
     }
 
-    private func reachCell(_ r: MonService) -> some View {
+    private func reachBadge(_ r: MonService) -> some View {
         let local = r.reach == "local"
-        return Label(local ? "เฉพาะเครื่องนี้" : "เครือข่าย", systemImage: local ? "lock.fill" : "network")
-            .labelStyle(.titleAndIcon)
-            .font(.caption)
+        return Image(systemName: local ? "lock.fill" : "network")
+            .font(.system(size: 9.5, weight: .semibold))
             .foregroundStyle(local ? Color.secondary : Color.orange)
             .help(local
-                  ? "ผูกกับ \(r.addrs.joined(separator: ", ")) — เครื่องอื่นเข้าไม่ได้"
-                  : "ผูกกับ \(r.addrs.joined(separator: ", ")) — เครื่องอื่นใน network เดียวกันเข้าได้")
-            .dimmed(!r.process.mine)
+                  ? "เฉพาะเครื่องนี้ (\(r.addrs.joined(separator: ", "))) — เครื่องอื่นเข้าไม่ได้"
+                  : "เปิดสู่เครือข่าย (\(r.addrs.joined(separator: ", "))) — เครื่องอื่นใน network เดียวกันเข้าได้")
     }
 
+    // ---- chorus compact list -------------------------------------------------
+
     private var chorusList: some View {
-        Table(model.snapshot?.chorus ?? []) {
-            TableColumn("ส่วน") { r in Text(MonFormat.role(r.role)) }.width(min: 90, ideal: 110)
-            TableColumn("Process") { r in processCell(r) }.width(min: 120, ideal: 180)
-            TableColumn("PID") { r in Text(verbatim: "\(r.pid)").monospacedDigit() }.width(min: 50, ideal: 60)
-            TableColumn("CPU") { r in cpuCell(r) }.width(min: 50, ideal: 60)
-            TableColumn("RAM") { r in ramCell(r) }.width(min: 60, ideal: 80)
-            TableColumn("เปิดโดย") { r in Text(r.startedBy ?? "—").foregroundStyle(.secondary) }.width(min: 80, ideal: 130)
-            TableColumn("Uptime") { r in Text(MonFormat.uptime(r.uptimeS)).monospacedDigit() }.width(min: 60, ideal: 80)
-            TableColumn("") { r in
-                if r.groupStoppable { actionCell(r, group: true) } else if r.role != "app" && r.role != "daemon" { actionCell(r, group: false) }
-            }.width(min: 120, ideal: 150)
+        let rows = model.snapshot?.chorus ?? []
+        return ScrollView {
+            LazyVStack(spacing: 6) {
+                ForEach(rows) { r in
+                    chorusRow(r)
+                }
+            }
+            .padding(10)
         }
     }
 
-    private func processCell(_ p: MonRow) -> some View {
-        Text(p.name)
-            .lineLimit(1)
-            .help(([p.path] + (p.cmdline.isEmpty ? [] : [p.cmdline.joined(separator: " ")])).joined(separator: "\n"))
-            .dimmed(!p.mine)
+    private func chorusRow(_ r: MonRow) -> some View {
+        let group = r.groupStoppable
+        let canStop = group || (r.role != "app" && r.role != "daemon")
+        let isConfirming = confirming == Confirm(pid: r.pid, group: group)
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .center, spacing: 6) {
+                Text(MonFormat.role(r.role))
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+
+                Text(r.name)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+
+                Spacer(minLength: 4)
+
+                if canStop {
+                    actionControl(r, group: group)
+                }
+            }
+
+            HStack(spacing: 8) {
+                Text(verbatim: "PID \(r.pid)")
+                if let cpu = r.cpuPct {
+                    Text(String(format: "CPU %.1f%%", cpu))
+                }
+                if let ram = r.footprint {
+                    Text(MonFormat.bytes(ram))
+                }
+                if let u = r.uptimeS {
+                    Text(MonFormat.uptime(u))
+                }
+                if let by = r.startedBy {
+                    Text("· \(by)")
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .font(.system(size: 10, design: .monospaced))
+            .foregroundStyle(.tertiary)
+
+            if isConfirming {
+                confirmBanner(r, group: group)
+            }
+        }
+        .padding(8)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .help(([r.path] + (r.cmdline.isEmpty ? [] : [r.cmdline.joined(separator: " ")])).joined(separator: "\n"))
     }
 
-    private func cpuCell(_ p: MonRow) -> some View {
-        Text(p.cpuPct.map { String(format: "%.1f%%", $0) } ?? "—").monospacedDigit().dimmed(!p.mine)
-    }
-
-    private func ramCell(_ p: MonRow) -> some View {
-        Text(p.footprint.map(MonFormat.bytes) ?? "—").monospacedDigit().dimmed(!p.mine)
-            .help("Memory แบบเดียวกับ Activity Monitor (phys_footprint)")
-    }
+    // ---- inline action & confirmation ----------------------------------------
 
     @ViewBuilder
-    private func actionCell(_ p: MonRow, group: Bool) -> some View {
+    private func actionControl(_ p: MonRow, group: Bool) -> some View {
         if let id = p.ident {
             switch model.phases[id] {
             case .stopping?, .killing?:
-                ProgressView().controlSize(.small)
+                ProgressView().controlSize(.mini)
             case .stillAlive?:
                 Button("บังคับปิด") { model.forceKill(p, group: group) }
-                    .foregroundStyle(.red)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .controlSize(.mini)
                     .help("ส่ง SIGKILL — process จะไม่ได้เก็บกวาดก่อนปิด")
             case nil:
-                Button(group ? "หยุดทั้งกลุ่ม" : "หยุด") { confirm = Confirm(row: p, group: group) }
+                let target = Confirm(pid: p.pid, group: group)
+                if confirming == target {
+                    HStack(spacing: 4) {
+                        Button("ยืนยันหยุด") {
+                            confirming = nil
+                            model.stop(p, group: group)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                        .controlSize(.mini)
+
+                        Button("ยกเลิก") {
+                            confirming = nil
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                    }
+                } else {
+                    Button(group ? "หยุดกลุ่ม" : "หยุด") {
+                        confirming = target
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
                     .help(group ? "หยุดทุกอย่างที่ agent นี้เปิด (killpg)" : "ส่ง SIGTERM หลังยืนยัน")
+                }
             }
         } else if p.mine, let note = p.refusalNote {
-            Image(systemName: "lock").foregroundStyle(.tertiary).help(note)
+            Image(systemName: "lock")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .help(note)
         }
+    }
+
+    private func confirmBanner(_ p: MonRow, group: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(p.path)
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if group {
+                Text("ส่ง SIGTERM ถึงทั้ง process group ที่ Chorus สร้าง")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.orange)
+            } else if let by = p.startedBy {
+                Text("เปิดโดย: \(by) · ส่ง SIGTERM")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.top, 2)
     }
 }
 
@@ -507,16 +669,23 @@ private struct DiskPane: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 14) {
                 if let d = model.disk {
                     categories(d)
-                    projects(d)
+                    if !d.projects.isEmpty {
+                        projects(d)
+                    }
                 } else if model.diskLoading {
-                    ProgressView("กำลังวัดพื้นที่…")
+                    HStack {
+                        Spacer()
+                        ProgressView("กำลังวัดพื้นที่…").controlSize(.small)
+                        Spacer()
+                    }
+                    .padding(.vertical, 12)
                 }
                 optimise
             }
-            .padding(16)
+            .padding(12)
         }
         .onAppear {
             if workspace.isEmpty { workspace = workspaces.first(where: hasStore) ?? workspaces.first ?? "" }
@@ -530,49 +699,60 @@ private struct DiskPane: View {
 
     private func categories(_ d: MonDisk) -> some View {
         let c = d.categories
-        let rows: [(String, UInt64)] = [("ledger (store.db)", c.ledger), ("checkpoints", c.checkpoints), ("worktrees", c.worktrees),
-                                        ("models", c.models), ("memory", c.memory), ("cache", c.cache), ("อื่น ๆ ใน .chorus", c.other)]
-        return VStack(alignment: .leading, spacing: 6) {
+        let rows: [(String, UInt64)] = [
+            ("ledger (store.db)", c.ledger), ("checkpoints", c.checkpoints), ("worktrees", c.worktrees),
+            ("models", c.models), ("memory", c.memory), ("cache", c.cache), ("อื่น ๆ", c.other),
+        ]
+        return VStack(alignment: .leading, spacing: 5) {
             HStack {
-                Text("พื้นที่ที่ Chorus ใช้").font(.headline)
-                Text(MonFormat.bytes(d.total)).font(.headline).monospacedDigit().foregroundStyle(.secondary)
+                Text("พื้นที่ที่ Chorus ใช้").font(.system(size: 11.5, weight: .semibold))
+                Text(MonFormat.bytes(d.total)).font(.system(size: 11.5, weight: .semibold, design: .monospaced)).foregroundStyle(.secondary)
                 Spacer()
-                Button("วัดใหม่") { model.loadDisk(workspaces: workspaces) }.disabled(model.diskLoading)
+                Button("วัดใหม่") { model.loadDisk(workspaces: workspaces) }
+                    .controlSize(.mini)
+                    .disabled(model.diskLoading)
             }
             ForEach(rows, id: \.0) { name, bytes in
-                HStack {
-                    Text(name).frame(width: 150, alignment: .leading)
+                HStack(spacing: 6) {
+                    Text(name)
+                        .font(.system(size: 10.5))
+                        .frame(width: 105, alignment: .leading)
+                        .lineLimit(1)
                     GeometryReader { g in
-                        RoundedRectangle(cornerRadius: 3).fill(Color.accentColor.opacity(0.55))
+                        RoundedRectangle(cornerRadius: 2.5).fill(Color.accentColor.opacity(0.55))
                             .frame(width: d.total == 0 ? 0 : max(2, g.size.width * CGFloat(Double(bytes) / Double(d.total))))
-                    }.frame(height: 8)
-                    Text(MonFormat.bytes(bytes)).monospacedDigit().frame(width: 80, alignment: .trailing)
-                }.font(.callout)
+                    }.frame(height: 6)
+                    Text(MonFormat.bytes(bytes))
+                        .font(.system(size: 10, design: .monospaced))
+                        .frame(width: 64, alignment: .trailing)
+                }
             }
         }
     }
 
     private func projects(_ d: MonDisk) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("แยกตามโปรเจกต์").font(.headline)
+        VStack(alignment: .leading, spacing: 4) {
+            Text("แยกตามโปรเจกต์").font(.system(size: 11.5, weight: .semibold))
             ForEach(d.projects) { p in
                 DisclosureGroup {
-                    VStack(alignment: .leading, spacing: 3) {
+                    VStack(alignment: .leading, spacing: 2) {
                         line("ledger", p.ledger)
                         line("checkpoints", p.checkpoints)
                         line("worktrees", p.worktrees)
                         line("อื่น ๆ", p.other)
-                        if p.freelistBytes > 0 { line("หน้าว่างใน store.db (VACUUM คืนได้)", p.freelistBytes) }
-                        if !p.tables.isEmpty {
-                            Text("ตารางใน store.db").font(.caption).foregroundStyle(.secondary).padding(.top, 4)
-                            ForEach(p.tables, id: \.self) { t in line(t.name, t.bytes).font(.caption) }
-                        }
-                    }.padding(.leading, 8)
+                        if p.freelistBytes > 0 { line("หน้าว่างใน store.db", p.freelistBytes) }
+                    }
+                    .font(.system(size: 10))
+                    .padding(.leading, 6)
                 } label: {
                     HStack {
-                        Text((p.path as NSString).abbreviatingWithTildeInPath).lineLimit(1).truncationMode(.middle)
+                        Text((p.path as NSString).abbreviatingWithTildeInPath)
+                            .font(.system(size: 10.5))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                         Spacer()
-                        Text(MonFormat.bytes(p.total)).monospacedDigit()
+                        Text(MonFormat.bytes(p.total))
+                            .font(.system(size: 10, design: .monospaced))
                     }
                 }
             }
@@ -584,32 +764,40 @@ private struct DiskPane: View {
     }
 
     private var optimise: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("ทำให้เล็กลง").font(.headline)
+                Text("ทำให้เล็กลง").font(.system(size: 11.5, weight: .semibold))
                 Spacer()
-                Picker("Workspace", selection: $workspace) {
-                    ForEach(workspaces, id: \.self) { Text(($0 as NSString).lastPathComponent).tag($0) }
-                }.frame(maxWidth: 260)
+                if !workspaces.isEmpty {
+                    Picker("", selection: $workspace) {
+                        ForEach(workspaces, id: \.self) { Text(($0 as NSString).lastPathComponent).tag($0) }
+                    }
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .frame(maxWidth: 160)
+                }
             }
-            Text("ทุกอย่างทำเมื่อกดเองเท่านั้น · ประเมินก่อนเสมอ").font(.caption).foregroundStyle(.secondary)
-            OptimiseRow(model: model, title: "Blob GC", detail: "ลบ blob ที่ไม่มี event หรือไฟล์แนบอ้างถึง",
+            Text("ทำเมื่อกดเองเท่านั้น · ประเมินก่อนเสมอ").font(.system(size: 10)).foregroundStyle(.secondary)
+            OptimiseRow(model: model, title: "Blob GC", detail: "ลบ blob ที่ไม่มีไฟล์อ้างถึง",
                         action: ["action": "blob_gc", "workspace": workspace], engineQueue: true, onDone: reload)
-            OptimiseRow(model: model, title: "VACUUM", detail: "เขียน store.db ใหม่ให้ไม่มีหน้าว่าง (ทำได้เฉพาะตอนไม่มีเทิร์นรัน)",
+            OptimiseRow(model: model, title: "VACUUM", detail: "เขียน store.db ใหม่ (เฉพาะตอนว่าง)",
                         action: ["action": "vacuum", "workspace": workspace], engineQueue: true, onDone: reload)
-            OptimiseRow(model: model, title: "Pack checkpoints", detail: "รวม object ของ shadow repo เป็น pack — ไม่ลบอะไร",
+            OptimiseRow(model: model, title: "Pack checkpoints", detail: "รวม object ของ shadow repo เป็น pack",
                         action: ["action": "pack_checkpoints", "workspace": workspace], engineQueue: true, onDone: reload)
-            OptimiseRow(model: model, title: "ลบ checkpoint เก่า", detail: "เก่ากว่า \(days) วัน · เก็บ review_base และ base ของ session ที่เปิดอยู่",
+            OptimiseRow(model: model, title: "ลบ checkpoint เก่า", detail: "เก่ากว่า \(days) วัน (เก็บ review_base)",
                         action: ["action": "prune_checkpoints", "workspace": workspace, "days": days], engineQueue: true, onDone: reload) {
-                Stepper("\(days) วัน", value: $days, in: 1...365).fixedSize()
+                Stepper("\(days) วัน", value: $days, in: 1...365)
+                    .controlSize(.mini)
+                    .font(.system(size: 10))
+                    .fixedSize()
             }
-            OptimiseRow(model: model, title: "ลบ worktree", detail: "เฉพาะที่ merge แล้ว ทิ้งแล้ว หรือไม่มีเจ้าของ (ที่ยังมีงานค้างเลือกไม่ได้)",
+            OptimiseRow(model: model, title: "ลบ worktree", detail: "เฉพาะที่ merge/ทิ้งแล้ว หรือไม่มีเจ้าของ",
                         action: ["action": "prune_worktrees", "workspace": workspace], engineQueue: true, onDone: reload)
-            OptimiseRow(model: model, title: "Unload โมเดล", detail: "เอาโมเดลออกจาก RAM ของ Ollama (ไฟล์ยังอยู่)",
+            OptimiseRow(model: model, title: "Unload โมเดล", detail: "เอาโมเดลออกจาก RAM ของ Ollama",
                         action: ["action": "unload_model"], onDone: reload)
-            OptimiseRow(model: model, title: "ล้าง cache", detail: "~/.cache/chorus — สร้างใหม่ได้เอง",
+            OptimiseRow(model: model, title: "ล้าง cache", detail: "~/.cache/chorus",
                         action: ["action": "clear_caches"], onDone: reload)
-            OptimiseRow(model: model, title: "ลบโมเดลที่ไม่ใช้", detail: "ไฟล์ใน models ของ Chorus — เลือกเองว่าจะลบตัวไหน",
+            OptimiseRow(model: model, title: "ลบโมเดลที่ไม่ใช้", detail: "เลือกไฟล์โมเดลที่จะลบ",
                         action: ["action": "delete_models"], onDone: reload)
         }
     }
@@ -644,50 +832,66 @@ private struct OptimiseRow<Extra: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.body.weight(.medium))
-                    Text(detail).font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .center, spacing: 6) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(.system(size: 11.5, weight: .medium))
+                    Text(detail).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
                 }
-                Spacer()
+                Spacer(minLength: 4)
                 extra()
                 if let p = preview {
-                    Text("~\(MonFormat.bytes(p.items.isEmpty ? p.bytes : pickedBytes(p)))").monospacedDigit().foregroundStyle(.secondary)
+                    Text("~\(MonFormat.bytes(p.items.isEmpty ? p.bytes : pickedBytes(p)))")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
                 }
-                Button("ประเมิน") { runPreview() }.disabled(busy)
-                Button(preview?.destructive == true ? "ลบ…" : "ทำเลย…") { confirming = true }
-                    .disabled(busy || preview == nil || preview?.allowed == false || (preview?.items.isEmpty == false && picked.isEmpty))
+                if confirming {
+                    Button(preview?.destructive == true ? "ยืนยันลบ" : "ยืนยัน") {
+                        confirming = false
+                        apply()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(preview?.destructive == true ? .red : .accentColor)
+                    .controlSize(.mini)
+
+                    Button("ยกเลิก") {
+                        confirming = false
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                } else {
+                    Button("ประเมิน") { runPreview() }
+                        .controlSize(.mini)
+                        .disabled(busy)
+                    if preview != nil {
+                        Button(preview?.destructive == true ? "ลบ…" : "ทำเลย…") { confirming = true }
+                            .controlSize(.mini)
+                            .disabled(busy || preview?.allowed == false || (preview?.items.isEmpty == false && picked.isEmpty))
+                    }
+                }
             }
             if let p = preview {
-                Text(p.note).font(.caption).foregroundStyle(.secondary)
+                Text(p.note).font(.system(size: 9.5)).foregroundStyle(.secondary)
                 ForEach(p.items) { it in
                     Toggle(isOn: Binding(get: { picked.contains(it.id) },
                                          set: { if $0 { picked.insert(it.id) } else { picked.remove(it.id) } })) {
                         HStack {
-                            Text(it.label).lineLimit(1).truncationMode(.middle)
-                            Text(it.kind).font(.caption2).foregroundStyle(.secondary)
+                            Text(it.label).font(.system(size: 10)).lineLimit(1).truncationMode(.middle)
+                            Text(it.kind).font(.system(size: 9)).foregroundStyle(.secondary)
                             Spacer()
-                            Text(MonFormat.bytes(it.bytes)).monospacedDigit().font(.caption)
+                            Text(MonFormat.bytes(it.bytes)).font(.system(size: 9.5, design: .monospaced))
                         }
                     }
                     .toggleStyle(.checkbox)
+                    .controlSize(.small)
                     .disabled(!it.selectable)
                 }
             }
-            if let result { Text(result).font(.caption).foregroundStyle(.green) }
+            if let result { Text(result).font(.system(size: 10)).foregroundStyle(.green) }
         }
-        .padding(10)
-        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 8))
-        .onChange(of: actionKey) { _, _ in preview = nil; picked = []; result = nil }
-        .alert(isPresented: $confirming) {
-            Alert(
-                title: Text(preview?.destructive == true ? "\(title)? ลบแล้วกู้คืนไม่ได้" : "\(title)?"),
-                message: Text("ประมาณ \(MonFormat.bytes(preview.map { $0.items.isEmpty ? $0.bytes : pickedBytes($0) } ?? 0))"),
-                primaryButton: preview?.destructive == true ? .destructive(Text("ลบ")) { apply() } : .default(Text("ทำเลย")) { apply() },
-                secondaryButton: .cancel(Text("ยกเลิก"))
-            )
-        }
+        .padding(8)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .onChange(of: actionKey) { _, _ in preview = nil; picked = []; result = nil; confirming = false }
     }
 
     private var actionKey: String {
@@ -702,6 +906,7 @@ private struct OptimiseRow<Extra: View>: View {
         guard let engine = model.engine else { return }
         busy = true
         result = nil
+        confirming = false
         MonitorModel.call(engine, ["op": "preview", "action": action], MonPreview.self, onEngineQueue: engineQueue) { r in
             busy = false
             switch r {
@@ -728,78 +933,31 @@ private struct OptimiseRow<Extra: View>: View {
     }
 }
 
-/// Reports whether the hosting window is actually on screen (not hidden,
-/// minimised or fully covered), so polling stops when nobody is looking.
-private struct WindowVisibility: NSViewRepresentable {
-    let onChange: (Bool) -> Void
-
-    func makeNSView(context: Context) -> NSView {
-        let v = Probe()
-        v.onChange = onChange
-        return v
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        (nsView as? Probe)?.onChange = onChange
-    }
-
-    final class Probe: NSView {
-        var onChange: ((Bool) -> Void)?
-        private var tokens: [NSObjectProtocol] = []
-        private var last: Bool?
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            tokens.forEach(NotificationCenter.default.removeObserver)
-            tokens = []
-            guard let w = window else { report(false); return }
-            let names: [Notification.Name] = [NSWindow.didChangeOcclusionStateNotification, NSWindow.didMiniaturizeNotification,
-                                              NSWindow.didDeminiaturizeNotification, NSWindow.willCloseNotification]
-            for n in names {
-                tokens.append(NotificationCenter.default.addObserver(forName: n, object: w, queue: .main) { [weak self] note in
-                    let closing = note.name == NSWindow.willCloseNotification
-                    MainActor.assumeIsolated { self?.evaluate(closing: closing) }
-                })
-            }
-            evaluate(closing: false)
-        }
-
-        private func evaluate(closing: Bool) {
-            guard let w = window, !closing else { report(false); return }
-            report(w.occlusionState.contains(.visible) && !w.isMiniaturized)
-        }
-
-        private func report(_ v: Bool) {
-            guard v != last else { return }
-            last = v
-            onChange?(v)
-        }
-
-        deinit { tokens.forEach(NotificationCenter.default.removeObserver) }
-    }
-}
-
 // ---- sidebar footer label --------------------------------------------------------
 
-/// "Chorus 412 MB" in the sidebar footer; opens the monitor window. Reads
+/// "Chorus 412 MB" in the sidebar footer; toggles the monitor popover. Reads
 /// only the Chorus group (no port sweep), every 5 s while the app is active.
 struct ChorusRAMLabel: View {
     @EnvironmentObject private var engine: Engine
-    @Environment(\.openWindow) private var openWindow
+    @Binding var isPresented: Bool
     @State private var bytes: UInt64?
     private let tick = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        Button { openWindow(id: SystemMonitorView.windowID) } label: {
+        Button { isPresented.toggle() } label: {
             HStack(spacing: 3) {
                 Image(systemName: "memorychip").font(.system(size: 9))
                 Text(bytes.map(MonFormat.bytes) ?? "—").font(.system(size: 10, weight: .medium)).monospacedDigit()
             }
             .foregroundStyle(.secondary)
             .padding(.horizontal, 6).padding(.vertical, 4)
-            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .background(Color.primary.opacity(isPresented ? 0.1 : 0.04), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .buttonStyle(.plain)
+        .popover(isPresented: $isPresented, arrowEdge: .top) {
+            SystemMonitorView()
+                .environmentObject(engine)
+        }
         .help("RAM ที่ Chorus ใช้ · เปิด System Monitor (⌥⌘M)")
         .onAppear(perform: load)
         .onReceive(tick) { _ in if NSApp.isActive { load() } }
@@ -812,6 +970,3 @@ struct ChorusRAMLabel: View {
     }
 }
 
-extension SystemMonitorView {
-    static let windowID = "system-monitor"
-}

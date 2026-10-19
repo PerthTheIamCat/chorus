@@ -41,12 +41,5 @@ struct ChorusApp: App {
             CheckForUpdatesCommand(updater: updater)
             ChorusCommands(center: AppCommandCenter.shared)
         }
-
-        Window("System Monitor", id: SystemMonitorView.windowID) {
-            SystemMonitorView()
-                .environmentObject(engine)
-        }
-        .defaultSize(width: 1000, height: 560)
-        .keyboardShortcut(AppCommand.systemMonitor.shortcut)
     }
 }

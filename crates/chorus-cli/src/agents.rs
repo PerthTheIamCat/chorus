@@ -262,6 +262,30 @@ fn codex_models() -> Vec<ModelChoice> {
     })
 }
 
+/// Antigravity ids in the `base[effort]` shape the picker splits into a
+/// model chip and an effort chip. A cache written by an older bridge holds
+/// `agy models`' own `gemini-4-argon-high`, which showed as 13 separate
+/// models with no effort choice.
+fn agy_ids((models, source): (Vec<ModelChoice>, ModelSource)) -> (Vec<ModelChoice>, ModelSource) {
+    let mut out: Vec<ModelChoice> = Vec::new();
+    for m in models {
+        let id = chorus_acp::agy::canonical_model_id(&m.id);
+        if let Some(seen) = out.iter_mut().find(|o| o.id == id) {
+            seen.is_default |= m.is_default;
+            continue;
+        }
+        out.push(ModelChoice { id, ..m });
+    }
+    if !out.is_empty() && !out.iter().any(|m| m.is_default) {
+        let pick = out
+            .iter()
+            .position(|m| m.id.starts_with("gemini"))
+            .unwrap_or(0);
+        out[pick].is_default = true;
+    }
+    (out, source)
+}
+
 fn antigravity_models() -> Vec<ModelChoice> {
     parse_models_env("CHORUS_ANTIGRAVITY_MODELS").unwrap_or_else(|| {
         vec![
@@ -501,7 +525,7 @@ pub fn auth_status(agent_id: &str) -> AgentInfo {
             "agy login",
             "brew install antigravity หรือติดตั้ง agy CLI",
             antigravity_logged_in() && !crate::limits::auth_failed("antigravity"),
-            models_for("antigravity", "CHORUS_ANTIGRAVITY_MODELS", antigravity_models),
+            agy_ids(models_for("antigravity", "CHORUS_ANTIGRAVITY_MODELS", antigravity_models)),
         )
     } else {
         let dir = std::env::var_os("CODEX_HOME")
@@ -615,6 +639,18 @@ pub fn model_tier(model: &str) -> Option<u8> {
 #[cfg(test)]
 mod tier_tests {
     use super::*;
+
+    #[test]
+    fn stale_agy_cache_ids_split_into_model_and_effort() {
+        let m = |id: &str| ModelChoice { id: id.into(), label: id.into(), is_default: false };
+        let (out, _) = agy_ids((
+            vec![m("gemini-4-argon-medium"), m("gemini-4-argon-high"), m("gemini-4-argon[high]"), m("gpt-oss-120b-medium")],
+            ModelSource::Probed,
+        ));
+        let ids: Vec<&str> = out.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["gemini-4-argon[medium]", "gemini-4-argon[high]", "gpt-oss-120b[medium]"]);
+        assert_eq!(out.iter().filter(|m| m.is_default).count(), 1);
+    }
 
     #[test]
     fn curated_names_and_suffixes() {

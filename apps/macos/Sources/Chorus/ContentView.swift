@@ -106,6 +106,7 @@ struct ContentView: View {
     @State private var reviewModel = ""
     @State private var showSettings = false
     @State private var showProvidersPopover = false
+    @State private var showSystemMonitorPopover = false
     /// A tool's own page shown in place of the thread (nil = the thread).
     @State private var toolPage: String?
     /// Thread follows new output only while the reader is at the bottom.
@@ -171,6 +172,8 @@ struct ContentView: View {
     @State private var editing: ChorusProject?
     @State private var editingIsNew = false
     @State private var creatingIn: UUID?
+    /// "ลบ session ที่ว่าง" waiting for confirmation, with the count shown.
+    @State private var emptyCleanup: EmptyCleanup?
     @State private var pickingFolderFor: UUID?
     @State private var sessionQuery = ""
     @State private var renaming: (folder: String, s: Engine.SessionSummary)?
@@ -858,7 +861,7 @@ struct ContentView: View {
         }
         ToolbarItem(placement: .navigation) {
             HStack(spacing: 6) {
-                Text(engine.sessionID < 0 ? "ยังไม่ได้เปิด session"
+                Text(engine.sessionID < 0 ? (engine.draft != nil ? "session ใหม่" : "ยังไม่ได้เปิด session")
                      : (engine.sessionsByDB[dbPath]?.first { $0.id == engine.sessionID }).map(displayTitle)
                         ?? "session \(engine.sessionID)")
                     .lineLimit(1)
@@ -1325,6 +1328,26 @@ struct ContentView: View {
     }
 
     private var sidebar: some View {
+        sidebarContent
+            .alert(emptyCleanup.map { $0.count == 0 ? "ไม่มี session ที่ว่าง" : "ลบ session ที่ว่าง \($0.count) รายการ?" } ?? "",
+                   isPresented: Binding(get: { emptyCleanup != nil }, set: { if !$0 { emptyCleanup = nil } }),
+                   presenting: emptyCleanup) { c in
+                if c.count > 0 {
+                    Button("ลบ \(c.count) รายการ", role: .destructive) {
+                        engine.deleteEmptySessions(dbs: c.dbs) { n in hint = "ลบ session ที่ว่างแล้ว \(n) รายการ" }
+                    }
+                    Button("ยกเลิก", role: .cancel) {}
+                } else {
+                    Button("ตกลง", role: .cancel) {}
+                }
+            } message: { c in
+                Text(c.count == 0
+                     ? "ทุก session ใน \(c.project) มีข้อความหรือไฟล์แนบอยู่แล้ว"
+                     : "เฉพาะ session ใน \(c.project) ที่ไม่มีข้อความ ไฟล์แนบ หรือ session ย่อยเลย — session ที่เปิดอยู่ไม่ถูกลบ")
+            }
+    }
+
+    private var sidebarContent: some View {
         VStack(spacing: 0) {
             HStack(spacing: 6) {
                 HStack(spacing: 5) {
@@ -1449,7 +1472,7 @@ struct ContentView: View {
 
                 Spacer(minLength: 4)
 
-                ChorusRAMLabel()
+                ChorusRAMLabel(isPresented: $showSystemMonitorPopover)
 
                 Button {
                     settingsSection = .accounts
@@ -1708,7 +1731,8 @@ struct ContentView: View {
         try? FileManager.default.createDirectory(
             atPath: (db as NSString).deletingLastPathComponent,
             withIntermediateDirectories: true)
-        engine.open(db: db, cwd: workspace, title: "session")
+        // A draft, not a row: the session exists once the first message is sent.
+        engine.openDraft(db: db, cwd: workspace)
     }
 
     /// A section header plus its content, spaced and left-aligned — the
@@ -1746,7 +1770,7 @@ struct ContentView: View {
             if let toolPage {
                 ToolPage(toolID: toolPage, workspace: workspace, onClose: { self.toolPage = nil })
                     .id(toolPage)
-            } else if engine.sessionID < 0 {
+            } else if engine.sessionID < 0 && engine.draft == nil {
                 emptyState
             } else if engine.events.isEmpty && !engine.busy {
                 sessionWelcomeView
@@ -2060,7 +2084,7 @@ struct ContentView: View {
                           },
                           focusToken: composerFocus,
                           isBusy: engine.busy,
-                          canSend: engine.sessionID >= 0,
+                          canSend: engine.sessionID >= 0 || engine.draft != nil,
                           onStop: { engine.cancel(); queued.removeAll() },
                           routeNoteEnabled: currentSessionMode == .autoRoute) {
                 ComposerModeMenu(mode: Binding(
@@ -2139,7 +2163,7 @@ struct ContentView: View {
     }
 
     private func ensureSessionReady() -> Bool {
-        if engine.sessionID >= 0 { return true }
+        if engine.sessionID >= 0 || engine.draft != nil { return true }
         if workspace.isEmpty {
             if let p = projects.projects.first(where: { !$0.folders.isEmpty }),
                let f = p.folders.first {
@@ -2194,7 +2218,17 @@ struct ContentView: View {
         case .chooseModel, .nextEffort, .sendReview, .openInEditor:
             break // handled by ModelPicker / DiffReviewerView / CodeViewerView
         case .systemMonitor:
-            break // the menu item opens its own window
+            if !showSidebar || maximizedPanel != .none {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                    maximizedPanel = .none
+                    showSidebar = true
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    showSystemMonitorPopover.toggle()
+                }
+            } else {
+                showSystemMonitorPopover.toggle()
+            }
         }
     }
 
@@ -2216,6 +2250,11 @@ struct ContentView: View {
     }
 
     private func importFiles(_ urls: [URL]) {
+        // Attachments are stored per session, so attaching ends the draft.
+        if engine.sessionID < 0 && engine.draft != nil {
+            engine.commitDraft { applyModel(model); importFiles(urls) }
+            return
+        }
         guard ensureSessionReady() && engine.sessionID >= 0 else {
             hint = workspace.isEmpty ? "สร้างหรือเลือกโปรเจกต์ก่อนแนบไฟล์" : "เปิด session ก่อนแนบไฟล์"
             return
@@ -2238,6 +2277,10 @@ struct ContentView: View {
     }
 
     private func importPastedImage(_ data: Data, mime: String) {
+        if engine.sessionID < 0 && engine.draft != nil {
+            engine.commitDraft { applyModel(model); importPastedImage(data, mime: mime) }
+            return
+        }
         guard ensureSessionReady() && engine.sessionID >= 0 else {
             hint = workspace.isEmpty ? "สร้างหรือเลือกโปรเจกต์ก่อนแนบรูป" : "เปิด session ก่อนแนบรูป"
             return
@@ -2281,7 +2324,8 @@ struct ContentView: View {
     private func submit() {
         let raw = draftBox.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let (target, text) = route(raw)
-        guard engine.sessionID >= 0, !raw.isEmpty || !draftBox.attachments.isEmpty else { return }
+        guard engine.sessionID >= 0 || engine.draft != nil,
+              !raw.isEmpty || !draftBox.attachments.isEmpty else { return }
         guard importingFiles == 0 else { hint = "รอแนบไฟล์ให้เสร็จก่อนส่ง"; return }
         if text.isEmpty && draftBox.attachments.isEmpty {
             hint = "พิมพ์ข้อความต่อจาก \(raw) ด้วย"
@@ -2311,6 +2355,12 @@ struct ContentView: View {
                                explicitAgent: explicitTag)
         draftBox.attachments = []
         draftBox.rejected = []
+        if engine.sessionID < 0 && engine.draft != nil {
+            // First message: the draft becomes a session now. The model was
+            // picked with no engine to tell, so pin it before sending.
+            engine.commitDraft { applyModel(model); routeOrDispatch(send) }
+            return
+        }
         // Busy: line it up behind the running turn (Cursor-style queue)
         // instead of dropping the keystroke on a disabled button.
         if engine.busy || routingInProgress || pendingRoute != nil { queued.append(send); return }
@@ -2840,6 +2890,8 @@ struct ContentView: View {
                 .buttonStyle(InteractiveStyle(cornerRadius: 8, selected: isCurrent, padding: .init(top: 6, leading: 6, bottom: 6, trailing: 8)))
                 .contextMenu {
                     Button("session ใหม่") { newSession(in: p) }
+                    Button("ลบ session ที่ว่าง…") { confirmEmptyCleanup(p) }
+                        .disabled(p.folders.isEmpty)
                     Button("แก้ไขโปรเจกต์…") { editing = p; editingIsNew = false }
                     Menu("เปิดใน Finder") {
                         ForEach(p.folders, id: \.self) { f in
@@ -2866,11 +2918,41 @@ struct ContentView: View {
                         .font(.caption).foregroundStyle(.tertiary)
                         .padding(.leading, 30).padding(.vertical, 4)
                 }
+                if let d = engine.draft, p.folders.contains(where: { draftFolder(d) == $0 }) {
+                    draftRow
+                }
                 ForEach(rows, id: \.key) { r in sessionRow(r.s, folder: r.folder, showFolder: p.folders.count > 1) }
             }
         }
         .padding(.bottom, open ? 4 : 0)
         .onAppear { if expanded.contains(p.id.uuidString) { loadSessions(of: p) } }
+    }
+
+    /// The project folder a draft belongs to (its store is `<folder>/.chorus/store.db`).
+    private func draftFolder(_ d: Engine.DraftInfo) -> String {
+        ((d.db as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
+    }
+
+    /// The unsent new session: not in the store yet, so not in `rows`.
+    private var draftRow: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "square.and.pencil").font(.caption).foregroundStyle(.secondary)
+            Text("session ใหม่").italic().lineLimit(1)
+            Spacer(minLength: 0)
+            Text("ยังไม่ได้ส่ง").font(.caption2).foregroundStyle(.tertiary)
+        }
+        .font(.callout)
+        .padding(.vertical, 5).padding(.leading, 30).padding(.trailing, 8)
+        .background(Color.accentColor.opacity(engine.sessionID < 0 ? 0.12 : 0), in: RoundedRectangle(cornerRadius: 7))
+        .help("session นี้จะถูกสร้างเมื่อส่งข้อความแรก")
+    }
+
+    /// Count first, then ask: nothing is deleted before the user sees how many.
+    private func confirmEmptyCleanup(_ p: ChorusProject) {
+        let dbs = p.folders.map { dbPath(for: $0) }
+        engine.emptySessionCount(dbs: dbs) { n in
+            emptyCleanup = EmptyCleanup(project: p.name, dbs: dbs, count: n)
+        }
     }
 
     private func newSession(in p: ChorusProject, folder: String? = nil) {
@@ -3135,7 +3217,10 @@ struct ContentView: View {
                         guard let u = engine.contextUsed, let w = engine.contextWindow, w > 0 else { return nil }
                         return min(max(Double(u) / Double(w), 0.0), 1.0)
                     }()
-                    let percentText = frac.map { "\(Int($0 * 100))%" } ?? "0%"
+                    // No reading is "ไม่ทราบ", never 0%: a session that has
+                    // talked has used context even if the agent never said how much.
+                    let hasTurns = engine.events.contains { $0.actor != "user" }
+                    let percentText = frac.map { "\(Int($0 * 100))%" } ?? (hasTurns ? "ไม่ทราบ" : "0%")
                     let barColor: Color = {
                         guard let f = frac else { return .accentColor }
                         if f > 0.9 { return .red }
@@ -3171,6 +3256,14 @@ struct ContentView: View {
                             if let u = engine.contextUsed, let w = engine.contextWindow {
                                 Text("\(u.formatted()) / \(w.formatted()) tokens")
                                     .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            } else if let u = engine.contextUsed {
+                                Text("\(u.formatted()) tokens · ไม่ทราบขนาดหน้าต่าง")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            } else if hasTurns {
+                                Text("agent นี้ไม่ได้รายงานจำนวน token")
+                                    .font(.caption)
                                     .foregroundStyle(.secondary)
                             } else {
                                 Text("ยังไม่มีเทิร์น (ขึ้นหลัง agent ตอบ)")
@@ -4841,3 +4934,11 @@ struct SubagentTreeRow: View {
     }
 }
 
+
+/// A pending "ลบ session ที่ว่าง" confirmation.
+struct EmptyCleanup: Identifiable {
+    let project: String
+    let dbs: [String]
+    let count: Int
+    var id: String { project }
+}

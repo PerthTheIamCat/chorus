@@ -32,6 +32,20 @@ ChorusEngine *chorus_engine_open(const char *db_path,
 /* Reattach to an existing session by id. Returns NULL on failure. */
 ChorusEngine *chorus_engine_reopen(const char *db_path, int64_t session_id);
 
+/* New sessions start as drafts: no row until the first message.
+ * chorus_draft_open returns the draft for cwd, reusing an unsent one:
+ * {"ok":true,"draft":{"id":N,"db":"...","cwd":"..."},"reused":bool}
+ * chorus_draft_commit creates the session on first send and returns its
+ * engine (NULL on failure; the draft stays for a retry). */
+char *chorus_draft_open(const char *db_path, const char *cwd);
+ChorusEngine *chorus_draft_commit(uint64_t draft_id, const char *title);
+
+/* Sessions with nothing in them (no event, attachment, fork or child);
+ * keep = the open session or -1, never listed. {"ok":true,"ids":[N,...]}
+ * The delete re-checks in one transaction and returns the ids deleted. */
+char *chorus_empty_sessions(const char *db_path, int64_t keep);
+char *chorus_delete_empty_sessions(const char *db_path, int64_t keep);
+
 /* Free an engine handle. */
 void chorus_engine_free(ChorusEngine *e);
 

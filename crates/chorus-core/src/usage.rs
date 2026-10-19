@@ -96,6 +96,31 @@ pub fn get(conn: &Connection, sess: i64) -> Result<Option<SessionUsage>> {
         .optional()?)
 }
 
+/// What the context meter should start from on reopen: the stored row, or,
+/// when it has no `context_used`, the last agent message's `tok_out` in the
+/// ledger (where every turn has recorded context pressure since before
+/// `session_usage` existed). The window is never guessed: a ledger-only
+/// session comes back with `context_window: None`.
+pub fn last_known(conn: &Connection, sess: i64) -> Result<Option<SessionUsage>> {
+    let stored = get(conn, sess)?;
+    if stored.as_ref().is_some_and(|u| u.context_used.is_some()) {
+        return Ok(stored);
+    }
+    let from_ledger: Option<i64> = conn
+        .query_row(
+            "SELECT tok_out FROM event WHERE sess = ?1 AND kind = ?2 AND tok_out IS NOT NULL \
+             ORDER BY seq DESC LIMIT 1",
+            params![sess, crate::types::EventKind::Msg as i64],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(match (stored, from_ledger) {
+        (Some(u), used) => Some(SessionUsage { context_used: used, ..u }),
+        (None, Some(used)) => Some(SessionUsage { context_used: Some(used), ..Default::default() }),
+        (None, None) => None,
+    })
+}
+
 /// The review baseline: a shadow-repo sha, or `None` when never set.
 pub fn review_base(conn: &Connection, sess: i64) -> Result<Option<String>> {
     Ok(conn

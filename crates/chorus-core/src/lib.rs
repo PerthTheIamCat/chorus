@@ -47,6 +47,7 @@ pub mod roles;
 pub mod router;
 pub mod schema;
 pub mod search;
+pub mod session_cleanup;
 pub mod skills;
 pub mod store;
 pub mod structural_diff;
