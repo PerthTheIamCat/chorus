@@ -174,6 +174,9 @@ fn failure_classification_routes_only_transient_agent_faults() {
         "agent stalled: no output for 240s while waiting for request 4",
         "error sending request for url: connection reset by peer",
         "fetch failed: ETIMEDOUT",
+        // Verbatim, before and after it said "broken pipe" (crashed bridge, 19 Oct 2026):
+        "start claude-opus: agent ปิด stdin ไปแล้ว (process น่าจะตายก่อนหน้านี้)",
+        "start claude-opus: agent ปิด stdin ไปแล้ว — broken pipe (process น่าจะตายก่อนหน้านี้)",
     ] {
         assert_eq!(R::from_failure(m), Some(R::Failover), "{m}");
     }

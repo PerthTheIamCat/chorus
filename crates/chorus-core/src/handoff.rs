@@ -154,6 +154,10 @@ impl HandoffReason {
             // process crash / never started
             "agent closed its output",
             "broken pipe",
+            // `Agent::send` on EPIPE. A bridge that dies before the first
+            // request is written says this, not "exited with" — under load the
+            // relay test lost the race 7 times in 25 and never failed over.
+            "ปิด stdin",
             "unexpected eof",
             "exited with",
             "process exited",

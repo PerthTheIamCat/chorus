@@ -544,7 +544,11 @@ impl Agent {
         match write() {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
-                Err(anyhow!("agent ปิด stdin ไปแล้ว (process น่าจะตายก่อนหน้านี้)"))
+                // Keep "broken pipe" in the text: it is what the relay's
+                // failover classifier keys on (HandoffReason::from_failure).
+                Err(anyhow!(
+                    "agent ปิด stdin ไปแล้ว — broken pipe (process น่าจะตายก่อนหน้านี้)"
+                ))
             }
             Err(e) => Err(e.into()),
         }
