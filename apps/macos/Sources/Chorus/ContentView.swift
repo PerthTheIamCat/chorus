@@ -837,6 +837,13 @@ struct ContentView: View {
 
     @ToolbarContentBuilder
     private var mainToolbar: some ToolbarContent {
+        // ToolbarContentBuilder takes at most 10 items per block; there are 12.
+        navigationToolbar
+        actionToolbar
+    }
+
+    @ToolbarContentBuilder
+    private var navigationToolbar: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
             Button { showSidebar.toggle() } label: {
                 Label("แถบโปรเจกต์", systemImage: "sidebar.left")
@@ -883,6 +890,10 @@ struct ContentView: View {
         if #available(macOS 26, *) {
             ToolbarSpacer(.flexible)
         }
+    }
+
+    @ToolbarContentBuilder
+    private var actionToolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
             // Handing over is one click per agent. Everything the next
             // agent needs is already in the ledger, so asking the user to
