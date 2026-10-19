@@ -13,6 +13,12 @@ on:
 permissions:
   contents: read
 
+# Same as apps/macos/build.sh: the C in the Rust deps (sqlite, zstd, blake3)
+# otherwise targets the runner's macOS and the app link warns
+# "built for newer 'macOS' version (26.5) than being linked (14.0)".
+env:
+  MACOSX_DEPLOYMENT_TARGET: "14.0"
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -21,7 +27,7 @@ jobs:
   rust:
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -38,14 +44,14 @@ jobs:
   macos-app:
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build the FFI library the app links
         run: cargo build -p chorus-ffi --lib
-      - name: Swift build
+      - name: Swift build (warnings are errors — clippy already does this for Rust)
         working-directory: apps/macos
-        run: swift build
+        run: swift build -Xswiftc -warnings-as-errors
       - name: Swift test
         working-directory: apps/macos
         run: swift test

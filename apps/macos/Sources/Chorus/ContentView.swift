@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
+import UserNotifications
 
 private struct SubagentLedgerPayload: Decodable {
     let event: String
@@ -2824,13 +2825,30 @@ struct ContentView: View {
                     let key = "\(sub.id)-\(sub.status)"
                     if !notifiedSubagents.contains(key) {
                         notifiedSubagents.insert(key)
-                        let notification = NSUserNotification()
-                        notification.title = sub.status == "waiting" ? "Chorus: งานย่อยรอคำยืนยัน" : "Chorus: งานย่อยล้มเหลว"
-                        notification.informativeText = "\(sub.role): \(sub.task)"
-                        notification.soundName = NSUserNotificationDefaultSoundName
-                        NSUserNotificationCenter.default.deliver(notification)
+                        postNotification(
+                            id: key,
+                            title: sub.status == "waiting" ? "Chorus: งานย่อยรอคำยืนยัน" : "Chorus: งานย่อยล้มเหลว",
+                            body: "\(sub.role): \(sub.task)")
                     }
                 }
+            }
+        }
+    }
+
+    /// UNUserNotificationCenter raises an exception in a process with no
+    /// bundle identifier (a bare `swift run` binary), so only the .app posts.
+    private func postNotification(id: String, title: String, body: String) {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if let error { NSLog("chorus: notification permission failed: \(error)") }
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.sound = .default
+            center.add(UNNotificationRequest(identifier: id, content: content, trigger: nil)) { error in
+                if let error { NSLog("chorus: notification not delivered: \(error)") }
             }
         }
     }

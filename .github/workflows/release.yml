@@ -13,7 +13,7 @@ jobs:
   release:
     runs-on: macos-26 # macOS 26 SDK needed to compile the shell; see ci.yml
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build, sign and publish
