@@ -93,6 +93,21 @@ pub fn list(agent: &str) -> Vec<String> {
     out
 }
 
+/// Where to look for sessions other tools left on disk: each CLI's default
+/// config dir plus every extra Chorus account of Claude and Codex.
+pub fn session_roots() -> Vec<chorus_core::external_sessions::Root> {
+    use chorus_core::external_sessions::{default_roots, Provider, Root};
+    let mut out = default_roots();
+    for provider in [Provider::Claude, Provider::Codex] {
+        for account in list(provider.agent()) {
+            if let Some(dir) = dir(provider.agent(), Some(&account)) {
+                out.push(Root { provider, dir, account: Some(account) });
+            }
+        }
+    }
+    out
+}
+
 /// Create an account's (empty) config dir. Logging in fills it.
 pub fn add(agent: &str, account: &str) -> anyhow::Result<PathBuf> {
     anyhow::ensure!(valid_name(account), "ชื่อบัญชีใช้ได้แค่ a-z 0-9 - _ (ไม่เกิน 40 ตัว)");

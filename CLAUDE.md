@@ -45,12 +45,13 @@ Swift ทำแค่วาดกับรับ input เพื่อให้�
 ## 3. สถานะตอนนี้ (19 ต.ค. 2026 · ปล่อยแล้วถึง v0.1.4 — ดู `CHANGELOG.md`)
 
 **Phase 0–2 ครบ + macOS shell ครบ + warm tier + UX v2 (workbench / orchestra / sub sessions / live updates) ครบ**
-— บน Linux: เทสต์ผ่าน 371 · ล้ม 6 ตัวที่ต้องมี Seatbelt (ดู 7.22) · clippy 0 warning · build 0 warning · bench invariant ครบ
+— บน Linux: เทสต์ผ่าน 381 · ล้ม 6 ตัวที่ต้องมี Seatbelt (ดู 7.22) · clippy `-D warnings` สะอาด · build 0 warning · bench invariant ครบ
+— CI (`.github/workflows/ci.yml`, macOS) รัน test/clippy/bench/swift ทุก push+PR — **ยังไม่เคยเห็นมันรันจริง** ดูผลรอบแรกก่อนเชื่อ
 (ตัวเลขนี้ verify บน container Linux 19 ต.ค. — ยังไม่ได้รันซ้ำบน macOS · `SCHEMA_VERSION` = 7)
 
 | crate | ทำอะไร |
 |---|---|
-| `chorus-core` | ledger (+ fork-chain `history()`), blob store, memory + approve queue (v2), token counter, render, context assembler, handoff brief, projector, checkpoint (shadow git + `apply_reverse`), compaction (Extractive + **Ollama**) — **รังส์ L1/L2 เก็บลงตาราง `summary` (เพิ่มใน schema v3 · ตอนนี้ `SCHEMA_VERSION` = 6) ไม่ generate ตอน assemble**, **mcp (Streamable-HTTP: `memory_propose` — ทำงานกับ Codex)** |
+| `chorus-core` | ledger (+ fork-chain `history()`), blob store, memory + approve queue (v2), token counter, render, context assembler, handoff brief, projector, checkpoint (shadow git + `apply_reverse`), compaction (Extractive + **Ollama**) — **รังส์ L1/L2 เก็บลงตาราง `summary` (เพิ่มใน schema v3 · ตอนนี้ `SCHEMA_VERSION` = 7) ไม่ generate ตอน assemble**, **mcp (Streamable-HTTP: `memory_propose` — ทำงานกับ Codex)** |
 | `chorus-acp` | ACP client + `acp-probe` + mock (`--fail`) + `CodexAgent` + `bridge_for` (codex/claude/gemini) · strip `CLAUDECODE` |
 | `chorus-cli` | lib+bin · `bench`/`run`(+`--chain`/`--read-only`)/`handoff`/`memory`/`compare` · `Session` engine |
 | `chorus-ffi` | C ABI (`chorus.h`) — engine/run_turn(+interactive callback)/run_relay/compare/handoff/events_since/working_diff/snapshot/restore/reject_hunks/memory_state+review/**compact/uncompacted/task_state** · JSON ล้วน · panic-guarded |
@@ -120,7 +121,10 @@ cargo run -p chorus-cli -- compare "<prompt>" --db /tmp/s.db --session 1 --agent
 cargo run -p chorus-cli -- memory pending --db /tmp/s.db          # approve queue
 cargo run -p chorus-cli -- compact --db /tmp/s.db --session 1 [--limit N]   # เติม warm tier (L1/L2)
 cargo run -p chorus-cli -- demo          # เล่าทั้งเรื่องด้วย agent ปลอม ไม่ต้องมี API key
-cargo run -p chorus-cli -- doctor        # ทำไมเทิร์นถึงรัน/ไม่รัน — agent, login, bridge, env
+cargo run -p chorus-cli -- doctor        # ทำไมเทิร์นถึงรัน/ไม่รัน — agent, login, bridge, env, error ที่ failover ไม่รู้จัก
+cargo run -p chorus-cli -- sessions list                     # session ของ Claude Code / Codex / Gemini CLI ในเครื่อง
+cargo run -p chorus-cli -- sessions search "<คำ>"            # ค้นชื่อ/โฟลเดอร์/เนื้อหา
+cargo run -p chorus-cli -- sessions import codex <ID> --db /tmp/s.db   # นำเข้าเป็น session แล้ว `run --session N` คุยต่อ
 
 # macOS shell
 apps/macos/build.sh                     # cargo build -p chorus-ffi + swift build + bundle + open
@@ -151,6 +155,7 @@ crates/chorus-core/src/
   checkpoint.rs shadow git repo <cwd>/.chorus/ckpt — snapshot/diff_since/restore (shell ออก git)
   compaction.rs Summarizer trait · Extractive (model-free) + Ollama · best() เลือกให้
                 + warm tier: save_rungs/load_session_rungs/uncompacted — L1/L2 เก็บในตาราง `summary`
+  external_sessions.rs  หา + นำเข้า session ของ Claude Code/Codex/Gemini CLI จากดิสก์ (ดู 7.23)
   mcp.rs        Streamable-HTTP MCP server (std::net, ไม่มี dep) — tool memory_propose · ทำงานกับ Codex แล้ว (persistent conn + held-open SSE)
 crates/chorus-cli/src/main.rs           bench + run + handoff + memory + compare subcommands
 crates/chorus-cli/src/session.rs        Session engine — run_turn/run_relay/handoff/compare/assemble_context/task_state/compact/events_since
@@ -447,6 +452,34 @@ turn ที่ policy เป็น read-only (`DenyAll`, `ReadOnly`, orchestrato
 บน Linux จึงล้ม: `orchestra_core` ×4, `orchestra_failover::lead_at_its_limit…`, `session::the_ledger_survives…`
 ไม่ใช่ regression · ฝั่ง Linux มี `restrictive_policies_fail_closed_without_seatbelt` ยืนยันว่าปฏิเสธจริง
 จะ gate ด้วย `cfg_attr(..., ignore)` หรือไม่ ต้องให้เจ้าของโปรเจกต์ตัดสิน · CI ตอนนี้มีแค่ release บน `macos-14`
+
+### 7.23 นำเข้า session จากแอปอื่น — ไฟล์ของเขา format ของเขา (19 ต.ค. 2026)
+
+`chorus sessions` / แท็บ "จากแอปอื่น" ใน ⇧⌘F อ่าน transcript ที่ CLI แต่ละเจ้าเขียนไว้แล้ว
+**copy เข้า ledger** — หลังจากนั้น ledger เป็นเจ้าของ (2.2) ไม่ resume ฝั่ง provider และไม่เขียนกลับ
+
+| เจ้า | ที่อยู่ | รูปแบบ (ยืนยันจาก) |
+|---|---|---|
+| Claude Code | `<CLAUDE_CONFIG_DIR or ~/.claude>/projects/<cwd แปลง>/<id>.jsonl` | `type` user/assistant + `message.content` (docs บอกเองว่า **format ภายใน เปลี่ยนได้ทุกเวอร์ชัน** → ทุกฟิลด์ optional) |
+| Codex | `<CODEX_HOME>/sessions/YYYY/MM/DD/rollout-*.jsonl` **หรือ `.jsonl.zst`** | `{timestamp,type,payload}` บรรทัดแรก `session_meta` (source codex-rs/rollout) |
+| Gemini CLI | `~/.gemini/tmp/<project_hash>/chats/*.jsonl` (+ `.json` เก่า) | metadata แล้ว message `{id,type,content,toolCalls}` + `$rewindTo`/`$set`/`$patch` ที่แก้ของเก่า (source chatRecordingService.ts) |
+
+กับดักที่เจอแล้ว:
+- **นับเทิร์นจากของดิบ ไม่ใช่ที่รวมแล้ว** — รวมข้อความติดกันฝั่งเดียวกันทำให้จำนวนไม่นิ่ง (user ส่งต่ออีกบรรทัด = รวมเข้าอันเดิม = "ไม่มีอะไรใหม่")
+- Codex เขียนทุกข้อความซ้ำใน `event_msg` — อ่านแค่ `response_item` ไม่งั้นได้ทุกอย่างสองรอบ
+- "user" ที่ CLI ยัดเอง (`<environment_context>`, AGENTS.md, `<command-name>`) ไม่ใช่สิ่งที่คนพิมพ์ → `is_wrapper_noise`
+- Gemini ที่ rewind ไปแล้ว ถ้าไม่ replay `$rewindTo` จะได้คำตอบที่ user ทิ้งไปแล้วกลับมา
+
+การนำเข้าซ้ำไม่สร้าง session ใหม่: marker = Handoff event (`source`, `turns`) ท้าย import — **ไม่เพิ่มตาราง**
+ถ้าต้นทางมีข้อความใหม่และฝั่ง Chorus ยังไม่ได้คุยต่อ → ต่อท้าย · ถ้าคุยต่อไปแล้ว → แค่รายงาน (`not_appended`) ไม่สอดแทรก
+marker ต้องอยู่ inline (< 2 KB) เพราะหาด้วย `LIKE` และถูกกรองออกจาก context (`is_import_marker`) — goal ไปทาง task state อยู่แล้ว
+
+### 7.24 harness ที่ป้อนผลให้ตัวเอง — เจอซ้ำใน `chorus-eval` (19 ต.ค. 2026)
+
+Tier 1 ส่วน metrics ตั้ง `passed: true` ทุกงาน · token = raw × 0.45 · duration 12 ms แล้วพิมพ์เป็น
+"Pass@1 100%" — ไม่มี agent รันเลย ส่วนที่เป็น gate จริง (classification/verification/assembly) วัดของจริง
+ตอนนี้ report มี `metrics_simulated: true` และพิมพ์เตือนก่อนตัวเลข · `mlx_runtime` ก็เหมือนกัน
+(`generate_tokens` คืนข้อความตายตัว → `MlxInferenceStats::simulated`) **ห้ามอ้างตัวเลขพวกนี้เป็นผลวัด**
 
 ### 7.3 repo เงาสำหรับ checkpoint
 ต้องยึด `.gitignore` ของผู้ใช้ ไม่งั้น `.chorus/` จะโตกว่าโปรเจกต์จริง

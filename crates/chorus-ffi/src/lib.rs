@@ -2712,6 +2712,70 @@ pub unsafe extern "C" fn chorus_search_sessions_json(
     }
 }
 
+/// Sessions other tools left on this machine, newest first. An empty or
+/// null `query` lists; anything else searches titles, paths and content.
+///
+/// # Safety
+/// `query` must be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_external_sessions_json(query: *const c_char, limit: c_int) -> *mut c_char {
+    let q = borrow(query).unwrap_or("").to_string();
+    let limit = limit.clamp(1, 500) as usize;
+    match catch_unwind(|| {
+        let roots = chorus_cli::accounts::session_roots();
+        chorus_core::external_sessions::search(&roots, &q, limit)
+    }) {
+        Ok(sessions) => out(serde_json::json!({"ok": true, "sessions": sessions}).to_string()),
+        Err(_) => err("panic in external_sessions"),
+    }
+}
+
+/// Import an external session into the ledger at `db_path`.
+///
+/// # Safety
+/// `db_path`, `provider`, `id_or_path` and `cwd` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_external_import_json(
+    db_path: *const c_char,
+    provider: *const c_char,
+    id_or_path: *const c_char,
+    cwd: *const c_char,
+) -> *mut c_char {
+    use chorus_core::external_sessions as ext;
+    let (Some(db_path), Some(provider), Some(id)) = (borrow(db_path), borrow(provider), borrow(id_or_path)) else {
+        return err("db_path, provider and id_or_path must be valid UTF-8");
+    };
+    let Some(provider) = ext::Provider::parse(provider) else {
+        return err(format!("unknown provider {provider:?}"));
+    };
+    let cwd = borrow(cwd).filter(|c| !c.is_empty()).map(PathBuf::from);
+    let result = catch_unwind(AssertUnwindSafe(|| -> Result<ext::ImportReport, String> {
+        let roots = chorus_cli::accounts::session_roots();
+        let s = ext::find(&roots, provider, id).ok_or_else(|| format!("ไม่เจอ session {id} ของ {}", provider.label()))?;
+        let dir = cwd
+            .or_else(|| s.cwd.as_ref().map(PathBuf::from).filter(|p| p.is_dir()))
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .ok_or("no working directory")?;
+        let dir = dir.canonicalize().unwrap_or(dir);
+        let store = chorus_core::Store::open(Path::new(db_path)).map_err(|e| format!("{e:#}"))?;
+        ext::import(store.conn(), &s, &dir.to_string_lossy()).map_err(|e| format!("{e:#}"))
+    }));
+    match result {
+        Ok(Ok(r)) => out(serde_json::json!({
+            "ok": true,
+            "session_id": r.session_id,
+            "events": r.events,
+            "reused": r.reused,
+            "not_appended": r.not_appended,
+        })
+        .to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in external_import"),
+    }
+}
+
 /// Export session to Markdown.
 ///
 /// # Safety
@@ -3385,6 +3449,26 @@ pub unsafe extern "C" fn chorus_highlight(path: *const c_char, text: *const c_ch
 mod tests {
     use super::*;
     use std::ffi::{CStr, CString};
+
+    #[test]
+    fn external_import_rejects_unknown_provider_and_missing_session() {
+        let read = |p: *mut c_char| -> serde_json::Value {
+            let v = serde_json::from_str(unsafe { CStr::from_ptr(p) }.to_str().unwrap()).unwrap();
+            unsafe { chorus_string_free(p) };
+            v
+        };
+        let db = CString::new("/nonexistent/store.db").unwrap();
+        let id = CString::new("no-such-session-id").unwrap();
+        let bad = CString::new("cursor").unwrap();
+        let v = read(unsafe { chorus_external_import_json(db.as_ptr(), bad.as_ptr(), id.as_ptr(), std::ptr::null()) });
+        assert_eq!(v["ok"], false);
+        assert!(v["error"].as_str().unwrap().contains("unknown provider"), "{v}");
+        let codex = CString::new("codex").unwrap();
+        let v = read(unsafe { chorus_external_import_json(db.as_ptr(), codex.as_ptr(), id.as_ptr(), std::ptr::null()) });
+        assert_eq!(v["ok"], false, "{v}");
+        let v = read(unsafe { chorus_external_import_json(std::ptr::null(), codex.as_ptr(), id.as_ptr(), std::ptr::null()) });
+        assert_eq!(v["ok"], false, "null db_path is an error, not a crash");
+    }
 
     #[test]
     fn permission_ask_names_the_agent_running_the_turn() {

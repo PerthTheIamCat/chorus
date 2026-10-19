@@ -61,9 +61,10 @@ fn main() -> Result<()> {
         "doctor" => doctor_cmd(),
         "demo" => demo_cmd(&args[1..]),
         "agent" => agent_cmd(&args[1..]),
+        "sessions" => sessions_cmd(&args[1..]),
         other => {
             eprintln!(
-                "unknown command {other:?}; try: chorus agent | demo | doctor | bench | run | handoff | memory | compare | compact | context | skills | mcp | models"
+                "unknown command {other:?}; try: chorus agent | demo | doctor | bench | run | handoff | memory | compare | compact | context | skills | mcp | models | sessions"
             );
             std::process::exit(2);
         }
@@ -598,6 +599,17 @@ fn bench() -> Result<()> {
         db_size as f64 / event_rows as f64
     );
     println!("\n  {}", db_path.display());
+    // Most of this is fixed page overhead — every table and index takes at
+    // least one 4 KB page whether or not it has rows — so it grows with the
+    // schema more than with the events. 172 KB at schema v7; the ceiling
+    // leaves room for a few more tables and catches a payload that stopped
+    // going through the blob store (8 copies of the 49 KB file ≈ +390 KB).
+    const DB_CEILING_BYTES: u64 = 256 * 1024;
+    assert!(
+        db_size <= DB_CEILING_BYTES,
+        "store.db is {db_size} bytes for {event_rows} events (ceiling {DB_CEILING_BYTES}) — \
+         check that large bodies still go to the deduplicated blob store"
+    );
 
     bench_real_path(&dir)?;
     Ok(())
@@ -962,6 +974,84 @@ fn compact_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `chorus sessions [list|search QUERY|import PROVIDER ID|PATH --db PATH [--cwd DIR]]`
+///
+/// Conversations Claude Code, Codex and Gemini CLI left on this machine.
+/// `import` copies one into the ledger as a Chorus session, so the next
+/// `chorus run --session N` continues it with whichever agent you pick.
+fn sessions_cmd(args: &[String]) -> Result<()> {
+    use chorus_core::external_sessions as ext;
+    let sub = args.first().map(String::as_str).unwrap_or("list");
+    let mut db: Option<PathBuf> = None;
+    let mut cwd: Option<PathBuf> = None;
+    let mut limit: usize = 30;
+    let mut positional: Vec<&str> = Vec::new();
+    let mut it = args.iter().skip(1);
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--db" => db = it.next().map(PathBuf::from),
+            "--cwd" => cwd = it.next().map(PathBuf::from),
+            "--limit" => limit = it.next().and_then(|v| v.parse().ok()).unwrap_or(30),
+            other if other.starts_with("--") => anyhow::bail!("unknown flag {other:?}"),
+            other => positional.push(other),
+        }
+    }
+    let roots = chorus_cli::accounts::session_roots();
+    let print = |found: &[ext::ExternalSession]| {
+        if found.is_empty() {
+            println!("ไม่เจอ session");
+        }
+        for s in found {
+            let who = s.account.as_ref().map(|a| format!("{}@{a}", s.provider.agent())).unwrap_or_else(|| s.provider.agent().into());
+            println!("{who:<14} {:<38} {}", s.id, s.title);
+            if let Some(cwd) = &s.cwd {
+                println!("{:<14} {cwd}", "");
+            }
+            if let Some(snip) = &s.snippet {
+                println!("{:<14} “{snip}”", "");
+            }
+        }
+    };
+    match sub {
+        "list" => print(&ext::discover(&roots, limit)),
+        "search" => {
+            let q = positional.join(" ");
+            anyhow::ensure!(!q.trim().is_empty(), "usage: chorus sessions search QUERY");
+            print(&ext::search(&roots, &q, limit));
+        }
+        "import" => {
+            let [provider, id] = positional[..] else {
+                anyhow::bail!("usage: chorus sessions import <claude|codex|gemini> <ID|PATH> --db PATH [--cwd DIR]");
+            };
+            let provider = ext::Provider::parse(provider).with_context(|| format!("unknown provider {provider:?}"))?;
+            let db = db.context("--db is required")?;
+            let s = ext::find(&roots, provider, id).with_context(|| format!("ไม่เจอ session {id} ของ {}", provider.label()))?;
+            // The session's own directory when it still exists, so the next
+            // turn runs (and checkpoints) where the conversation happened.
+            let dir = cwd
+                .or_else(|| s.cwd.as_ref().map(PathBuf::from).filter(|p| p.is_dir()))
+                .or_else(|| std::env::current_dir().ok())
+                .context("no working directory")?;
+            let dir = dir.canonicalize().unwrap_or(dir);
+            let store = Store::open(&db)?;
+            let r = ext::import(store.conn(), &s, &dir.to_string_lossy())?;
+            match (r.reused, r.events, r.not_appended) {
+                (false, n, _) => println!("นำเข้าแล้ว → session {} ({n} events)", r.session_id),
+                (true, 0, 0) => println!("นำเข้าไว้แล้ว → session {} (ไม่มีอะไรใหม่)", r.session_id),
+                (true, 0, k) => println!(
+                    "session {} คุยต่อใน Chorus ไปแล้ว — {k} ข้อความใหม่จาก {} ไม่ได้ต่อท้ายเพื่อไม่ให้ปนกัน",
+                    r.session_id,
+                    provider.label()
+                ),
+                (true, n, _) => println!("อัปเดต session {} (+{n} events)", r.session_id),
+            }
+            println!("\nคุยต่อ:  chorus run \"<prompt>\" --session {} --db {}", r.session_id, db.display());
+        }
+        other => anyhow::bail!("unknown sessions command {other:?}; try: list | search QUERY | import PROVIDER ID"),
+    }
+    Ok(())
+}
+
 // ---- demo -----------------------------------------------------------------
 
 fn rule(title: &str) {
@@ -1309,6 +1399,16 @@ fn doctor_cmd() -> Result<()> {
              (ต้องมีอย่างน้อย 2 เจ้าถึงจะได้ failover กับ compare)"
         ),
         n => println!("  รันได้ {n} เจ้า — สลับตอนชนลิมิตและเทียบหลายตัวได้ครบ"),
+    }
+
+    let unmatched = chorus_cli::limits::unclassified_failures(5);
+    if !unmatched.is_empty() {
+        println!("\n\u{2501}\u{2501} error ที่ failover ไม่รู้จัก (ล่าสุด {}) \u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}", unmatched.len());
+        for f in &unmatched {
+            println!("  {:<10} {}", f.agent, f.message);
+        }
+        println!("  ถ้าข้อไหนเป็นข้อความลิมิต ให้เพิ่มคำนั้นใน HandoffReason::from_failure");
+        println!("  และเก็บข้อความเต็มแบบคำต่อคำไว้ใน tests/handoff.rs (CLAUDE.md 7.6b, 7.17)");
     }
 
     println!("\n\u{2501}\u{2501} env ที่ override ได้ \u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}");

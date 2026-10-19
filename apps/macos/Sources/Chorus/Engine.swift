@@ -2550,6 +2550,72 @@ final class Engine: ObservableObject {
         }
     }
 
+    // MARK: - Sessions from other tools (Claude Code, Codex, Gemini CLI)
+
+    struct ExternalSession: Codable, Identifiable {
+        let provider: String
+        let account: String?
+        let id: String
+        let path: String
+        let cwd: String?
+        let title: String
+        let updated_ms: Int64
+        let size_bytes: UInt64
+        let snippet: String?
+        /// The agent name the import records replies under (`claude@work`).
+        var agentName: String { account.map { "\(provider)@\($0)" } ?? provider }
+    }
+
+    private struct ExternalSessionsResponse: Codable {
+        let ok: Bool
+        let sessions: [ExternalSession]?
+        let error: String?
+    }
+
+    struct ExternalImportResult: Codable {
+        let ok: Bool
+        let session_id: Int64?
+        let events: Int?
+        let reused: Bool?
+        let not_appended: Int?
+        let error: String?
+    }
+
+    /// Scans the other tools' transcript folders — file IO only, so it runs
+    /// off the engine queue and never waits behind a turn.
+    func externalSessions(query: String, limit: Int32 = 100, completion: @escaping ([ExternalSession], String?) -> Void) {
+        ioQueue.async {
+            let json = query.withCString { cQ in
+                Self.string(from: chorus_external_sessions_json(cQ, limit))
+            }
+            let res = Self.decode(ExternalSessionsResponse.self, json)
+            DispatchQueue.main.async {
+                completion(res?.sessions ?? [], res?.ok == true ? nil : (res?.error ?? "อ่านรายการ session ไม่สำเร็จ"))
+            }
+        }
+    }
+
+    /// Imports one into the ledger, then opens it so the next message
+    /// continues that conversation here.
+    func importExternal(_ s: ExternalSession, db: String, completion: @escaping (ExternalImportResult?) -> Void) {
+        queue.async {
+            let json = db.withCString { cDb in
+                s.provider.withCString { cP in
+                    s.path.withCString { cId in
+                        Self.string(from: chorus_external_import_json(cDb, cP, cId, nil))
+                    }
+                }
+            }
+            let res = Self.decode(ExternalImportResult.self, json)
+            DispatchQueue.main.async {
+                if res?.ok == true, let id = res?.session_id {
+                    self.reopen(db: db, sessionID: id)
+                }
+                completion(res)
+            }
+        }
+    }
+
     // MARK: - Super App & Autonomous Harness Engine Extensions
 
     struct RepoMapResponse: Codable {

@@ -13,20 +13,22 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
-/// Search across all historical sessions in the SQLite store
+/// Search across all historical sessions in the SQLite store. A plain
+/// substring match: the query is user text, and FTS5 `MATCH` syntax would turn
+/// a stray `"` or `-` into an error instead of a search.
 pub fn search_sessions(conn: &Connection, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
     let clean_query = query.trim();
     if clean_query.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Try FTS5 or LIKE fallback
     let mut stmt = conn.prepare(
-        "SELECT e.session_id, COALESCE(s.title, 'Untitled Session'), e.seq, e.actor, SUBSTR(e.body, 1, 200)
+        "SELECT e.sess, COALESCE(s.title, 'Untitled Session'), e.seq, COALESCE(a.name, ''), SUBSTR(e.body, 1, 200)
          FROM event e
-         LEFT JOIN session s ON s.id = e.session_id
+         LEFT JOIN session s ON s.id = e.sess
+         LEFT JOIN actor a ON a.id = e.actor
          WHERE e.body LIKE ?1
-         ORDER BY e.session_id DESC, e.seq DESC
+         ORDER BY e.sess DESC, e.seq DESC
          LIMIT ?2",
     )?;
 
@@ -36,7 +38,7 @@ pub fn search_sessions(conn: &Connection, query: &str, limit: usize) -> Result<V
             session_id: row.get(0)?,
             session_title: row.get(1)?,
             seq: row.get(2)?,
-            actor: format!("{}", row.get::<_, i64>(3)?),
+            actor: row.get(3)?,
             snippet: row.get(4)?,
         })
     })?;
@@ -50,24 +52,13 @@ pub fn search_sessions(conn: &Connection, query: &str, limit: usize) -> Result<V
 
 /// Export entire conversation session to formatted Markdown
 pub fn export_session_markdown(conn: &Connection, session_id: i64) -> Result<String> {
-    let mut stmt = conn.prepare(
-        "SELECT seq, actor, body, kind FROM event WHERE session_id = ?1 ORDER BY seq ASC",
-    )?;
-
     let mut md = format!("# Chorus Session {}\n\n", session_id);
-    let rows = stmt.query_map(params![session_id], |row| {
-        let seq: i64 = row.get(0)?;
-        let actor: i64 = row.get(1)?;
-        let body: String = row.get(2)?;
-        let kind: i64 = row.get(3)?;
-        Ok((seq, actor, body, kind))
-    })?;
-
-    for r in rows {
-        let (seq, actor, body, _kind) = r?;
-        let actor_name = if actor == 1 { "User" } else { "Agent" };
-        md.push_str(&format!("### Turn {} ({})\n\n{}\n\n---\n\n", seq, actor_name, body));
+    for e in crate::ledger::history(conn, session_id, usize::MAX)? {
+        // Large bodies live in the blob store; `ledger::body` resolves both.
+        let body = crate::ledger::body(conn, &e)?;
+        let actor_name = crate::actor::name(conn, e.actor).unwrap_or_else(|_| "agent".into());
+        md.push_str(&format!("### Turn {} ({})\n\n{}\n\n---\n\n", e.seq, actor_name, body));
     }
-
     Ok(md)
 }
+

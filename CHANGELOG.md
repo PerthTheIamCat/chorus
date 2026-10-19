@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- **นำเข้า session จากแอปอื่น:** ค้นหาบทสนทนาของ Claude Code, Codex และ Gemini CLI ที่อยู่ในเครื่อง (⇧⌘F › จากแอปอื่น หรือ `chorus sessions`) แล้วนำเข้ามาคุยต่อใน Chorus กับ agent ตัวไหนก็ได้ นำเข้าซ้ำไม่สร้าง session ใหม่ ข้อความที่เพิ่มทีหลังจะต่อท้ายให้
+- **`chorus doctor` แสดง error ที่ failover ไม่รู้จัก** เพื่อให้เห็นข้อความลิมิตรูปแบบใหม่ก่อนที่ failover จะเงียบหาย
+- **CI บน macOS:** test, clippy, bench และ swift build/test ทุก push และ pull request
+
+### Fixed
+
+- **ค้นหาข้าม session ไม่เจออะไรเลย:** ช่องค้นหา (⇧⌘F) และ export Markdown อ่านคอลัมน์ที่ไม่มีอยู่จริง จึง error ทุกครั้ง และข้อความยาวที่เก็บแยกไว้ export ไม่ได้
+- **bridge ของ Antigravity อาจค้าง** ถ้าอ่าน output ของ agent พังกลางทาง
+
 ## [0.1.4] - 2026-10-17
 
 ### Added

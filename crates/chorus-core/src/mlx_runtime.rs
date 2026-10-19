@@ -1,8 +1,10 @@
-//! In-Process Apple Silicon MLX & Metal Acceleration Engine (Pillar 3).
+//! **Placeholder** for in-process Apple Silicon MLX inference (Pillar 3).
 //!
-//! Provides zero-copy Unified Memory Architecture (UMA) local model inference,
-//! Apple Neural Engine (ANE) acceleration, and Metal Performance Shaders (MPS)
-//! execution bounds without external daemon dependencies.
+//! Only the hardware probe and the memory-ceiling check are real. There is no
+//! MLX binding: `generate_tokens` returns a canned string and modelled
+//! timings, and `MlxInferenceStats::simulated` says so. Nothing in the app
+//! calls this yet — wire a real backend before showing any of its numbers to
+//! a user (CLAUDE.md 7.11: a mock that reports success hides the gap).
 
 use crate::{ChorusError, Result};
 use serde::{Deserialize, Serialize};
@@ -43,6 +45,8 @@ pub struct MlxInferenceStats {
     pub token_generation_ms: f64,
     pub tokens_per_second: f64,
     pub peak_memory_mb: f64,
+    /// True while no MLX backend exists: every field above is modelled.
+    pub simulated: bool,
 }
 
 pub struct AppleSiliconMlxEngine {
@@ -152,7 +156,8 @@ impl AppleSiliconMlxEngine {
         Ok(())
     }
 
-    /// Run local generation with simulated Metal/MPS stream.
+    /// Simulated generation: a canned reply and modelled timings, flagged
+    /// `simulated`. Not inference.
     pub fn generate_tokens(
         &self,
         prompt: &str,
@@ -183,6 +188,7 @@ impl AppleSiliconMlxEngine {
             token_generation_ms,
             tokens_per_second: (tps * 10.0).round() / 10.0,
             peak_memory_mb: 2450.0,
+            simulated: true,
         };
 
         let response = format!("/* [MLX Metal Engine] Generated output for: {} */", prompt.trim());
@@ -236,5 +242,6 @@ mod tests {
         assert!(text.contains("Chorus"));
         assert_eq!(stats.completion_tokens, 20);
         assert!(stats.tokens_per_second > 0.0);
+        assert!(stats.simulated, "a stub must not pass for a measurement");
     }
 }

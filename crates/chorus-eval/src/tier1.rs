@@ -29,7 +29,14 @@ pub struct Tier1Report {
     pub classification_gate_passed: bool,
     pub verification_trigger_passed: bool,
     pub prompt_assembly_passed: bool,
+    /// Modelled per-task numbers, not measurements: no agent runs in Tier 1,
+    /// so `passed`, token counts and durations come from fixed formulas.
+    /// Read `metrics_simulated` before quoting any of them.
     pub metrics: EvalMetrics,
+    /// Always true for Tier 1. A harness that feeds itself its own results can
+    /// only measure itself (CLAUDE.md §3) — this flag keeps the report honest
+    /// until a tier runs real turns.
+    pub metrics_simulated: bool,
     pub total_duration_ms: u128,
     pub failure_reasons: Vec<String>,
 }
@@ -249,6 +256,8 @@ pub fn run_tier1() -> Result<Tier1Report> {
         });
     }
 
+    println!("\n  ⚠  ตัวเลขชุดต่อไปนี้เป็นค่าจำลอง ไม่มี agent รันจริงใน Tier 1");
+    println!("     (passed = true ทุกงาน · token = สูตรคงที่) — ห้ามอ้างเป็น Pass@1 ที่วัดได้");
     collector.print_summary();
 
     let metrics = collector.compute();
@@ -278,6 +287,7 @@ pub fn run_tier1() -> Result<Tier1Report> {
         verification_trigger_passed,
         prompt_assembly_passed,
         metrics,
+        metrics_simulated: true,
         total_duration_ms: total_duration,
         failure_reasons: failures,
     })
@@ -298,6 +308,7 @@ mod tests {
         assert!(report.prompt_assembly_passed);
         assert!(report.total_duration_ms < 30_000);
         assert_eq!(report.metrics.passed_tasks, 60);
+        assert!(report.metrics_simulated, "Tier 1 metrics are modelled, and must say so");
         assert_eq!(report.metrics.total_tool_loops, 0);
     }
 }

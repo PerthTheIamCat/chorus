@@ -30,3 +30,7 @@ Release gates and priorities agreed for Chorus Desktop:
 4. **Acceptable Residual Scope**:
    - Standalone iOS companion app is scoped as a post-release companion client; backend pairing and protocol are verified.
    - Direct cloud API-key chat (without CLI agents or local Ollama) remains in the future roadmap.
+
+## Correction (2026-10-19)
+
+Re-measured on a clean Linux container: 381 Rust tests pass and 6 fail because they need Seatbelt (macOS-only, by design — CLAUDE.md 7.22), not "220+ pass cleanly". The SwiftPM build was not re-verified. Tier 1's Pass@1/token metrics were modelled, not measured (CLAUDE.md 7.24). `.github/workflows/ci.yml` now runs these checks on macOS for every push and PR.

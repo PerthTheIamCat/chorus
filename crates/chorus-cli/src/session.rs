@@ -1383,6 +1383,8 @@ impl Session {
                 }
                 if crate::limits::is_auth_failure(&msg) {
                     crate::limits::record_auth_failure(&first.name);
+                } else if HandoffReason::from_failure(&msg).is_none() {
+                    crate::limits::record_unclassified_failure(&first.name, &msg);
                 }
                 match HandoffReason::from_failure(&msg) {
                     None => Err(e).with_context(|| first.name.clone()),
@@ -1691,6 +1693,7 @@ impl Session {
         let bodies: Vec<(Event, String)> = bodies
             .into_iter()
             .filter(|(e, body)| e.kind != EventKind::ToolResult || !is_bare_success(body))
+            .filter(|(e, body)| !chorus_core::external_sessions::is_import_marker(e.kind, body))
             .collect();
 
         let n = bodies.len();

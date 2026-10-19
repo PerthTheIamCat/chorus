@@ -1,0 +1,49 @@
+name: ci
+
+# Every push and pull request: the checks a contributor runs locally
+# (CLAUDE.md §4), on macOS because the Seatbelt sandbox, and the tests that
+# need it to refuse or allow a read-only turn, only exist there.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (all binaries — tests spawn acp-probe, see CLAUDE.md 7.8)
+        run: cargo build --workspace --all-targets
+      - name: Test
+        run: cargo test --workspace --no-fail-fast
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Bench invariants
+        run: cargo run -p chorus-cli --bin chorus -- bench
+
+  macos-app:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the FFI library the app links
+        run: cargo build -p chorus-ffi --lib
+      - name: Swift build
+        working-directory: apps/macos
+        run: swift build
+      - name: Swift test
+        working-directory: apps/macos
+        run: swift test

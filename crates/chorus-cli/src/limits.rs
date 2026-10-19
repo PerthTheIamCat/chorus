@@ -175,6 +175,74 @@ pub fn clear_auth_failure(agent: &str) {
     }
 }
 
+/// Lines kept in the unclassified-failure log, newest last.
+const UNCLASSIFIED_KEEP: usize = 50;
+/// Characters kept per message: enough to write a classifier key from, short
+/// enough that a pasted payload in an error does not end up on disk whole.
+const UNCLASSIFIED_MAX_CHARS: usize = 400;
+
+/// A failed turn the failover classifier did not recognise.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct UnclassifiedFailure {
+    pub at_ms: i64,
+    pub agent: String,
+    pub message: String,
+}
+
+fn unclassified_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".chorus/unclassified-failures.jsonl"))
+}
+
+/// Remember a failure `HandoffReason::from_failure` returned `None` for.
+///
+/// Failover is the headline feature and it has broken silently twice because
+/// a provider phrased its limit in words no key matched (CLAUDE.md 7.6b,
+/// 7.17). Every unmatched message lands here so `chorus doctor` can show it
+/// — the next new limit wording is then one look away instead of a mystery.
+pub fn record_unclassified_failure(agent: &str, msg: &str) {
+    if let Some(p) = unclassified_path() {
+        append_unclassified(&p, agent, msg, now_ms());
+    }
+}
+
+fn append_unclassified(path: &Path, agent: &str, msg: &str, at_ms: i64) {
+    let message: String = msg.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(UNCLASSIFIED_MAX_CHARS).collect();
+    let entry = UnclassifiedFailure { at_ms, agent: agent.to_string(), message };
+    let mut lines: Vec<String> = std::fs::read_to_string(path)
+        .map(|s| s.lines().map(str::to_string).collect())
+        .unwrap_or_default();
+    // The same failure repeating every turn is one finding, not fifty.
+    let duplicate = lines
+        .last()
+        .and_then(|l| serde_json::from_str::<UnclassifiedFailure>(l).ok())
+        .is_some_and(|last| last.agent == entry.agent && last.message == entry.message);
+    if duplicate {
+        return;
+    }
+    let Ok(line) = serde_json::to_string(&entry) else { return };
+    lines.push(line);
+    let start = lines.len().saturating_sub(UNCLASSIFIED_KEEP);
+    if let Some(d) = path.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let _ = std::fs::write(path, lines[start..].join("\n") + "\n");
+}
+
+/// The newest `n` unclassified failures, newest first.
+pub fn unclassified_failures(n: usize) -> Vec<UnclassifiedFailure> {
+    unclassified_path().map(|p| read_unclassified(&p, n)).unwrap_or_default()
+}
+
+fn read_unclassified(path: &Path, n: usize) -> Vec<UnclassifiedFailure> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .rev()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .take(n)
+        .collect()
+}
+
 /// Does this failure text say the login itself was rejected?
 pub fn is_auth_failure(msg: &str) -> bool {
     let m = msg.to_lowercase();
@@ -793,5 +861,32 @@ mod auth_tests {
         if let Some(h) = old_home {
             std::env::set_var("HOME", h);
         }
+    }
+}
+
+#[cfg(test)]
+mod unclassified_tests {
+    use super::*;
+
+    #[test]
+    fn unmatched_failures_are_kept_clipped_deduped_and_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("u.jsonl");
+        let long = format!("Internal error: something new {}", "x".repeat(1000));
+        append_unclassified(&p, "claude", &long, 1);
+        append_unclassified(&p, "claude", &long, 2); // same again: one finding
+        append_unclassified(&p, "codex", "stream closed\n  unexpectedly", 3);
+
+        let got = read_unclassified(&p, 10);
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[0].agent.as_str(), got[0].message.as_str()), ("codex", "stream closed unexpectedly"));
+        assert_eq!(got[1].message.chars().count(), UNCLASSIFIED_MAX_CHARS);
+
+        for i in 0..(UNCLASSIFIED_KEEP + 10) {
+            append_unclassified(&p, "codex", &format!("error {i}"), i as i64);
+        }
+        let all = read_unclassified(&p, usize::MAX);
+        assert_eq!(all.len(), UNCLASSIFIED_KEEP);
+        assert_eq!(all[0].message, format!("error {}", UNCLASSIFIED_KEEP + 9));
     }
 }

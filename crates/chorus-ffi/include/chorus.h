@@ -393,6 +393,16 @@ char *chorus_router_clear_learned_json(const char *db_path);
 char *chorus_search_sessions_json(const char *db_path, const char *query);
 char *chorus_export_session_md(const char *db_path, int64_t session_id);
 
+/* Sessions other tools (Claude Code, Codex, Gemini CLI) left on this machine.
+   `query` empty/NULL lists the newest. JSON: {"ok":true,"sessions":[{provider,
+   account,id,path,cwd,title,updated_ms,size_bytes,snippet?}]} */
+char *chorus_external_sessions_json(const char *query, int limit);
+/* Import one into the ledger at `db_path` (or bring an earlier import up to
+   date). `cwd` may be NULL: the session's own directory, else the home dir.
+   JSON: {"ok":true,"session_id":N,"events":N,"reused":bool,"not_appended":N} */
+char *chorus_external_import_json(const char *db_path, const char *provider,
+                                  const char *id_or_path, const char *cwd);
+
 /* Agent roles and AI role synthesis */
 char *chorus_list_roles(const char *cwd);
 char *chorus_save_role(const char *cwd, const char *role_json);
