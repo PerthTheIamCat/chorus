@@ -59,8 +59,8 @@ fn restrictive_policies_fail_closed_without_seatbelt() {
 }
 
 /// Plan mode is the read-only policy, not a polite request: a plan turn
-/// against an agent that writes anyway leaves nothing behind (macOS: Seatbelt
-/// + rollback), and the ledger holds what the user typed — the plan-mode
+/// against an agent that writes anyway leaves nothing behind (Seatbelt and
+/// rollback), and the ledger holds what the user typed — the plan-mode
 /// instructions ride with the prompt only.
 #[cfg(target_os = "macos")]
 #[test]
