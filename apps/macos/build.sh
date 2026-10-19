@@ -25,6 +25,13 @@ BUNDLE_ID="dev.chorus.app"
 FEED_URL="https://github.com/PerthTheIamCat/chorus/releases/latest/download/appcast.xml"
 SPARKLE_PUBLIC_KEY="E5axgieMsKgEtIIFf18pp0kcfcR0U3MLahF4QqB0ejc="
 
+# The C in the Rust deps (sqlite, zstd, blake3) is compiled by `cc`, which
+# targets the build machine's macOS unless told otherwise — on macOS 27 that
+# gave "object file was built for newer 'macOS' version (27.0) than being
+# linked (14.0)": a binary that claims 14.0 support but may not load there.
+# Match LSMinimumSystemVersion below.
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+
 echo "── cargo build ($MODE) ──"
 if [ "$MODE" = "release" ]; then
     (cd ../.. && cargo build --release -p chorus-ffi --lib && cargo build --release -p chorus-acp --bin antigravity-acp -p chorus-daemon --bin chorusd)
