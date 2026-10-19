@@ -243,6 +243,36 @@ pub struct Brief {
     pub handoff: HandoffMeta,
 }
 
+/// The hot form of a stored handoff event: one line for the conversation
+/// tier, or `None` when `stored` is not a brief.
+///
+/// The JSON stays on disk because `task_state` reads pending and constraints
+/// back from it; the model gets those through the task state, the touched
+/// files through the workspace, and never the diff — a snapshot that is stale
+/// after the next edit. Sending the stored brief instead cost 8,250 tokens
+/// per later turn for a 300-line diff (bench `handoff in later turns`).
+pub fn context_line(stored: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(stored).ok()?;
+    let h = v.get("handoff")?;
+    let from = h["from"].as_str().unwrap_or("?");
+    // An import marker (`external_sessions::import`): the conversation above
+    // came from another tool, which is worth one line to the next agent.
+    if let Some(source) = v["source"].as_str() {
+        let tool = source
+            .split(':')
+            .next()
+            .and_then(crate::external_sessions::Provider::parse)
+            .map(|p| p.label())
+            .unwrap_or(from);
+        return Some(format!("(conversation above imported from {tool})"));
+    }
+    let to = h["to"].as_str().unwrap_or("?");
+    let why = serde_json::from_value::<HandoffReason>(h["reason"].clone())
+        .map(HandoffReason::as_phrase)
+        .unwrap_or("handoff");
+    Some(format!("handoff: {from} → {to} ({why})"))
+}
+
 impl Brief {
     /// Build a brief from ledger-derived inputs. The one piece of real work
     /// is [`files_touched`]: everything else is a move.

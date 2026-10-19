@@ -45,7 +45,7 @@ Swift ทำแค่วาดกับรับ input เพื่อให้�
 ## 3. สถานะตอนนี้ (19 ต.ค. 2026 · ปล่อยแล้วถึง v0.1.4 — ดู `CHANGELOG.md`)
 
 **Phase 0–2 ครบ + macOS shell ครบ + warm tier + UX v2 (workbench / orchestra / sub sessions / live updates) ครบ**
-— บน Linux: เทสต์ผ่าน 381 · ล้ม 6 ตัวที่ต้องมี Seatbelt (ดู 7.22) · clippy `-D warnings` สะอาด · build 0 warning · bench invariant ครบ
+— บน Linux: เทสต์ผ่าน 382 · ล้ม 6 ตัวที่ต้องมี Seatbelt (ดู 7.22) · clippy `-D warnings` สะอาด · build 0 warning · bench invariant ครบ
 — CI (`.github/workflows/ci.yml`, macOS) รัน test/clippy/bench/swift ทุก push+PR — **ยังไม่เคยเห็นมันรันจริง** ดูผลรอบแรกก่อนเชื่อ
 (ตัวเลขนี้ verify บน container Linux 19 ต.ค. — ยังไม่ได้รันซ้ำบน macOS · `SCHEMA_VERSION` = 7)
 
@@ -472,7 +472,7 @@ turn ที่ policy เป็น read-only (`DenyAll`, `ReadOnly`, orchestrato
 
 การนำเข้าซ้ำไม่สร้าง session ใหม่: marker = Handoff event (`source`, `turns`) ท้าย import — **ไม่เพิ่มตาราง**
 ถ้าต้นทางมีข้อความใหม่และฝั่ง Chorus ยังไม่ได้คุยต่อ → ต่อท้าย · ถ้าคุยต่อไปแล้ว → แค่รายงาน (`not_appended`) ไม่สอดแทรก
-marker ต้องอยู่ inline (< 2 KB) เพราะหาด้วย `LIKE` และถูกกรองออกจาก context (`is_import_marker`) — goal ไปทาง task state อยู่แล้ว
+marker ต้องอยู่ inline (< 2 KB) เพราะหาด้วย `LIKE` · ใน context เหลือบรรทัดเดียว `(conversation above imported from Codex)` (ดู 7.25)
 
 ### 7.24 harness ที่ป้อนผลให้ตัวเอง — เจอซ้ำใน `chorus-eval` (19 ต.ค. 2026)
 
@@ -480,6 +480,16 @@ Tier 1 ส่วน metrics ตั้ง `passed: true` ทุกงาน · to
 "Pass@1 100%" — ไม่มี agent รันเลย ส่วนที่เป็น gate จริง (classification/verification/assembly) วัดของจริง
 ตอนนี้ report มี `metrics_simulated: true` และพิมพ์เตือนก่อนตัวเลข · `mlx_runtime` ก็เหมือนกัน
 (`generate_tokens` คืนข้อความตายตัว → `MlxInferenceStats::simulated`) **ห้ามอ้างตัวเลขพวกนี้เป็นผลวัด**
+
+### 7.25 handoff เก็บเป็น brief เต็ม แต่ส่งเข้าโมเดลบรรทัดเดียว (วัด 19 ต.ค. 2026)
+
+`assemble_context` เคยส่ง JSON ของ brief (รวม `diff`) เข้า conversation tier ทุกเทิร์นหลัง handoff —
+**8,250 token ต่อเทิร์น** สำหรับ diff 300 บรรทัด ทั้งที่ทุกอย่างในนั้นถึงโมเดลทางอื่นอยู่แล้ว
+(goal/pending/constraints → task state · ไฟล์ → shadow repo) และ diff เป็นภาพเก่าตั้งแต่ edit ถัดไป
+ตอนนี้ `handoff::context_line()` ให้ `handoff: claude → codex (quota exhausted)` ทุก rung = **10 token**
+JSON บนดิสก์ไม่แตะ (`task_state` ต้องอ่าน) · brief เต็มยังส่งครั้งเดียวตอน Verify (`render_markdown`)
+bench `handoff in later turns' context` กันไว้: เพดาน 30 token + ห้ามมี `` ```diff `` / `"constraints"` ใน context
++ pending/constraints ต้องยังอยู่ (นับแยกเป็นของ task state)
 
 ### 7.3 repo เงาสำหรับ checkpoint
 ต้องยึด `.gitignore` ของผู้ใช้ ไม่งั้น `.chorus/` จะโตกว่าโปรเจกต์จริง

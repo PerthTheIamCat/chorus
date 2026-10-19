@@ -612,6 +612,83 @@ fn bench() -> Result<()> {
     );
 
     bench_real_path(&dir)?;
+    bench_handoff_in_context(&dir)?;
+    Ok(())
+}
+
+/// What one handoff costs in every later turn's context.
+///
+/// The brief is stored as JSON (cold) because `task_state` reads pending and
+/// constraints back from it. Everything the next agent needs from it already
+/// reaches the model elsewhere — goal/pending/constraints through the task
+/// state, files through the workspace — and its diff is a snapshot that goes
+/// stale on the next edit. So in context (hot) a handoff is one line. Two
+/// identical sessions, one with a handoff carrying a realistic diff, measured
+/// through the real `assemble_context`: the difference is what it costs.
+fn bench_handoff_in_context(dir: &Path) -> Result<()> {
+    use chorus_core::handoff::{Brief, HandoffMeta};
+    const HANDOFF_MAX_TOKENS: i64 = 30;
+
+    let build = |name: &str, with_handoff: bool| -> Result<(String, String)> {
+        let db_path = dir.join(format!("{name}.db"));
+        let _ = std::fs::remove_file(&db_path);
+        let cwd = dir.join(format!("{name}-ws"));
+        std::fs::create_dir_all(&cwd)?;
+        let s = Session::create(&db_path, &cwd, "bench handoff")?;
+        let sess = s.session_id();
+        {
+            let store = Store::open(&db_path)?;
+            let c = store.conn();
+            let user = actor::intern(c, "user", "human")?;
+            let claude = actor::intern(c, "claude", "anthropic")?;
+            let codex = actor::intern(c, "codex", "openai")?;
+            ledger::append(c, &NewEvent::new(sess, EventKind::Msg, user, "ทำหน้า order list ให้ต่ำกว่า 200ms"))?;
+            for i in 0..5 {
+                ledger::append(c, &NewEvent::new(sess, EventKind::Msg, claude, format!("เทิร์น {i}: ไล่ดู OrderRepo.findAll")))?;
+            }
+            if with_handoff {
+                let diff: String = (0..300)
+                    .map(|i| format!("-  const row{i} = await db.query('select * from orders where id = $1', [id]);\n+  const row{i} = rows[{i}];\n"))
+                    .collect();
+                let brief = Brief {
+                    goal: "ทำหน้า order list ให้ต่ำกว่า 200ms".into(),
+                    done: vec!["ใช้ eager loading ไม่ใช่ N+1".into()],
+                    pending: vec!["รัน test ชุด order".into()],
+                    constraints: vec!["ห้ามแตะ schema เพิ่ม".into()],
+                    files: vec!["src/order/repo.ts".into()],
+                    diff,
+                    handoff: HandoffMeta { from: "claude".into(), to: "codex".into(), reason: HandoffReason::QuotaExhausted, at: 0 },
+                };
+                // Stored exactly as `Session::handoff` stores it.
+                ledger::append(c, &NewEvent::new(sess, EventKind::Handoff, codex, brief.to_json()))?;
+            }
+            for i in 0..3 {
+                ledger::append(c, &NewEvent::new(sess, EventKind::Msg, codex, format!("ต่อจาก claude {i}")))?;
+            }
+        }
+        let s = Session::open(&db_path, sess)?;
+        Ok((s.assemble_context(200_000)?, s.task_state()?.render()))
+    };
+
+    let counter = HeuristicCounter;
+    let (without, ts_without) = build("handoff-none", false)?;
+    let (with, ts_with) = build("handoff-one", true)?;
+    // The brief's pending/constraints *should* arrive — through the task
+    // state. Count that separately so the ceiling measures only the line.
+    let carried = counter.count(&ts_with).saturating_sub(counter.count(&ts_without));
+    let cost = counter.count(&with).saturating_sub(counter.count(&without)).saturating_sub(carried);
+    println!("\n── handoff in later turns' context ───────────────────");
+    println!("  one handoff costs     {cost} token per turn (ceiling {HANDOFF_MAX_TOKENS})");
+    println!("  pending/constraints   {carried} token, via task state");
+    assert!(
+        !with.contains("```diff") && !with.contains("\"constraints\"") && !with.contains("\"diff\""),
+        "the stored brief JSON (and its stale diff) leaked into the hot context"
+    );
+    assert!(
+        with.contains("รัน test ชุด order") && with.contains("ห้ามแตะ schema เพิ่ม"),
+        "pending/constraints from the brief must still reach the model, via the task state"
+    );
+    assert!(cost <= HANDOFF_MAX_TOKENS, "a handoff costs {cost} tokens in every later turn");
     Ok(())
 }
 

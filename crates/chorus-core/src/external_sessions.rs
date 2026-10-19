@@ -793,15 +793,6 @@ fn marker_body(s: &ExternalSession, goal: &str, turns: usize) -> Result<String> 
     }
 }
 
-/// True for the brief [`import`] leaves behind. It is bookkeeping (source
-/// path, turn count) whose only model-relevant field, the goal, already
-/// reaches the model through the task state — so context assembly skips it.
-pub fn is_import_marker(kind: EventKind, body: &str) -> bool {
-    kind == EventKind::Handoff
-        && body.contains("\"source\":")
-        && serde_json::from_str::<Value>(body).is_ok_and(|v| v["source"].is_string() && v["turns"].is_u64())
-}
-
 fn append_turns(c: &Connection, sess: i64, user: i64, agent: i64, turns: &[ExternalTurn]) -> Result<usize> {
     for t in turns {
         let (kind, who) = match t.role {

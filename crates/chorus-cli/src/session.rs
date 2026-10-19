@@ -1693,7 +1693,6 @@ impl Session {
         let bodies: Vec<(Event, String)> = bodies
             .into_iter()
             .filter(|(e, body)| e.kind != EventKind::ToolResult || !is_bare_success(body))
-            .filter(|(e, body)| !chorus_core::external_sessions::is_import_marker(e.kind, body))
             .collect();
 
         let n = bodies.len();
@@ -1701,6 +1700,19 @@ impl Session {
             .iter()
             .enumerate()
             .map(|(i, (e, body))| {
+                // Storage ≠ context (rule 2.1): a handoff is stored as the full
+                // brief but costs one line here, on every rung.
+                if e.kind == EventKind::Handoff {
+                    if let Some(line) = chorus_core::handoff::context_line(body) {
+                        return TurnItem {
+                            text_l1: Some(line.clone()),
+                            text_l2: Some(line.clone()),
+                            text_l0: line,
+                            age: n - 1 - i,
+                            key: None,
+                        };
+                    }
+                }
                 let who = actor::name(c, e.actor).unwrap_or_else(|_| "?".into());
                 let r = match rungs.get(&e.seq) {
                     Some(r) => r.clone(),

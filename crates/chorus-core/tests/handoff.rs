@@ -250,3 +250,26 @@ fn the_real_claude_auth_failures_fail_over() {
     assert_eq!(HandoffReason::from_failure(revoked), Some(HandoffReason::Failover));
     assert_eq!(HandoffReason::from_failure(required), Some(HandoffReason::Failover));
 }
+
+#[test]
+fn a_stored_brief_is_one_line_in_context() {
+    use chorus_core::handoff::{context_line, Brief, HandoffMeta, HandoffReason};
+    let brief = Brief {
+        goal: "g".into(),
+        done: vec![],
+        pending: vec!["p".into()],
+        constraints: vec!["c".into()],
+        files: vec!["a.rs".into()],
+        diff: "-old\n+new\n".repeat(500),
+        handoff: HandoffMeta { from: "claude".into(), to: "codex".into(), reason: HandoffReason::QuotaExhausted, at: 7 },
+    };
+    assert_eq!(context_line(&brief.to_json()).as_deref(), Some("handoff: claude → codex (quota exhausted)"));
+
+    // The marker an import leaves (external_sessions::import).
+    let marker = r#"{"goal":"x","handoff":{"from":"codex@work","to":"chorus","reason":"manual","at":0},"source":"codex:019a","turns":4}"#;
+    assert_eq!(context_line(marker).as_deref(), Some("(conversation above imported from Codex)"));
+
+    // Anything else is left for the caller to render as-is.
+    assert_eq!(context_line("plain text handoff note"), None);
+    assert_eq!(context_line(r#"{"goal":"no handoff key"}"#), None);
+}
