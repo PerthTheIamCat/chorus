@@ -803,7 +803,7 @@ struct ContentView: View {
         bodyModals
     }
 
-    private var bodyLayout: some View {
+    private var bodyFrame: some View {
         GeometryReader { proxy in
             Group {
                 if maximizedPanel != .none {
@@ -833,150 +833,157 @@ struct ContentView: View {
         .animation(.spring(response: 0.34, dampingFraction: 0.85), value: selectedFile != nil)
         .animation(.spring(response: 0.28, dampingFraction: 0.85), value: rightTab)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: maximizedPanel)
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Button { showSidebar.toggle() } label: {
-                    Label("แถบโปรเจกต์", systemImage: "sidebar.left")
-                }
-                .help("เปิด/ปิดแถบโปรเจกต์ (⌃⌘S)")
-            }
-            ToolbarItem(placement: .navigation) {
-                Button { showExplorer.toggle() } label: {
-                    Label("ไฟล์", systemImage: "folder")
-                }
-                .help("เปิด/ปิดแถบไฟล์ (⌘B)")
-            }
-            ToolbarItem(placement: .navigation) {
-                HStack(spacing: 6) {
-                    Text(engine.sessionID < 0 ? "ยังไม่ได้เปิด session"
-                         : (engine.sessionsByDB[dbPath]?.first { $0.id == engine.sessionID }).map(displayTitle)
-                            ?? "session \(engine.sessionID)")
-                        .lineLimit(1)
-                        .font(.headline)
+    }
 
-                    if engine.sessionID >= 0 {
-                        let isRenaming = engine.renamingSessionIDs.contains(engine.sessionID)
-                        if isRenaming {
-                            ProgressView()
-                                .controlSize(.mini)
-                                .help("กำลังตั้งชื่อ session ด้วย AI…")
-                        } else {
-                            Button {
-                                if let s = engine.sessionsByDB[dbPath]?.first(where: { $0.id == engine.sessionID }) {
-                                    engine.renameSessionWithAI(db: dbPath, id: s.id, sampleText: displayTitle(s))
-                                }
-                            } label: {
-                                Image(systemName: "sparkles")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.accentColor)
-                            }
-                            .buttonStyle(.plain)
-                            .help("ให้ AI ตั้งชื่อ session")
-                        }
-                    }
-                }
+    @ToolbarContentBuilder
+    private var mainToolbar: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            Button { showSidebar.toggle() } label: {
+                Label("แถบโปรเจกต์", systemImage: "sidebar.left")
             }
-            // Push everything after this to the window's trailing edge.
-            if #available(macOS 26, *) {
-                ToolbarSpacer(.flexible)
+            .help("เปิด/ปิดแถบโปรเจกต์ (⌃⌘S)")
+        }
+        ToolbarItem(placement: .navigation) {
+            Button { showExplorer.toggle() } label: {
+                Label("ไฟล์", systemImage: "folder")
             }
-            ToolbarItemGroup(placement: .primaryAction) {
-                // Handing over is one click per agent. Everything the next
-                // agent needs is already in the ledger, so asking the user to
-                // fill in a form would be asking them to retype what we know.
+            .help("เปิด/ปิดแถบไฟล์ (⌘B)")
+        }
+        ToolbarItem(placement: .navigation) {
+            HStack(spacing: 6) {
+                Text(engine.sessionID < 0 ? "ยังไม่ได้เปิด session"
+                     : (engine.sessionsByDB[dbPath]?.first { $0.id == engine.sessionID }).map(displayTitle)
+                        ?? "session \(engine.sessionID)")
+                    .lineLimit(1)
+                    .font(.headline)
+
                 if engine.sessionID >= 0 {
-                    ForEach(engine.agents.filter { $0.ready && $0.id != currentAgentID }) { a in
+                    let isRenaming = engine.renamingSessionIDs.contains(engine.sessionID)
+                    if isRenaming {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .help("กำลังตั้งชื่อ session ด้วย AI…")
+                    } else {
                         Button {
-                            engine.handoffAuto(to: a.id, level: max(permission.rawValue, 0))
-                        } label: {
-                            HStack(spacing: 5) {
-                                Image(systemName: "arrowshape.turn.up.right.fill")
-                                    .font(.caption2)
-                                    .foregroundStyle(Color.accentColor)
-                                ProviderIcon(provider: a.id, size: 13)
-                                Text("ส่งต่อ \(a.label)")
-                                    .font(.caption.weight(.medium))
+                            if let s = engine.sessionsByDB[dbPath]?.first(where: { $0.id == engine.sessionID }) {
+                                engine.renameSessionWithAI(db: dbPath, id: s.id, sampleText: displayTitle(s))
                             }
+                        } label: {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 11))
+                                .foregroundColor(.accentColor)
                         }
-                        .disabled(engine.busy)
-                        .help("ส่งงานต่อให้ \(a.label) พร้อมเป้าหมาย สิ่งที่ทำไปแล้ว และ diff (ไม่ต้องพิมพ์อะไร)")
+                        .buttonStyle(.plain)
+                        .help("ให้ AI ตั้งชื่อ session")
                     }
                 }
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button { showSearchSheet = true } label: {
-                    Label("ค้นหา", systemImage: "magnifyingglass")
-                }
-                .help("ค้นหาบทสนทนาข้าม session (⇧⌘F)")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
-                        maximizedPanel = (maximizedPanel == .thread) ? .none : .thread
-                    }
-                } label: {
-                    Label(maximizedPanel == .thread ? "ออกจากโหมดโฟกัส" : "โหมดโฟกัส",
-                          systemImage: maximizedPanel == .thread ? "arrow.down.right.and.arrow.up.left" : "viewfinder")
-                }
-                .help(maximizedPanel == .thread ? "ออกจากโหมดโฟกัส (⇧⌘M)" : "ขยายบทสนทนาเต็มจอ / โหมดโฟกัส (⇧⌘M)")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                if powerManager.shouldThrottleConcurrency {
-                    HStack(spacing: 4) {
-                        Image(systemName: "flame.fill")
-                            .font(.system(size: 11))
-                            .foregroundColor(.orange)
-                        Text(powerManager.thermalStateName)
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(Color.orange.opacity(0.12), in: Capsule())
-                    .help("Apple Silicon Thermal Governor: ระบบควบคุมความร้อนกำลังปรับการทำงานให้เหมาะสม")
-                }
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    settingsSection = .orchestration
-                    showSettings = true
-                } label: {
-                    Label("Orchestra & Roles", systemImage: "point.3.connected.trianglepath.dotted")
-                }
-                .help("เปิดการตั้งค่า Orchestra และ Role Library (⌘⌥O)")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
-                        centerStageMode = (centerStageMode == .livePreview) ? .thread : .livePreview
-                    }
-                } label: {
-                    Label(centerStageMode == .livePreview ? "กลับสู่บทสนทนา" : "Live Preview",
-                          systemImage: centerStageMode == .livePreview ? "globe.badge.chevron.backward" : "globe")
-                        .foregroundStyle(centerStageMode == .livePreview ? Color.accentColor : Color.primary)
-                }
-                .help(centerStageMode == .livePreview ? "กลับสู่บทสนทนา (⌘⌥P)" : "เปิด Web Live Preview (⌘⌥P)")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
-                        showTerminalDrawer.toggle()
-                    }
-                } label: {
-                    Label(showTerminalDrawer ? "ปิดเทอร์มินัล" : "เทอร์มินัล",
-                          systemImage: showTerminalDrawer ? "terminal.fill" : "terminal")
-                        .foregroundStyle(showTerminalDrawer ? Color.accentColor : Color.primary)
-                }
-                .help("เปิด/ปิดเทอร์มินัลในตัว (⌃`)")
-            }
-            // Declared last so it sits at the far right, over the panel it opens.
-            ToolbarItem(placement: .primaryAction) {
-                Button { showInspector.toggle() } label: {
-                    Label("แผงข้อมูล", systemImage: "sidebar.right")
-                }
-                .help("เปิด/ปิดแผงคอนเท็กซ์ ที่แก้ไป ความจำ (⌘⌥I)")
             }
         }
+        // Push everything after this to the window's trailing edge.
+        if #available(macOS 26, *) {
+            ToolbarSpacer(.flexible)
+        }
+        ToolbarItemGroup(placement: .primaryAction) {
+            // Handing over is one click per agent. Everything the next
+            // agent needs is already in the ledger, so asking the user to
+            // fill in a form would be asking them to retype what we know.
+            if engine.sessionID >= 0 {
+                ForEach(engine.agents.filter { $0.ready && $0.id != currentAgentID }) { a in
+                    Button {
+                        engine.handoffAuto(to: a.id, level: max(permission.rawValue, 0))
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrowshape.turn.up.right.fill")
+                                .font(.caption2)
+                                .foregroundStyle(Color.accentColor)
+                            ProviderIcon(provider: a.id, size: 13)
+                            Text("ส่งต่อ \(a.label)")
+                                .font(.caption.weight(.medium))
+                        }
+                    }
+                    .disabled(engine.busy)
+                    .help("ส่งงานต่อให้ \(a.label) พร้อมเป้าหมาย สิ่งที่ทำไปแล้ว และ diff (ไม่ต้องพิมพ์อะไร)")
+                }
+            }
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button { showSearchSheet = true } label: {
+                Label("ค้นหา", systemImage: "magnifyingglass")
+            }
+            .help("ค้นหาบทสนทนาข้าม session (⇧⌘F)")
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                    maximizedPanel = (maximizedPanel == .thread) ? .none : .thread
+                }
+            } label: {
+                Label(maximizedPanel == .thread ? "ออกจากโหมดโฟกัส" : "โหมดโฟกัส",
+                      systemImage: maximizedPanel == .thread ? "arrow.down.right.and.arrow.up.left" : "viewfinder")
+            }
+            .help(maximizedPanel == .thread ? "ออกจากโหมดโฟกัส (⇧⌘M)" : "ขยายบทสนทนาเต็มจอ / โหมดโฟกัส (⇧⌘M)")
+        }
+        ToolbarItem(placement: .primaryAction) {
+            if powerManager.shouldThrottleConcurrency {
+                HStack(spacing: 4) {
+                    Image(systemName: "flame.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(.orange)
+                    Text(powerManager.thermalStateName)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(Color.orange.opacity(0.12), in: Capsule())
+                .help("Apple Silicon Thermal Governor: ระบบควบคุมความร้อนกำลังปรับการทำงานให้เหมาะสม")
+            }
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                settingsSection = .orchestration
+                showSettings = true
+            } label: {
+                Label("Orchestra & Roles", systemImage: "point.3.connected.trianglepath.dotted")
+            }
+            .help("เปิดการตั้งค่า Orchestra และ Role Library (⌘⌥O)")
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                    centerStageMode = (centerStageMode == .livePreview) ? .thread : .livePreview
+                }
+            } label: {
+                Label(centerStageMode == .livePreview ? "กลับสู่บทสนทนา" : "Live Preview",
+                      systemImage: centerStageMode == .livePreview ? "globe.badge.chevron.backward" : "globe")
+                    .foregroundStyle(centerStageMode == .livePreview ? Color.accentColor : Color.primary)
+            }
+            .help(centerStageMode == .livePreview ? "กลับสู่บทสนทนา (⌘⌥P)" : "เปิด Web Live Preview (⌘⌥P)")
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                    showTerminalDrawer.toggle()
+                }
+            } label: {
+                Label(showTerminalDrawer ? "ปิดเทอร์มินัล" : "เทอร์มินัล",
+                      systemImage: showTerminalDrawer ? "terminal.fill" : "terminal")
+                    .foregroundStyle(showTerminalDrawer ? Color.accentColor : Color.primary)
+            }
+            .help("เปิด/ปิดเทอร์มินัลในตัว (⌃`)")
+        }
+        // Declared last so it sits at the far right, over the panel it opens.
+        ToolbarItem(placement: .primaryAction) {
+            Button { showInspector.toggle() } label: {
+                Label("แผงข้อมูล", systemImage: "sidebar.right")
+            }
+            .help("เปิด/ปิดแผงคอนเท็กซ์ ที่แก้ไป ความจำ (⌘⌥I)")
+        }
+    }
+
+    private var bodyLayout: some View {
+        bodyFrame
+        .toolbar { mainToolbar }
         .onAppear {
             engine.loadProjectTrust(ws: workspace)
             migrateRouterModelPreference()
