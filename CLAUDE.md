@@ -196,6 +196,7 @@ evals/handoff/                          สไปก์ที่ 2 (README + เ
 | fallback ตอนยังไม่ compact | `Extractive` เสมอ ไม่ใช่ `best()` | `best()` อาจไปเรียก Ollama ซึ่งพา network เข้ามาบน critical path |
 | task state | derive จาก ledger (goal = ข้อความแรกของ user, pending/constraints = handoff brief ล่าสุด, done = Decision + L2 ที่เก็บไว้) | ไม่ต้องเพิ่ม state ใหม่ และไม่มีวันว่างบน session ที่พูดอะไรไปแล้ว |
 | MCP body | เพดาน 64 KB → 413 · `Origin` ใด ๆ → 403 · read timeout 30 นาที | `vec![0u8; content_length]` ตาม header = OOM จาก header บรรทัดเดียว · Origin guard คือกัน DNS-rebinding ตามที่ MCP spec แนะนำ |
+| plan mode | เทิร์นปกติ + `Policy::ReadOnly` + `PLAN_MODE_GUIDANCE` ต่อท้าย prompt (ไม่ลง ledger) · อนุมัติ = ส่ง `PLAN_APPROVED_PROMPT` ด้วยสิทธิ์ปกติของ user | ใช้ sandbox ที่มีอยู่บังคับ ไม่ใช่คำขอร้อง · ข้อความอนุมัติอยู่ใน ledger เพื่อให้ agent ถัดไปรู้ว่าแผนผ่านแล้ว |
 | bridge ของแต่ละเจ้า | override ได้ด้วย env (`CHORUS_CLAUDE_BRIDGE` ฯลฯ) | package ถูก rename มาแล้วครั้งหนึ่ง ไม่ควรต้อง rebuild เพื่อตามชื่อ |
 
 ---

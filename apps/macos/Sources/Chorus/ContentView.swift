@@ -68,6 +68,9 @@ struct ContentView: View {
     @StateObject private var draftBox = DraftBox()
     @State private var agent = "codex"
     @State private var permission = PermissionLevel.ask
+    /// Plan mode: the next messages get a read-only plan first; the agent
+    /// only changes anything after "ทำตามแผน".
+    @AppStorage("chorus.planFirst") private var planFirst = false
     @State private var model = ""
     @AppStorage("chorus.autoRoute") private var autoRoute = true
     @State private var sessionModes: [Int64: SessionMode] = [:]
@@ -2075,6 +2078,9 @@ struct ContentView: View {
                     .transition(.opacity)
             }
             if let hint { Text(hint).font(.caption).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading) }
+            if let planAgents = engine.pendingPlanAgents, !engine.busy {
+                planApprovalBar(agents: planAgents)
+            }
             ComposerField(box: draftBox, suggestions: suggest, onSubmit: submit,
                           onImportURLs: importFiles,
                           onPasteImage: { data, mime in importPastedImage(data, mime: mime) },
@@ -2113,6 +2119,19 @@ struct ContentView: View {
                     selected: "\(permission.rawValue)"
                 ) { v in if let p = PermissionLevel(rawValue: Int32(v) ?? 0) { permission = p } }
                 .help("\(permission.label) — \(permission.hint)")
+                if currentSessionMode != .orchestra {
+                    Button { planFirst.toggle() } label: {
+                        CompactLabel(text: "วางแผนก่อน", spacing: 3) {
+                            Image(systemName: planFirst ? "list.bullet.clipboard.fill" : "list.bullet.clipboard")
+                        }
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(planFirst ? Color.accentColor : .secondary)
+                    }
+                    .buttonStyle(InteractiveStyle(cornerRadius: 7, padding: .init(top: 4, leading: 8, bottom: 4, trailing: 8)))
+                    .help(planFirst
+                          ? "วางแผนก่อน: เปิดอยู่ — agent อ่านอย่างเดียวแล้วตอบเป็นแผน ยังไม่แก้อะไรจนกว่าจะกด ทำตามแผน"
+                          : "วางแผนก่อน: ให้ agent ตอบเป็นแผน (อ่านอย่างเดียว) ก่อนลงมือ")
+                }
             } trailing: {
                 if currentSessionMode == .orchestra {
                     let orchLabel = configuredOrchestrator.isEmpty ? "Claude Opus 5.5" : ModelID(configuredOrchestrator).base
@@ -2537,7 +2556,10 @@ struct ContentView: View {
         }
         // After the send: starting a turn clears the banner.
         defer { if let notice { engine.lastError = notice } }
-        if permission == .ask {
+        if planFirst {
+            // Read-only whatever `permission` says; enforced in Rust.
+            engine.sendPlan(text, agents: names.joined(separator: ","), attachments: attachments)
+        } else if permission == .ask {
             engine.sendInteractive(text, agent: names.first ?? agentID, attachments: attachments)
         } else {
             // Always the relay path, even for one agent: a chain of one
@@ -2545,6 +2567,41 @@ struct ContentView: View {
             // to know the word "relay" to get failover.
             engine.sendRelay(text, agents: names.joined(separator: ","), level: permission.rawValue,
                              attachments: attachments)
+        }
+    }
+
+    /// Shown under a finished plan: approve it with the composer's own
+    /// permission, or just type to change it (any message clears the bar).
+    private func planApprovalBar(agents: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "list.bullet.clipboard").foregroundStyle(Color.accentColor)
+            Text("แผนพร้อมแล้ว — กดทำตามแผน หรือพิมพ์บอกว่าจะแก้ตรงไหน")
+                .font(.caption)
+                .lineLimit(2)
+            Spacer()
+            Button("ทำตามแผน") { approvePlan(agents: agents) }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .help("ส่งให้ agent ลงมือตามแผน ด้วยสิทธิ์ \(permission.label)")
+            Button { engine.pendingPlanAgents = nil } label: { Image(systemName: "xmark") }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("ไม่ทำตามแผนนี้")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func approvePlan(agents: String) {
+        let text = engine.planApprovedPrompt
+        guard !text.isEmpty else { return }
+        engine.pendingPlanAgents = nil
+        if permission == .ask {
+            let first = agents.split(separator: ",").first.map(String.init) ?? agents
+            engine.sendInteractive(text, agent: first)
+        } else {
+            engine.sendRelay(text, agents: agents, level: permission.rawValue)
         }
     }
 
@@ -2602,6 +2659,8 @@ struct ContentView: View {
         out.append(.init(title: "/snapshot", detail: "บันทึกจุดย้อนกลับตอนนี้", icon: "camera") { engine.snapshot() })
         out.append(.init(title: "/ask", detail: "ถามก่อนเขียนไฟล์", icon: "hand.raised") { permission = .ask })
         out.append(.init(title: "/auto", detail: "ให้ทำเลยไม่ต้องถาม", icon: "bolt.fill") { permission = .allowAll })
+        out.append(.init(title: "/plan", detail: planFirst ? "ปิดวางแผนก่อน" : "วางแผนก่อนลงมือ (อ่านอย่างเดียว)",
+                         icon: "list.bullet.clipboard") { planFirst.toggle() })
         out.append(.init(title: "/settings", detail: "ตั้งค่าและ skills", icon: "gearshape") { showSettings = true })
         // Skills go in as text: Claude loads them by name, the others are told
         // where they live by the projected AGENTS.md index.

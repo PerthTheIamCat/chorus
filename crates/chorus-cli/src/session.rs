@@ -715,7 +715,25 @@ pub struct Session {
     /// Symbol map of the workspace, rebuilt only when its source files change.
     /// Behind a Mutex because `assemble_context` takes `&self`.
     repo_map: std::sync::Mutex<chorus_core::repo_map::RepoMapCache>,
+    /// Set while a plan turn runs (`run_plan_with_attachments`): the prompt
+    /// carries `PLAN_MODE_GUIDANCE`, the ledger keeps only what the user typed.
+    plan_turn: bool,
 }
+
+/// Rides with the prompt of a plan turn, never stored (rule 2.1). The turn
+/// itself runs under `Policy::ReadOnly`, so this is the explanation, not the
+/// enforcement: Seatbelt blocks writes and `revert_if_touched` rolls back any
+/// that got through.
+const PLAN_MODE_GUIDANCE: &str = "\n\n(Chorus plan mode: this turn is read-only — writes are \
+     blocked and anything changed is rolled back. Read and search as much as you need, but do \
+     not edit files, run commands that change anything, or spawn subagents. Reply with a short \
+     numbered plan: what you will change and in which files, the risks, and how you will verify \
+     it. The user approves the plan before anything runs.)\n";
+
+/// What the user "says" when they press approve on a plan. Stored in the
+/// ledger like any message, so every later agent can see the plan was agreed.
+pub const PLAN_APPROVED_PROMPT: &str =
+    "Plan approved. Carry out the plan above, then report what you changed and how you verified it.";
 
 /// Ceiling on the repo map, whatever the window: past ~1k tokens the extra
 /// symbols are ones the agent would look up itself anyway (Aider's default).
@@ -802,6 +820,7 @@ impl Session {
             runner,
             lead_policy: None,
             repo_map: Default::default(),
+            plan_turn: false,
         })
     }
 
@@ -851,6 +870,7 @@ impl Session {
             runner,
             lead_policy: None,
             repo_map: Default::default(),
+            plan_turn: false,
         })
     }
 
@@ -1323,6 +1343,21 @@ impl Session {
         policy: Policy,
     ) -> Result<RelayReport> {
         self.run_relay_with_attachments(chain, user_text, policy, &[])
+    }
+
+    /// Plan mode: one relay turn under `Policy::ReadOnly` whose prompt asks
+    /// for a plan instead of changes. The user approves it by sending
+    /// [`PLAN_APPROVED_PROMPT`] with their usual permission.
+    pub fn run_plan_with_attachments(
+        &mut self,
+        chain: &[AgentSpec],
+        user_text: &str,
+        attachment_ids: &[i64],
+    ) -> Result<RelayReport> {
+        self.plan_turn = true;
+        let r = self.run_relay_with_attachments(chain, user_text, Policy::ReadOnly, attachment_ids);
+        self.plan_turn = false;
+        r
     }
 
     pub fn run_relay_with_attachments(
@@ -2144,6 +2179,9 @@ impl Session {
                  isolated git worktrees), coordinate them with `chorus_wait_agent` and \
                  `chorus_collect_results`, and track your progress with `chorus_update_checklist`.)\n",
             );
+        }
+        if self.plan_turn {
+            prompt_text.push_str(PLAN_MODE_GUIDANCE);
         }
         let available: Vec<_> = attachments::list(self.store.conn(), self.sess)?
             .into_iter()

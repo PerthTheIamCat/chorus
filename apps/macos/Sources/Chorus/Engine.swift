@@ -149,6 +149,9 @@ final class Engine: ObservableObject {
     @Published var events: [LedgerEvent] = []
     @Published var attachments: [SessionAttachment] = []
     @Published var busy = false
+    /// The relay chain of a plan waiting for the user's approval (plan mode);
+    /// nil when there is none. Cleared by any new message or session switch.
+    @Published var pendingPlanAgents: String?
     @Published var lastError: String?
     @Published var sessionID: Int64 = -1
     @Published var contextUsed: Int64?
@@ -326,6 +329,7 @@ final class Engine: ObservableObject {
         reader = nil
         switching = true
         lastError = nil
+        pendingPlanAgents = nil
         queue.async { [weak self] in
             let h = make()
             let eventsJSON = h.map { Self.string(from: chorus_transcript_json($0)) } ?? ""
@@ -380,6 +384,7 @@ final class Engine: ObservableObject {
 
     func close() {
         memoryScope = nil
+        pendingPlanAgents = nil
         sessionCostUSD = nil
         sessionTokensIn = 0
         sessionTokensOut = 0
@@ -543,6 +548,7 @@ final class Engine: ObservableObject {
     private var echoCounter: Int64 = 0
     private func echoUser(_ text: String) {
         compactWork?.cancel()
+        pendingPlanAgents = nil
         echoCounter += 1
         live = LiveTurn()
         lastThoughts = ""
@@ -1547,6 +1553,44 @@ final class Engine: ObservableObject {
             }
         }
     }
+
+    /// Plan mode: one read-only turn that answers with a plan. Rust forces
+    /// read-only and adds the plan instructions to the prompt; on success the
+    /// chain is kept so `approvePlan` can hand the same agents the go-ahead.
+    func sendPlan(_ prompt: String, agents: String, attachments: [Int64] = []) {
+        guard let h = handle, !busy else { return }
+        busy = true; lastError = nil
+        let first = agents.split(separator: ",").first.map(String.init) ?? agents
+        liveAgent = first.split(separator: "@", maxSplits: 1).first.map(String.init) ?? first
+        PowerManager.shared.beginActivity(reason: "Chorus Plan (\(liveAgent ?? first))")
+        echoUser(prompt)
+        let idsJSON = Self.jsonIDs(attachments)
+        queue.async { [weak self] in
+            let json = prompt.withCString { p in
+                agents.withCString { a in
+                    idsJSON.withCString { ids in
+                        Self.string(from: chorus_run_plan_with_attachments(h.raw, a, p, ids))
+                    }
+                }
+            }
+            let obj = Self.decode(TurnResult.self, json)
+            DispatchQueue.main.async {
+                PowerManager.shared.endActivity()
+                self?.busy = false
+                self?.endLive()
+                if let r = obj, r.ok {
+                    if let u = r.context_used { self?.contextUsed = u }
+                    if let w = r.context_window { self?.contextWindow = w }
+                    self?.pendingPlanAgents = agents
+                } else if !Self.isStop(obj?.error) { self?.lastError = obj?.error ?? "plan failed" }
+                self?.refresh()
+                self?.compactIfIdle()
+            }
+        }
+    }
+
+    /// The approval message for a plan — the text lives in Rust.
+    var planApprovedPrompt: String { Self.string(from: chorus_plan_approved_prompt()) }
 
     /// Orchestra mode turn. Who leads, its read-only permission, failover to
     /// the backup and the children's caps are all decided in Rust; this only

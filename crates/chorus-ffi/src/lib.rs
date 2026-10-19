@@ -1353,6 +1353,67 @@ pub unsafe extern "C" fn chorus_run_relay_with_attachments(
     }
 }
 
+/// Plan mode: a read-only relay turn that answers with a plan (see
+/// `Session::run_plan_with_attachments`). No `allow`: a plan turn is
+/// read-only whatever the composer's permission says. Same JSON as
+/// `chorus_run_relay_with_attachments`.
+///
+/// # Safety
+/// `e` must be live; `agents`, `prompt`, and `attachment_ids_json` must be
+/// valid NUL-terminated UTF-8 strings; IDs must be a JSON integer array.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_run_plan_with_attachments(
+    e: *mut ChorusEngine,
+    agents: *const c_char,
+    prompt: *const c_char,
+    attachment_ids_json: *const c_char,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let (Some(agents), Some(prompt)) = (borrow(agents), borrow(prompt)) else {
+        return err("agents/prompt must be valid UTF-8");
+    };
+    let attachment_ids = match borrow_attachment_ids(attachment_ids_json) {
+        Ok(ids) => ids,
+        Err(e) => return err(e),
+    };
+    let specs = specs_from_csv(agents);
+    if specs.is_empty() {
+        return err("plan needs at least one agent");
+    }
+    match catch_unwind(AssertUnwindSafe(|| {
+        engine
+            .session
+            .run_plan_with_attachments(&specs, prompt, &attachment_ids)
+    })) {
+        Ok(Ok(rr)) => out(serde_json::to_string(&RelayJson {
+            ok: true,
+            answered_by: rr.answered_by,
+            message: rr.turn.message,
+            context_used: rr.turn.context_used,
+            context_window: rr.turn.context_window,
+            stop_reason: rr.turn.stop_reason,
+            handoffs: rr
+                .handoffs
+                .into_iter()
+                .map(|(f, t, why)| [f, t, why.as_phrase().to_string()])
+                .collect(),
+        })
+        .unwrap()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in run_plan_with_attachments"),
+    }
+}
+
+/// The message the shell sends, with the user's own permission, when they
+/// approve a plan. Kept in Rust so the shell holds no prompt text.
+/// The returned string must be freed with `chorus_string_free`.
+#[no_mangle]
+pub extern "C" fn chorus_plan_approved_prompt() -> *mut c_char {
+    out(chorus_cli::session::PLAN_APPROVED_PROMPT.to_string())
+}
+
 #[derive(Serialize)]
 struct OrchestraJson {
     ok: bool,

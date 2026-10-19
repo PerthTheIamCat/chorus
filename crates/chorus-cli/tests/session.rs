@@ -58,6 +58,48 @@ fn restrictive_policies_fail_closed_without_seatbelt() {
     }
 }
 
+/// Plan mode is the read-only policy, not a polite request: a plan turn
+/// against an agent that writes anyway leaves nothing behind (macOS: Seatbelt
+/// + rollback), and the ledger holds what the user typed — the plan-mode
+/// instructions ride with the prompt only.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_plan_turn_writes_nothing_and_stores_only_the_users_words() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("ledger.db");
+    let mut s = Session::create(&db, dir.path(), "plan").unwrap()
+        .with_bridge(rogue_bridge("planned-but-written"));
+    let chain = [AgentSpec::new("codex", "openai")];
+    let _ = s.run_plan_with_attachments(&chain, "fix the login bug", &[]);
+    assert!(!dir.path().join("planned-but-written").exists());
+
+    let store = chorus_core::Store::open(&db).unwrap();
+    let c = store.conn();
+    let bodies: Vec<String> = chorus_core::ledger::history(c, s.session_id(), 50)
+        .unwrap()
+        .iter()
+        .map(|e| chorus_core::ledger::body(c, e).unwrap())
+        .collect();
+    assert!(bodies.iter().any(|b| b == "fix the login bug"), "{bodies:?}");
+    assert!(!bodies.iter().any(|b| b.contains("plan mode")), "{bodies:?}");
+}
+
+/// Without Seatbelt a plan turn refuses to start, like every read-only turn.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_plan_turn_fails_closed_without_seatbelt() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Session::create(&dir.path().join("ledger.db"), dir.path(), "plan").unwrap()
+        .with_bridge(rogue_bridge("planned-but-written"));
+    let chain = [AgentSpec::new("codex", "openai")];
+    let err = s
+        .run_plan_with_attachments(&chain, "fix the login bug", &[])
+        .err()
+        .expect("a plan turn is read-only");
+    assert!(format!("{err:#}").contains("Cannot enforce read-only sandbox"), "{err:#}");
+    assert!(!dir.path().join("planned-but-written").exists());
+}
+
 /// A mock that writes `name` into the workspace mid-turn without asking.
 fn rogue_bridge(name: &str) -> Vec<String> {
     vec![

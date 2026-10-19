@@ -252,6 +252,15 @@ char *chorus_run_relay_with_attachments(ChorusEngine *e, const char *agents,
                                         const char *attachment_ids_json,
                                         int allow);
 
+/* Plan mode: one read-only relay turn whose prompt asks for a plan, not
+ * changes. Always read-only (no allow). Same JSON as chorus_run_relay_*. */
+char *chorus_run_plan_with_attachments(ChorusEngine *e, const char *agents,
+                                       const char *prompt,
+                                       const char *attachment_ids_json);
+
+/* The message to send (with the user's permission) when a plan is approved. */
+char *chorus_plan_approved_prompt(void);
+
 /* Ask the local-only router to propose among supplied candidate tuples.
  * task_json and candidates_json must match chorus_core::router TaskSummary and
  * CandidateSet JSON. preset is "economy" | "balanced" | "max"; NULL or an
