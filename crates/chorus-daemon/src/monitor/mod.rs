@@ -70,12 +70,40 @@ pub struct Row {
     pub group_stoppable: bool,
 }
 
+/// Who can connect to a listener, judged from the addresses it bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reach {
+    /// Every address is loopback: only this Mac can connect.
+    Local,
+    /// Bound to `*` or a real interface: other machines on the network can.
+    Network,
+}
+
+/// Who started a listener, for grouping the services table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Origin {
+    /// Started from a shell or terminal: a dev server the user ran.
+    Mine,
+    /// Chorus itself, its daemon, bridges and what they spawned.
+    Chorus,
+    /// The user's, but not from a shell: launchd agents (`brew services`),
+    /// app helpers, Docker. Also a server whose terminal has since closed —
+    /// it is reparented to launchd and looks the same.
+    Background,
+    /// Another user's (root's system daemons included). Read-only.
+    Other,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ServiceRow {
     pub port: u16,
     pub udp: bool,
     /// Local addresses bound (`127.0.0.1`, `*`, `::1`).
     pub addrs: Vec<String>,
+    pub reach: Reach,
+    pub origin: Origin,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service: Option<ServiceName>,
     pub process: Row,
@@ -412,6 +440,8 @@ pub fn snapshot(opts: &SnapshotOptions) -> Snapshot {
             Some(ServiceRow {
                 port,
                 udp,
+                reach: reach(&addrs),
+                origin: origin(&process, |pid| procs.get(&pid).map(|p| (p.ppid, p.comm.clone()))),
                 addrs,
                 service,
                 process,
@@ -461,11 +491,16 @@ pub fn snapshot(opts: &SnapshotOptions) -> Snapshot {
             services.push(ServiceRow {
                 port,
                 udp: false,
+                reach: reach(std::slice::from_ref(&addr)),
+                origin: Origin::Other,
                 addrs: vec![addr],
                 service,
                 process,
             });
         }
+    }
+    for s in &mut services {
+        s.reach = reach(&s.addrs);
     }
     services.sort_by_key(|s| (s.port, s.udp, s.process.pid));
 
@@ -542,6 +577,73 @@ pub fn handle(req: Request, protect: &[String]) -> Result<serde_json::Value, Str
         Request::Apply { action } => serde_json::to_value(optimise::apply(&with_protect(action))?),
     };
     v.map_err(|e| e.to_string())
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only read by the macOS sampler
+fn is_loopback(addr: &str) -> bool {
+    let a = addr.trim_start_matches('[').trim_end_matches(']');
+    if a.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match a.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4.is_loopback(),
+        Ok(std::net::IpAddr::V6(v6)) => {
+            v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
+        Err(_) => false, // `*` and anything unparsed: assume reachable
+    }
+}
+
+/// `Local` only when every bound address is loopback. One `*` (or a LAN
+/// address) next to `127.0.0.1` still lets other machines in.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only read by the macOS sampler
+pub(crate) fn reach(addrs: &[String]) -> Reach {
+    if !addrs.is_empty() && addrs.iter().all(|a| is_loopback(a)) {
+        Reach::Local
+    } else {
+        Reach::Network
+    }
+}
+
+/// Process names that mean "a person typed this": shells, terminal apps and
+/// multiplexers. Login shells show as `-zsh`; the dash is stripped first.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only read by the macOS sampler
+const LAUNCHED_BY_HAND: &[&str] = &[
+    "zsh", "bash", "fish", "sh", "dash", "tcsh", "csh", "ksh", "nu", "xonsh", "pwsh",
+    "tmux", "screen", "zellij", "Terminal", "iTerm2", "WezTerm", "wezterm-gui",
+    "Alacritty", "alacritty", "kitty", "ghostty", "Ghostty", "Warp", "Hyper",
+];
+
+/// Walk the parent chain (via `parent_of(pid) -> (ppid, name)`) looking for
+/// a shell or terminal. Stops at launchd, a loop, or 32 hops.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only read by the macOS sampler
+pub(crate) fn launched_by_hand(pid: i32, parent_of: impl Fn(i32) -> Option<(i32, String)>) -> bool {
+    let mut cur = pid;
+    for _ in 0..32 {
+        let Some((ppid, _)) = parent_of(cur) else { return false };
+        if ppid <= 1 || ppid == cur {
+            return false;
+        }
+        let Some((_, name)) = parent_of(ppid) else { return false };
+        if LAUNCHED_BY_HAND.contains(&name.trim_start_matches('-')) {
+            return true;
+        }
+        cur = ppid;
+    }
+    false
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only read by the macOS sampler
+pub(crate) fn origin(row: &Row, parent_of: impl Fn(i32) -> Option<(i32, String)>) -> Origin {
+    if !row.mine {
+        Origin::Other
+    } else if row.role.is_some() {
+        Origin::Chorus
+    } else if launched_by_hand(row.pid, parent_of) {
+        Origin::Mine
+    } else {
+        Origin::Background
+    }
 }
 
 /// UDP is noisy: drop port 0 and the ephemeral range (49152–65535) — those
@@ -625,6 +727,60 @@ tcp4       0      0  10.0.0.2.54673         1.2.3.4.443            ESTABLISHED  
                 (65482, 72925, "*".into())
             ]
         );
+    }
+
+    #[test]
+    fn loopback_only_listeners_are_local_and_any_wildcard_is_network() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(reach(&v(&["127.0.0.1"])), Reach::Local);
+        assert_eq!(reach(&v(&["127.0.0.1", "::1"])), Reach::Local);
+        assert_eq!(reach(&v(&["::ffff:127.0.0.1"])), Reach::Local);
+        assert_eq!(reach(&v(&["127.0.0.1", "*"])), Reach::Network, "one wildcard opens it up");
+        assert_eq!(reach(&v(&["192.168.1.20"])), Reach::Network);
+        assert_eq!(reach(&v(&[])), Reach::Network, "unknown is not assumed safe");
+    }
+
+    #[test]
+    fn a_server_under_a_shell_is_mine_and_one_under_launchd_is_background() {
+        // 1 launchd → 100 Terminal → 200 -zsh → 300 node   (typed by hand)
+        // 1 launchd → 400 redis-server                    (brew services)
+        // 1 launchd → 500 Claude → 600 Claude Helper      (an app's helper)
+        let tree: HashMap<i32, (i32, String)> = [
+            (100, (1, "Terminal".into())),
+            (200, (100, "-zsh".into())),
+            (300, (200, "node".into())),
+            (400, (1, "redis-server".into())),
+            (500, (1, "Claude".into())),
+            (600, (500, "Claude Helper".into())),
+        ]
+        .into_iter()
+        .collect();
+        let parent_of = |pid: i32| tree.get(&pid).cloned();
+        let row = |pid: i32, mine: bool, role: Option<Role>| Row {
+            pid,
+            ppid: tree.get(&pid).map(|t| t.0).unwrap_or(1),
+            name: String::new(),
+            path: String::new(),
+            cmdline: vec![],
+            cpu_pct: None,
+            footprint: None,
+            uptime_s: None,
+            mine,
+            role,
+            started_by: None,
+            ident: None,
+            refusal: None,
+            refusal_note: None,
+            group_stoppable: false,
+        };
+        assert_eq!(origin(&row(300, true, None), parent_of), Origin::Mine);
+        assert_eq!(origin(&row(400, true, None), parent_of), Origin::Background);
+        assert_eq!(origin(&row(600, true, None), parent_of), Origin::Background);
+        assert_eq!(origin(&row(300, true, Some(Role::Child)), parent_of), Origin::Chorus);
+        assert_eq!(origin(&row(300, false, None), parent_of), Origin::Other);
+        // A cycle in a stale table must not hang.
+        let looped = |pid: i32| Some((if pid == 7 { 8 } else { 7 }, "node".to_string()));
+        assert!(!launched_by_hand(7, looped));
     }
 
     #[test]

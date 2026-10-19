@@ -44,6 +44,10 @@ struct MonService: Decodable, Hashable, Identifiable {
     let port: UInt16
     let udp: Bool
     let addrs: [String]
+    /// "local" (loopback only) or "network". Decided in Rust (`monitor::reach`).
+    let reach: String
+    /// "mine" | "chorus" | "background" | "other" (`monitor::Origin`).
+    let origin: String
     let service: MonServiceName?
     let process: MonRow
     var id: String { "\(port)-\(udp)-\(process.pid)" }
@@ -257,6 +261,37 @@ struct SystemMonitorView: View {
     @StateObject private var projects = ProjectStore()
     @State private var tab: Tab = .services
     @State private var confirm: Confirm?
+    @State private var reachFilter: ReachFilter = .all
+
+    enum ReachFilter: String, CaseIterable { case all = "ทั้งหมด", local = "localhost", network = "เครือข่าย" }
+
+    /// The groups the services table is split into, in Rust's `Origin` order.
+    struct ServiceGroup: Identifiable {
+        let id: String
+        let title: String
+        let rows: [MonService]
+    }
+
+    private static let groupTitles: [(String, String)] = [
+        ("mine", "รันเอง (จาก terminal)"),
+        ("chorus", "Chorus"),
+        ("background", "แอปและบริการเบื้องหลัง"),
+        ("other", "ระบบและผู้ใช้อื่น"),
+    ]
+
+    private var serviceGroups: [ServiceGroup] {
+        let all = (model.snapshot?.services ?? []).filter { r in
+            switch reachFilter {
+            case .all: return true
+            case .local: return r.reach == "local"
+            case .network: return r.reach == "network"
+            }
+        }
+        return Self.groupTitles.compactMap { key, title in
+            let rows = all.filter { $0.origin == key }
+            return rows.isEmpty ? nil : ServiceGroup(id: key, title: "\(title) · \(rows.count)", rows: rows)
+        }
+    }
 
     enum Tab: String, CaseIterable { case services = "บริการ", chorus = "Chorus", disk = "พื้นที่" }
 
@@ -317,6 +352,13 @@ struct SystemMonitorView: View {
             }
             Spacer()
             if tab == .services {
+                Picker("", selection: $reachFilter) {
+                    ForEach(ReachFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 220)
+                .help("localhost = เข้าได้จากเครื่องนี้เท่านั้น · เครือข่าย = เครื่องอื่นใน network เดียวกันก็เข้าได้")
                 Toggle("UDP", isOn: $model.udp).toggleStyle(.checkbox)
                     .help("แสดง UDP ด้วย (ซ่อนพอร์ต 0 และพอร์ตชั่วคราว 49152 ขึ้นไป)")
             }
@@ -344,9 +386,9 @@ struct SystemMonitorView: View {
         }
     }
 
-    // Port · Service · Process · PID · CPU · RAM · started by · uptime
+    // Grouped by who started it; Port · reach · Service · Process · PID · CPU · RAM · started by · uptime
     private var servicesTable: some View {
-        Table(model.snapshot?.services ?? []) {
+        Table(of: MonService.self) {
             TableColumn("Port") { r in
                 HStack(spacing: 4) {
                     Text(verbatim: ":\(r.port)").monospacedDigit()
@@ -355,6 +397,7 @@ struct SystemMonitorView: View {
                 .help(r.addrs.joined(separator: ", "))
                 .dimmed(!r.process.mine)
             }.width(min: 60, ideal: 70)
+            TableColumn("เข้าถึงได้") { r in reachCell(r) }.width(min: 90, ideal: 110)
             TableColumn("Service") { r in
                 Group {
                     if let s = r.service {
@@ -375,7 +418,27 @@ struct SystemMonitorView: View {
             TableColumn("Uptime") { r in Text(MonFormat.uptime(r.process.uptimeS)).monospacedDigit().dimmed(!r.process.mine) }
                 .width(min: 60, ideal: 80)
             TableColumn("") { r in actionCell(r.process, group: false) }.width(min: 90, ideal: 100)
+        } rows: {
+            ForEach(serviceGroups) { g in
+                Section {
+                    ForEach(g.rows) { TableRow($0) }
+                } header: {
+                    Text(g.title).font(.caption.weight(.semibold))
+                }
+            }
         }
+    }
+
+    private func reachCell(_ r: MonService) -> some View {
+        let local = r.reach == "local"
+        return Label(local ? "เฉพาะเครื่องนี้" : "เครือข่าย", systemImage: local ? "lock.fill" : "network")
+            .labelStyle(.titleAndIcon)
+            .font(.caption)
+            .foregroundStyle(local ? Color.secondary : Color.orange)
+            .help(local
+                  ? "ผูกกับ \(r.addrs.joined(separator: ", ")) — เครื่องอื่นเข้าไม่ได้"
+                  : "ผูกกับ \(r.addrs.joined(separator: ", ")) — เครื่องอื่นใน network เดียวกันเข้าได้")
+            .dimmed(!r.process.mine)
     }
 
     private var chorusList: some View {
