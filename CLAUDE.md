@@ -491,6 +491,19 @@ JSON บนดิสก์ไม่แตะ (`task_state` ต้องอ่า
 bench `handoff in later turns' context` กันไว้: เพดาน 30 token + ห้ามมี `` ```diff `` / `"constraints"` ใน context
 + pending/constraints ต้องยังอยู่ (นับแยกเป็นของ task state)
 
+### 7.26 repo map — จัดอันดับไฟล์ ไม่ใช่ symbol (วัด 19 ต.ค. 2026)
+
+`Session::assemble_context` ใส่ `repo-map` เป็น item แรกของ code tier (≤ 1/3 ของชั้น, เพดาน 1,024 token)
+cache ใน `RepoMapCache` (หน่วยความจำ ไม่ลงดิสก์ — 2.1) สร้างใหม่เฉพาะเมื่อ size/mtime ของไฟล์ต้นฉบับเปลี่ยน
+รายชื่อไฟล์มาจาก shadow repo (`Checkpoint::files`, อ่านอย่างเดียว ยึด .gitignore) · seed = `files_since(base)`
+
+กับดักที่เจอระหว่างทำ (วัดบนสำเนา repo นี้ 176 ไฟล์):
+- graph ระดับ symbol เดิม (`build_graph`) ผูกทุก symbol ในไฟล์กับทุกชื่อที่ไฟล์นั้นพูดถึง → ContentView.swift ไฟล์เดียวเป็นล้าน edge
+  **~340 ms ต่อเทิร์น** แม้ cache แล้ว → เปลี่ยนเป็น PageRank ระดับไฟล์ (แบบ Aider) แล้วแจกคะแนนให้ symbol ที่ถูกอ้าง: ~20–30 ms
+- สแกน identifier แยกไม่ออกว่าเป็นการเรียกจริงหรือคำในคอมเมนต์ → map เต็มไปด้วย `new`/`default`/`match`
+  แก้ด้วย `name_weight`: ชื่อที่นิยาม > 3 ที่ = 0 · snake/camel ≥ 8 ตัว ×10 · คำล้วนตัวเล็ก ×0.1 · คูณ IDF
+- render นับด้วย `TokenCounter` ตัวเดียวกับชั้นอื่น ไม่ใช่ `len/4` (7.1)
+
 ### 7.3 repo เงาสำหรับ checkpoint
 ต้องยึด `.gitignore` ของผู้ใช้ ไม่งั้น `.chorus/` จะโตกว่าโปรเจกต์จริง
 

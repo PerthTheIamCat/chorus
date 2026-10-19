@@ -5,6 +5,7 @@
 //! Personalized PageRank seeded on active files, and formats a dense, budget-bounded
 //! structural map (typically ~1,024 tokens) for prompt context injection.
 
+use crate::tokens::{HeuristicCounter, TokenCounter};
 use crate::{ChorusError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -269,18 +270,30 @@ impl RepoMapEngine {
             }
         }
 
-        // 2. Scan file contents for occurrences of other symbols to build edges
+        // 2. Edges: every symbol defined in a file references each symbol whose
+        // name that file mentions as a whole identifier. One pass per file over
+        // its identifiers — not a substring search per symbol per file, which is
+        // O(symbols × files × bytes) and took seconds on a mid-size repo.
+        let mut defs_by_file: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (j, def) in graph.definitions.iter().enumerate() {
+            defs_by_file.entry(def.file_path.as_str()).or_default().push(j);
+        }
         let mut edges = Vec::new();
-        let n = graph.definitions.len();
-        for i in 0..n {
-            let def_name = &graph.definitions[i].name;
-            // Find which other files mention this def_name
-            for (f_path, content) in &file_contents {
-                if content.contains(def_name) {
-                    // Link all symbols defined in f_path to symbol i
-                    for j in 0..n {
-                        if &graph.definitions[j].file_path == f_path && j != i {
-                            edges.push((j, i));
+        for (f_path, content) in &file_contents {
+            let Some(from) = defs_by_file.get(f_path.as_str()) else {
+                continue;
+            };
+            let mut seen: HashSet<&str> = HashSet::new();
+            for word in identifiers(content) {
+                if !seen.insert(word) {
+                    continue;
+                }
+                if let Some(targets) = graph.symbol_to_index.get(word) {
+                    for &i in targets {
+                        for &j in from {
+                            if j != i {
+                                edges.push((j, i));
+                            }
                         }
                     }
                 }
@@ -370,24 +383,34 @@ impl RepoMapEngine {
     }
 
     /// Render a compact Repo Map formatted for LLM system prompt injection,
-    /// adhering strictly to a token budget (~4 chars per token).
+    /// adhering strictly to a token budget.
     pub fn render_repo_map(
         graph: &SymbolGraph,
         ranks: &[f64],
         root_dir: &Path,
         max_tokens: usize,
     ) -> String {
-        if graph.definitions.is_empty() || ranks.is_empty() {
+        Self::render_budgeted(graph, ranks, root_dir, max_tokens as i64, &HeuristicCounter)
+    }
+
+    /// [`render_repo_map`] measured with `counter`, so the map is costed the
+    /// same way as every other tier it shares the budget with.
+    pub fn render_budgeted<C: TokenCounter>(
+        graph: &SymbolGraph,
+        ranks: &[f64],
+        root_dir: &Path,
+        max_tokens: i64,
+        counter: &C,
+    ) -> String {
+        if graph.definitions.is_empty() || ranks.len() != graph.definitions.len() {
             return String::new();
         }
 
-        // Rank symbols in descending order
         let mut ranked_indices: Vec<usize> = (0..graph.definitions.len()).collect();
-        ranked_indices.sort_by(|&a, &b| ranks[b].partial_cmp(&ranks[a]).unwrap());
+        ranked_indices.sort_by(|&a, &b| ranks[b].total_cmp(&ranks[a]));
 
-        // Group by relative file path
-        let max_chars = max_tokens * 4;
-        let mut current_chars = 0;
+        // Fence + one header line per file are paid for as they appear.
+        let mut used = counter.count("```repo-map\n```\n");
         let mut file_to_symbols: BTreeMap<String, Vec<&SymbolDef>> = BTreeMap::new();
 
         for idx in ranked_indices {
@@ -398,20 +421,24 @@ impl RepoMapEngine {
                 .to_string_lossy()
                 .to_string();
 
-            let line_cost = def.signature.len() + 10;
-            if current_chars + line_cost > max_chars {
-                break;
+            let mut cost = counter.count(&format!("  {} (L{})\n", def.signature, def.line_number));
+            if !file_to_symbols.contains_key(&rel_path) {
+                cost += counter.count(&format!("{rel_path}:\n"));
             }
-
-            file_to_symbols
-                .entry(rel_path)
-                .or_default()
-                .push(def);
-            current_chars += line_cost;
+            if used + cost > max_tokens {
+                // Lower-ranked but shorter lines may still fit.
+                continue;
+            }
+            file_to_symbols.entry(rel_path).or_default().push(def);
+            used += cost;
+        }
+        if file_to_symbols.is_empty() {
+            return String::new();
         }
 
         let mut output = String::from("```repo-map\n");
-        for (file, defs) in file_to_symbols {
+        for (file, mut defs) in file_to_symbols {
+            defs.sort_by_key(|d| d.line_number);
             output.push_str(&format!("{}:\n", file));
             for def in defs {
                 output.push_str(&format!("  {} (L{})\n", def.signature, def.line_number));
@@ -419,6 +446,234 @@ impl RepoMapEngine {
         }
         output.push_str("```\n");
         output
+    }
+}
+
+/// Identifier-shaped words in `text` (ASCII letters, digits, `_`, not
+/// starting with a digit) — what a symbol name can be in every language the
+/// extractor reads.
+fn identifiers(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|w| w.len() > 1 && !w.as_bytes()[0].is_ascii_digit())
+}
+
+/// How much one file using `name` says about the definitions of it.
+/// Without this the map was a list of `new`/`default`/`match`: an identifier
+/// scan cannot tell a call from the same English word in a comment, so the
+/// name itself has to carry the evidence (Aider weighs names the same way).
+/// - defined in more than 3 places: names nothing in particular → 0
+/// - split across overloads, so one name counts once
+/// - `snake_case` / `camelCase` / `PascalCase` of 8+ chars is almost never
+///   prose → ×10; a plain lowercase word often is → ×0.1
+fn name_weight(name: &str, defined: usize) -> f64 {
+    if defined > 3 {
+        return 0.0;
+    }
+    let has_upper = name.chars().any(|c| c.is_ascii_uppercase());
+    let has_lower = name.chars().any(|c| c.is_ascii_lowercase());
+    let compound = name.trim_matches('_').contains('_') || (has_upper && has_lower);
+    let style = if compound && name.len() >= 8 {
+        10.0
+    } else if !has_upper && !name.contains('_') {
+        0.1
+    } else {
+        1.0
+    };
+    style / defined as f64
+}
+
+/// Source files larger than this are left out of the map: generated code and
+/// vendored bundles, whose symbols would crowd out the ones people edit.
+const MAX_FILE_BYTES: u64 = 256 * 1024;
+/// Upper bound on files scanned per build, so a monorepo costs a bounded
+/// first build instead of a turn that never starts.
+const MAX_FILES: usize = 3000;
+
+fn is_mapped_source(path: &str) -> bool {
+    matches!(
+        Path::new(path).extension().and_then(|e| e.to_str()),
+        Some("rs" | "swift" | "ts" | "tsx" | "js" | "jsx" | "py" | "go")
+    )
+}
+
+/// The repo map as context, kept across turns. Rebuilt only when the set of
+/// source files or one of their sizes/mtimes changes; the ranking is redone
+/// every call because the seeds (files this session touched) change.
+///
+/// Ranks files, not symbols (as Aider does): a symbol-level graph links every
+/// symbol of a file to every name it mentions, which on this repo's own
+/// ContentView.swift is millions of edges and ~300 ms of PageRank per turn.
+/// Over ~600 files it is a few milliseconds, and each file's rank is then
+/// handed to the symbols it references.
+///
+/// Storage ≠ context (CLAUDE.md 2.1): nothing here is ever written to disk.
+#[derive(Default)]
+pub struct RepoMapCache {
+    stamp: Vec<(String, u64, u128)>,
+    /// Only `definitions` is filled — what rendering needs.
+    graph: SymbolGraph,
+    /// Workspace-relative path of each file in `stamp` order.
+    files: Vec<String>,
+    /// Index into `files` of the file each definition is in.
+    def_file: Vec<usize>,
+    /// For each file, the definitions (in other files) whose names it uses,
+    /// with how much a use of that name says (see [`name_weight`]).
+    refs: Vec<Vec<(usize, f64)>>,
+}
+
+impl RepoMapCache {
+    /// A map of `files` (paths relative to `root`) within `max_tokens`,
+    /// ranked towards `seeds`. Empty when there is nothing to map or no room.
+    pub fn render<C: TokenCounter>(
+        &mut self,
+        root: &Path,
+        files: &[String],
+        seeds: &[String],
+        max_tokens: i64,
+        counter: &C,
+    ) -> String {
+        if max_tokens <= 0 {
+            return String::new();
+        }
+        let mut stamp: Vec<(String, u64, u128)> = files
+            .iter()
+            .filter(|f| is_mapped_source(f))
+            .filter_map(|f| {
+                let meta = fs::metadata(root.join(f)).ok()?;
+                if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
+                    return None;
+                }
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_nanos());
+                Some((f.clone(), meta.len(), mtime))
+            })
+            .collect();
+        stamp.sort();
+        stamp.truncate(MAX_FILES);
+        if stamp.is_empty() {
+            return String::new();
+        }
+        if stamp != self.stamp {
+            self.rebuild(root, stamp);
+        }
+        let ranks = self.rank(seeds);
+        RepoMapEngine::render_budgeted(&self.graph, &ranks, root, max_tokens, counter)
+    }
+
+    fn rebuild(&mut self, root: &Path, stamp: Vec<(String, u64, u128)>) {
+        let mut graph = SymbolGraph::new();
+        let mut def_file = Vec::new();
+        let mut contents = Vec::with_capacity(stamp.len());
+        for (fi, (f, _, _)) in stamp.iter().enumerate() {
+            let full = root.join(f);
+            // A file that vanished or is not UTF-8 maps as empty.
+            let content = fs::read_to_string(&full).unwrap_or_default();
+            if let Ok(defs) = SymbolExtractor::extract_from_file(&full) {
+                for def in defs {
+                    graph.add_def(def);
+                    def_file.push(fi);
+                }
+            }
+            contents.push(content);
+        }
+        // Each file's distinct identifiers, and in how many files each
+        // defined name appears — a name in most files says little (IDF).
+        let words: Vec<HashSet<&str>> = contents.iter().map(|c| identifiers(c).collect()).collect();
+        let mut df: HashMap<&str, usize> = HashMap::new();
+        for set in &words {
+            for &w in set {
+                if graph.symbol_to_index.contains_key(w) {
+                    *df.entry(w).or_default() += 1;
+                }
+            }
+        }
+        let n_files = words.len() as f64;
+        let refs = words
+            .iter()
+            .enumerate()
+            .map(|(fi, set)| {
+                let mut out = Vec::new();
+                for &word in set {
+                    let Some(targets) = graph.symbol_to_index.get(word) else {
+                        continue;
+                    };
+                    let idf = (n_files / df.get(word).copied().unwrap_or(1) as f64).ln();
+                    let w = name_weight(word, targets.len()) * idf.max(0.0);
+                    if w > 0.0 {
+                        out.extend(
+                            targets.iter().copied().filter(|&d| def_file[d] != fi).map(|d| (d, w)),
+                        );
+                    }
+                }
+                out
+            })
+            .collect();
+        self.files = stamp.iter().map(|(f, _, _)| f.clone()).collect();
+        self.stamp = stamp;
+        self.graph = graph;
+        self.def_file = def_file;
+        self.refs = refs;
+    }
+
+    /// Personalized PageRank over files (edge f → g per symbol of g that f
+    /// uses), then each symbol scores the rank its users pass to it — plus a
+    /// sliver of its own file's rank, so a seed file's unreferenced
+    /// definitions (an entry point) still rank above unrelated files.
+    fn rank(&self, seeds: &[String]) -> Vec<f64> {
+        let n = self.files.len();
+        let d_count = self.graph.definitions.len();
+        if n == 0 || d_count == 0 {
+            return Vec::new();
+        }
+        let mut p = vec![0.0; n];
+        let seeded: Vec<usize> = (0..n)
+            .filter(|&i| seeds.iter().any(|s| s == &self.files[i] || s.ends_with(&self.files[i])))
+            .collect();
+        if seeded.is_empty() {
+            p.fill(1.0 / n as f64);
+        } else {
+            for &i in &seeded {
+                p[i] = 1.0 / seeded.len() as f64;
+            }
+        }
+        let totals: Vec<f64> = self.refs.iter().map(|rs| rs.iter().map(|&(_, w)| w).sum()).collect();
+        let damping = 0.85;
+        let mut r = p.clone();
+        for _ in 0..25 {
+            let mut next = vec![0.0; n];
+            let mut dangling = 0.0;
+            for ((refs, &total), &rf) in self.refs.iter().zip(&totals).zip(&r) {
+                if total <= 0.0 {
+                    dangling += rf;
+                    continue;
+                }
+                for &(d, w) in refs {
+                    next[self.def_file[d]] += rf * w / total;
+                }
+            }
+            let mut diff = 0.0;
+            for ((v, &pf), &rf) in next.iter_mut().zip(&p).zip(&r) {
+                *v = (1.0 - damping) * pf + damping * (*v + dangling * pf);
+                diff += (*v - rf).abs();
+            }
+            r = next;
+            if diff < 1e-9 {
+                break;
+            }
+        }
+        let mut score: Vec<f64> = (0..d_count).map(|d| 1e-3 * r[self.def_file[d]]).collect();
+        for ((refs, &total), &rf) in self.refs.iter().zip(&totals).zip(&r) {
+            if total <= 0.0 {
+                continue;
+            }
+            for &(d, w) in refs {
+                score[d] += rf * w / total;
+            }
+        }
+        score
     }
 }
 
@@ -468,5 +723,37 @@ pub fn run_session() {
         assert!(map.contains("session.rs:"));
         assert!(map.contains("auth.rs:"));
         assert!(map.contains("pub fn login"));
+    }
+
+    #[test]
+    fn cache_respects_budget_ranks_seeds_and_rebuilds_on_edit() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("auth.rs"), "pub fn login() -> bool { true }\n").unwrap();
+        fs::write(root.join("cli.rs"), "pub fn main_entry() { login(); }\n").unwrap();
+        fs::write(root.join("notes.md"), "pub fn not_code() {}\n").unwrap();
+        let files: Vec<String> = ["auth.rs", "cli.rs", "notes.md"].map(String::from).to_vec();
+        let counter = HeuristicCounter;
+
+        let mut cache = RepoMapCache::default();
+        let map = cache.render(root, &files, &["cli.rs".into()], 200, &counter);
+        assert!(map.starts_with("```repo-map\n"), "{map}");
+        assert!(map.contains("auth.rs:") && map.contains("pub fn login() -> bool"));
+        assert!(!map.contains("not_code"), "only source files are mapped");
+        assert!(counter.count(&map) <= 200);
+
+        // No room: nothing, not a truncated fence.
+        assert_eq!(cache.render(root, &files, &[], 3, &counter), "");
+
+        // An edit shows up on the next call without a new cache.
+        fs::write(root.join("auth.rs"), "pub fn login() -> bool { true }\npub fn logout() {}\n").unwrap();
+        let map = cache.render(root, &files, &[], 200, &counter);
+        assert!(map.contains("pub fn logout()"), "{map}");
+    }
+
+    #[test]
+    fn identifiers_are_whole_words() {
+        let words: Vec<&str> = identifiers("login(user); relogin_now 9x _a b").collect();
+        assert_eq!(words, ["login", "user", "relogin_now", "_a"]);
     }
 }

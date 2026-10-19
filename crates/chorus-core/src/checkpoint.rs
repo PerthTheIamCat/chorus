@@ -387,6 +387,32 @@ impl Checkpoint {
         Ok(out)
     }
 
+    /// The workspace directory this shadow repo covers (canonicalized).
+    pub fn work_tree(&self) -> &Path {
+        &self.work_tree
+    }
+
+    /// Every file in the workspace the shadow repo would keep — tracked plus
+    /// untracked-but-not-ignored, relative to [`work_tree`]. Read-only like
+    /// [`files_since`]: no `git add`, so it is safe on the per-turn path.
+    pub fn files(&self) -> Result<Vec<String>> {
+        let mut out: Vec<String> = Vec::new();
+        for args in [
+            &["ls-files", "--cached"][..],
+            &["ls-files", "--others", "--exclude-standard"][..],
+        ] {
+            for l in self.git(args)?.lines() {
+                let l = l.trim();
+                if !l.is_empty() {
+                    out.push(l.to_string());
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
     /// Roll the work tree back to `sha`. Destructive — the caller confirms.
     pub fn restore(&self, sha: &str) -> Result<()> {
         self.git(&["reset", "--hard", "--quiet", sha])?;

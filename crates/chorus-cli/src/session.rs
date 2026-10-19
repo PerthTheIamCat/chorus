@@ -14,7 +14,7 @@ use chorus_acp::sandbox;
 use chorus_core::attachments::{self, Attachment};
 use chorus_core::checkpoint::Checkpoint;
 use chorus_core::compaction;
-use chorus_core::context::{AssembleInput, Assembler, Budget, TurnItem};
+use chorus_core::context::{AssembleInput, Assembler, Budget, Tier, TurnItem};
 use chorus_core::handoff::{Brief, BriefInput, HandoffMeta, HandoffReason};
 use chorus_core::integration_catalog;
 use chorus_core::mcp::McpServer;
@@ -712,7 +712,14 @@ pub struct Session {
     /// Set while the orchestrator's own turn runs: the user's permission,
     /// which caps its children, while the turn itself is read-only.
     lead_policy: Option<Policy>,
+    /// Symbol map of the workspace, rebuilt only when its source files change.
+    /// Behind a Mutex because `assemble_context` takes `&self`.
+    repo_map: std::sync::Mutex<chorus_core::repo_map::RepoMapCache>,
 }
+
+/// Ceiling on the repo map, whatever the window: past ~1k tokens the extra
+/// symbols are ones the agent would look up itself anyway (Aider's default).
+const REPO_MAP_MAX_TOKENS: i64 = 1024;
 
 impl Drop for Session {
     fn drop(&mut self) {
@@ -794,6 +801,7 @@ impl Session {
             runner_state,
             runner,
             lead_policy: None,
+            repo_map: Default::default(),
         })
     }
 
@@ -842,6 +850,7 @@ impl Session {
             runner_state,
             runner,
             lead_policy: None,
+            repo_map: Default::default(),
         })
     }
 
@@ -1738,6 +1747,18 @@ impl Session {
             })
             .collect();
 
+        let mut code = code;
+        if let Some(map) = self.repo_map_context(budget) {
+            code.insert(
+                0,
+                ContextItem {
+                    text: map,
+                    key: None,
+                    label: "repo-map".into(),
+                },
+            );
+        }
+
         let facts = memory::top(self.mem_store().conn(), 1, 12)?;
         let memory_items: Vec<ContextItem> = memory::render(&facts)
             .lines()
@@ -1760,6 +1781,25 @@ impl Session {
         };
         let assembler = Assembler::new(Budget::new(budget), CachedCounter::new(HeuristicCounter));
         Ok(assembler.assemble(&input).text)
+    }
+
+    /// The workspace's symbols, ranked towards the files this session has
+    /// touched, in at most a third of the code tier — so the agent starts
+    /// from a map instead of spending its first tool calls on `grep`.
+    /// `None` without a shadow repo, with nothing to map, or with
+    /// `CHORUS_REPO_MAP=off`. Optional context: a failure here leaves the
+    /// turn without a map rather than without a turn.
+    fn repo_map_context(&self, budget: i64) -> Option<String> {
+        if std::env::var("CHORUS_REPO_MAP").is_ok_and(|v| v == "off") {
+            return None;
+        }
+        let ck = self.checkpoint.as_ref()?;
+        let files = ck.files().ok()?;
+        let seeds = ck.files_since(&self.base_ckpt).unwrap_or_default();
+        let cap = (Budget::new(budget).cap(Tier::Code) / 3).min(REPO_MAP_MAX_TOKENS);
+        let mut cache = self.repo_map.lock().ok()?;
+        let map = cache.render(ck.work_tree(), &files, &seeds, cap, &HeuristicCounter);
+        (!map.is_empty()).then_some(map)
     }
 
     // ---- internals --------------------------------------------------

@@ -516,6 +516,29 @@ fn assemble_context_carries_the_task_state() {
 }
 
 #[test]
+fn assemble_context_carries_a_repo_map_of_the_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("w");
+    std::fs::create_dir_all(cwd.join("src")).unwrap();
+    std::fs::write(
+        cwd.join("src/billing.rs"),
+        "pub struct Invoice;\npub fn charge_invoice(i: &Invoice) -> u64 { 0 }\n",
+    )
+    .unwrap();
+    std::fs::write(cwd.join("src/main.rs"), "fn main() { charge_invoice(&Invoice); }\n").unwrap();
+    let s = Session::create(&dir.path().join("s.db"), &cwd, "map").unwrap();
+
+    let ctx = s.assemble_context(20_000).unwrap();
+    assert!(ctx.contains("```repo-map"), "{ctx}");
+    assert!(ctx.contains("src/billing.rs:"), "paths are workspace-relative:\n{ctx}");
+    assert!(ctx.contains("pub fn charge_invoice(i: &Invoice) -> u64"), "{ctx}");
+
+    // A file added between turns is in the next turn's map.
+    std::fs::write(cwd.join("src/refund.rs"), "pub fn refund_invoice() {}\n").unwrap();
+    assert!(s.assemble_context(20_000).unwrap().contains("pub fn refund_invoice()"));
+}
+
+#[test]
 fn assemble_context_reads_the_stored_rung_instead_of_regenerating_it() {
     // A short workspace path on purpose. Every event body in this fixture
     // repeats the file's absolute path, and macOS tempdirs
