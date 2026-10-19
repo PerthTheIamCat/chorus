@@ -301,6 +301,9 @@ pub unsafe extern "C" fn chorus_router_pull_json(model: *const c_char) -> *mut c
 }
 
 /// List curated local models and their installation/disk status.
+///
+/// # Safety
+/// No pointer arguments. The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_model_manager_list_json() -> *mut c_char {
     match catch_unwind(AssertUnwindSafe(|| {
@@ -1605,6 +1608,10 @@ pub unsafe extern "C" fn chorus_reader_working_diff(r: *const ChorusReader) -> *
 }
 
 /// Mark reviewed: snapshot shadow repo as new baseline. JSON: {"ok":true,"base":"..."}
+///
+/// # Safety
+/// `e` must be null or a live handle from `chorus_engine_open`/`_reopen`.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_mark_reviewed(e: *mut ChorusEngine) -> *mut c_char {
     let Some(engine) = e.as_mut() else {
@@ -1618,6 +1625,10 @@ pub unsafe extern "C" fn chorus_mark_reviewed(e: *mut ChorusEngine) -> *mut c_ch
 }
 
 /// Check if user committed between turns; advances baseline. JSON: {"ok":true,"moved":bool}
+///
+/// # Safety
+/// `e` must be null or a live handle from `chorus_engine_open`/`_reopen`.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_check_user_commit(e: *mut ChorusEngine) -> *mut c_char {
     let Some(engine) = e.as_mut() else {
@@ -1631,6 +1642,11 @@ pub unsafe extern "C" fn chorus_check_user_commit(e: *mut ChorusEngine) -> *mut 
 }
 
 /// Scoped working diff on engine handle.
+///
+/// # Safety
+/// `e` must be null or a live handle from `chorus_engine_open`/`_reopen`.
+/// `scope` must be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_working_diff_scoped(
     e: *const ChorusEngine,
@@ -1650,6 +1666,11 @@ pub unsafe extern "C" fn chorus_working_diff_scoped(
 }
 
 /// Scoped working diff on reader handle.
+///
+/// # Safety
+/// `r` must be null or a live reader from `chorus_reader_open`.
+/// `scope` must be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_reader_working_diff_scoped(
     r: *const ChorusReader,
@@ -1669,6 +1690,11 @@ pub unsafe extern "C" fn chorus_reader_working_diff_scoped(
 }
 
 /// File diff stats report: fast numstat path on reader.
+///
+/// # Safety
+/// `r` must be null or a live reader from `chorus_reader_open`.
+/// `scope` must be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_reader_diff_stats(
     r: *const ChorusReader,
@@ -1691,6 +1717,11 @@ pub unsafe extern "C" fn chorus_reader_diff_stats(
 }
 
 /// Single file diff on reader.
+///
+/// # Safety
+/// `r` must be null or a live reader from `chorus_reader_open`.
+/// `scope` and `path` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_reader_file_diff(
     r: *const ChorusReader,
@@ -2275,6 +2306,10 @@ pub unsafe extern "C" fn chorus_handoff_auto(
 }
 
 /// Build file tree for workspace with git statuses and agent focus marker.
+///
+/// # Safety
+/// `cwd` and `focus_file` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_file_tree_json(
     cwd: *const c_char,
@@ -2307,6 +2342,10 @@ pub unsafe extern "C" fn chorus_file_tree_json(
 }
 
 /// Compute Myers aligned diff with spacer lines for side-by-side or unified view.
+///
+/// # Safety
+/// `old_text`, `new_text` and `path` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_aligned_diff_json(
     old_text: *const c_char,
@@ -2333,6 +2372,11 @@ pub unsafe extern "C" fn chorus_aligned_diff_json(
 }
 
 /// Add an inline review comment.
+///
+/// # Safety
+/// `e` must be null or a live handle from `chorus_engine_open`/`_reopen`.
+/// `path`, `comment` and `snippet` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_add_review_comment(
     e: *mut ChorusEngine,
@@ -2369,6 +2413,10 @@ pub unsafe extern "C" fn chorus_add_review_comment(
 }
 
 /// List pending inline review comments for the current session.
+///
+/// # Safety
+/// `e` must be null or a live handle from `chorus_engine_open`/`_reopen`.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_pending_review_comments(e: *mut ChorusEngine) -> *mut c_char {
     let Some(engine) = e.as_mut() else {
@@ -2384,6 +2432,10 @@ pub unsafe extern "C" fn chorus_pending_review_comments(e: *mut ChorusEngine) ->
 }
 
 /// Clear pending review comments for the current session.
+///
+/// # Safety
+/// `e` must be null or a live handle from `chorus_engine_open`/`_reopen`.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_clear_review_comments(e: *mut ChorusEngine) -> *mut c_char {
     let Some(engine) = e.as_mut() else {
@@ -2399,6 +2451,10 @@ pub unsafe extern "C" fn chorus_clear_review_comments(e: *mut ChorusEngine) -> *
 }
 
 /// Generate agent steering prompt from pending review comments.
+///
+/// # Safety
+/// `e` must be null or a live handle from `chorus_engine_open`/`_reopen`.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_review_steering_prompt(e: *mut ChorusEngine) -> *mut c_char {
     let Some(engine) = e.as_mut() else {
@@ -2417,6 +2473,10 @@ pub unsafe extern "C" fn chorus_review_steering_prompt(e: *mut ChorusEngine) -> 
 }
 
 /// Provision an isolated git worktree for an agent.
+///
+/// # Safety
+/// `cwd` and `role` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_create_worktree(
     cwd: *const c_char,
@@ -2434,6 +2494,10 @@ pub unsafe extern "C" fn chorus_create_worktree(
 }
 
 /// List active git worktrees.
+///
+/// # Safety
+/// `cwd` must be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_list_worktrees(cwd: *const c_char) -> *mut c_char {
     let Some(cwd) = borrow(cwd) else {
@@ -2447,6 +2511,10 @@ pub unsafe extern "C" fn chorus_list_worktrees(cwd: *const c_char) -> *mut c_cha
 }
 
 /// Merge a worktree branch into current workspace.
+///
+/// # Safety
+/// `cwd` and `branch` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_merge_worktree(
     cwd: *const c_char,
@@ -2466,6 +2534,10 @@ pub unsafe extern "C" fn chorus_merge_worktree(
 }
 
 /// Discard and delete an active worktree.
+///
+/// # Safety
+/// `cwd` and `branch` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_remove_worktree(
     cwd: *const c_char,
@@ -2486,6 +2558,9 @@ pub unsafe extern "C" fn chorus_remove_worktree(
 
 /// The total monetary cost of a session in USD from bridge-reported cost,
 /// or -1.0 when no cost has been reported.
+///
+/// # Safety
+/// `db_path` must be null or point to a NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_session_cost_usd(db_path: *const c_char, session_id: i64) -> f64 {
     let Some(db) = borrow(db_path) else {
@@ -2523,6 +2598,10 @@ fn open_router_store(db_path: Option<&str>) -> std::result::Result<chorus_core::
 
 /// Instant in-process fast routing decision (<5ms) with learned memory lookup.
 /// Only overrides learned under `preset` (null = Balanced) are consulted.
+///
+/// # Safety
+/// `prompt` and `preset` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_route_fast_json(
     prompt: *const c_char,
@@ -2537,6 +2616,10 @@ pub unsafe extern "C" fn chorus_route_fast_json(
 }
 
 /// List routes learned by the router flywheel.
+///
+/// # Safety
+/// `db_path` must be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_router_list_learned_json(db_path: *const c_char) -> *mut c_char {
     let path = borrow(db_path);
@@ -2553,6 +2636,10 @@ pub unsafe extern "C" fn chorus_router_list_learned_json(db_path: *const c_char)
 
 /// Record a choice the *user* made, under the preset active at the time
 /// (null = Balanced). The router's own picks must not be recorded.
+///
+/// # Safety
+/// `db_path`, `prompt`, `model`, `agent`, `reason` and `preset` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_router_record_learned_json(
     db_path: *const c_char,
@@ -2581,6 +2668,10 @@ pub unsafe extern "C" fn chorus_router_record_learned_json(
 }
 
 /// Clear all learned route history.
+///
+/// # Safety
+/// `db_path` must be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_router_clear_learned_json(db_path: *const c_char) -> *mut c_char {
     let path = borrow(db_path);
@@ -2596,6 +2687,10 @@ pub unsafe extern "C" fn chorus_router_clear_learned_json(db_path: *const c_char
 }
 
 /// Search sessions using SQLite FTS5 / LIKE search.
+///
+/// # Safety
+/// `db_path` and `query` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_search_sessions_json(
     db_path: *const c_char,
@@ -2618,6 +2713,10 @@ pub unsafe extern "C" fn chorus_search_sessions_json(
 }
 
 /// Export session to Markdown.
+///
+/// # Safety
+/// `db_path` must be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_export_session_md(
     db_path: *const c_char,
@@ -2639,6 +2738,10 @@ pub unsafe extern "C" fn chorus_export_session_md(
 }
 
 /// List available agent roles (built-in + .chorus/agents/*.md).
+///
+/// # Safety
+/// `cwd` must be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_list_roles(cwd: *const c_char) -> *mut c_char {
     let Some(cwd) = borrow(cwd) else {
@@ -2649,6 +2752,10 @@ pub unsafe extern "C" fn chorus_list_roles(cwd: *const c_char) -> *mut c_char {
 }
 
 /// Save an agent role definition to .chorus/agents/<name>.md.
+///
+/// # Safety
+/// `cwd` and `role_json` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_save_role(
     cwd: *const c_char,
@@ -2678,6 +2785,10 @@ pub unsafe extern "C" fn chorus_save_role(
 }
 
 /// Delete a custom agent role from .chorus/agents/<name>.md.
+///
+/// # Safety
+/// `cwd` and `name` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_delete_role(
     cwd: *const c_char,
@@ -2697,6 +2808,10 @@ pub unsafe extern "C" fn chorus_delete_role(
 }
 
 /// Synthesize an agent role via AI heuristic / generator.
+///
+/// # Safety
+/// `task` and `name_hint` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_synthesize_role(
     task: *const c_char,
@@ -2713,6 +2828,10 @@ pub unsafe extern "C" fn chorus_synthesize_role(
 }
 
 /// List subagents for a session (or all subagents in DB if parent_sess <= 0).
+///
+/// # Safety
+/// `db_path` must be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_list_subagents(
     db_path: *const c_char,
@@ -2741,6 +2860,10 @@ pub unsafe extern "C" fn chorus_list_subagents(
 }
 
 /// Cancel a subagent session.
+///
+/// # Safety
+/// `db_path` must be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_cancel_subagent(
     db_path: *const c_char,
@@ -2768,6 +2891,10 @@ pub unsafe extern "C" fn chorus_cancel_subagent(
 }
 
 /// Send a message to a child subagent.
+///
+/// # Safety
+/// `db_path` and `message` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_message_subagent(
     db_path: *const c_char,
@@ -2801,7 +2928,7 @@ pub unsafe extern "C" fn chorus_message_subagent(
 ///
 /// # Safety
 /// Caller must pass a valid null-terminated UTF-8 string for `db_path`.
-/// The returned pointer must be freed with `chorus_free_string`.
+/// The returned pointer must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_resume_subagent(
     db_path: *const c_char,
@@ -2828,7 +2955,7 @@ pub unsafe extern "C" fn chorus_resume_subagent(
 ///
 /// # Safety
 /// Caller must pass a valid null-terminated UTF-8 string for `db_path`.
-/// The returned pointer must be freed with `chorus_free_string`.
+/// The returned pointer must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_cancel_orchestration(
     db_path: *const c_char,
@@ -2855,7 +2982,7 @@ pub unsafe extern "C" fn chorus_cancel_orchestration(
 ///
 /// # Safety
 /// Caller must pass a valid null-terminated UTF-8 string for `db_path`.
-/// The returned pointer must be freed with `chorus_free_string`.
+/// The returned pointer must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_get_checklist_json(
     db_path: *const c_char,
@@ -2882,7 +3009,7 @@ pub unsafe extern "C" fn chorus_get_checklist_json(
 ///
 /// # Safety
 /// Caller must pass valid null-terminated UTF-8 strings for `db_path` and `items_json`.
-/// The returned pointer must be freed with `chorus_free_string`.
+/// The returned pointer must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_update_checklist_json(
     db_path: *const c_char,
@@ -2913,6 +3040,10 @@ pub unsafe extern "C" fn chorus_update_checklist_json(
 }
 
 /// List all turn checkpoints for a session.
+///
+/// # Safety
+/// `db` must be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_checkpoint_list_json(
     db: *const c_char,
@@ -2937,6 +3068,10 @@ pub unsafe extern "C" fn chorus_checkpoint_list_json(
 }
 
 /// Time-travel rewind across code and/or ledger history.
+///
+/// # Safety
+/// `db`, `ws` and `mode` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_checkpoint_rewind_json(
     db: *const c_char,
@@ -2982,6 +3117,10 @@ pub unsafe extern "C" fn chorus_checkpoint_rewind_json(
 }
 
 /// Generate a high-density Repo Map using Personalized PageRank in Rust.
+///
+/// # Safety
+/// `ws` must be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_repo_map_generate_json(
     ws: *const c_char,
@@ -3084,6 +3223,10 @@ pub unsafe extern "C" fn chorus_set_project_trusted(
 
 /// Verify workspace via fast linter/compiler checks. Runs only for a project
 /// the user trusted, and only inside the turn's Seatbelt profile.
+///
+/// # Safety
+/// `ws` must be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_verify_workspace_json(ws: *const c_char) -> *mut c_char {
     let Some(ws_path) = borrow(ws) else {
@@ -3104,6 +3247,10 @@ pub unsafe extern "C" fn chorus_verify_workspace_json(ws: *const c_char) -> *mut
 }
 
 /// Structural AST diff analysis to evaluate semantic vs cosmetic line changes.
+///
+/// # Safety
+/// `old_code` and `new_code` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_structural_diff_json(
     old_code: *const c_char,
@@ -3176,6 +3323,9 @@ fn pairing_result(
 
 /// Initiate a pairing session on the running daemon. Returns the session plus
 /// `endpoint`/`qr_payload` built from the port the daemon actually bound.
+///
+/// # Safety
+/// No pointer arguments. The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_pairing_initiate_json() -> *mut c_char {
     pairing_result(
@@ -3185,6 +3335,9 @@ pub unsafe extern "C" fn chorus_pairing_initiate_json() -> *mut c_char {
 }
 
 /// List paired devices from the daemon. Any failure is an error, never `[]`.
+///
+/// # Safety
+/// No pointer arguments. The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_pairing_devices_json() -> *mut c_char {
     pairing_result(
@@ -3194,6 +3347,10 @@ pub unsafe extern "C" fn chorus_pairing_devices_json() -> *mut c_char {
 }
 
 /// Revoke a paired device on the daemon. `ok:true` only when the daemon confirmed.
+///
+/// # Safety
+/// `device_id` must be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn chorus_pairing_revoke_json(device_id: *const c_char) -> *mut c_char {
     let Some(id) = borrow(device_id) else {
@@ -3203,6 +3360,25 @@ pub unsafe extern "C" fn chorus_pairing_revoke_json(device_id: *const c_char) ->
         catch_unwind(|| pairing_revoke_at(&daemon_socket(), id)),
         "revoke",
     )
+}
+
+/// Syntax spans for the code viewer. `path` only picks the language (by
+/// extension); `text` is the file's content as the shell will show it.
+/// JSON: {"ok":true,"lines":[[[start,len,kind],...],...]} — one entry per
+/// `\n`-separated line, offsets in UTF-8 bytes within that line, kind per
+/// `chorus_core::highlight::Kind`.
+///
+/// # Safety
+/// `path`, `text` valid NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_highlight(path: *const c_char, text: *const c_char) -> *mut c_char {
+    let (Some(path), Some(text)) = (borrow(path), borrow(text)) else {
+        return err("path/text must be valid UTF-8");
+    };
+    match catch_unwind(|| chorus_core::highlight::highlight(path, text)) {
+        Ok(lines) => out(serde_json::json!({"ok": true, "lines": lines}).to_string()),
+        Err(_) => err("panic in highlight"),
+    }
 }
 
 #[cfg(test)]
@@ -3708,24 +3884,5 @@ mod tests {
             sub_after.status,
             chorus_core::agent_control::SubagentStatus::Cancelled
         );
-    }
-}
-
-/// Syntax spans for the code viewer. `path` only picks the language (by
-/// extension); `text` is the file's content as the shell will show it.
-/// JSON: {"ok":true,"lines":[[[start,len,kind],...],...]} — one entry per
-/// `\n`-separated line, offsets in UTF-8 bytes within that line, kind per
-/// `chorus_core::highlight::Kind`.
-///
-/// # Safety
-/// `path`, `text` valid NUL-terminated UTF-8.
-#[no_mangle]
-pub unsafe extern "C" fn chorus_highlight(path: *const c_char, text: *const c_char) -> *mut c_char {
-    let (Some(path), Some(text)) = (borrow(path), borrow(text)) else {
-        return err("path/text must be valid UTF-8");
-    };
-    match catch_unwind(|| chorus_core::highlight::highlight(path, text)) {
-        Ok(lines) => out(serde_json::json!({"ok": true, "lines": lines}).to_string()),
-        Err(_) => err("panic in highlight"),
     }
 }

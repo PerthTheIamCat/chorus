@@ -166,6 +166,7 @@ pub struct StopOutcome {
 }
 
 impl StopOutcome {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only the macOS stop path refuses
     fn refused(r: Refusal) -> Self {
         StopOutcome {
             state: StopState::Refused,

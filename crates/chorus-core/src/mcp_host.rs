@@ -87,7 +87,7 @@ impl McpHostClient {
             }
         });
 
-        writeln!(stdin, "{}", init_req.to_string()).map_err(ChorusError::Io)?;
+        writeln!(stdin, "{}", init_req).map_err(ChorusError::Io)?;
 
         // 2. Send tools/list request
         let list_req = serde_json::json!({
@@ -96,7 +96,7 @@ impl McpHostClient {
             "method": "tools/list",
             "params": {}
         });
-        writeln!(stdin, "{}", list_req.to_string()).map_err(ChorusError::Io)?;
+        writeln!(stdin, "{}", list_req).map_err(ChorusError::Io)?;
 
         // 3. Read responses
         let stdout = child.stdout.take().ok_or_else(|| {

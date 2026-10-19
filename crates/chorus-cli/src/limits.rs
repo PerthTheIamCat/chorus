@@ -193,7 +193,7 @@ pub fn auth_failed(agent: &str) -> bool {
 /// The newest `rate_limits` Codex wrote under `codex_home`.
 pub fn codex_rate_limits(codex_home: &Path) -> Option<RateLimits> {
     let mut files = newest_rollouts(&codex_home.join("sessions"), 8);
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.sort_by_key(|f| std::cmp::Reverse(f.1));
     for (f, _) in files {
         let Ok(text) = std::fs::read_to_string(&f) else {
             continue;
@@ -422,7 +422,7 @@ fn is_leap_year(y: i64) -> bool {
 }
 
 fn parse_iso_to_unix(s: &str) -> Option<i64> {
-    let parts: Vec<&str> = s.split(|c| c == 'T' || c == 'Z' || c == '-' || c == ':').filter(|x| !x.is_empty()).collect();
+    let parts: Vec<&str> = s.split(['T', 'Z', '-', ':']).filter(|x| !x.is_empty()).collect();
     if parts.len() >= 6 {
         let year: i64 = parts[0].parse().ok()?;
         let month: i64 = parts[1].parse().ok()?;
@@ -436,9 +436,7 @@ fn parse_iso_to_unix(s: &str) -> Option<i64> {
         }
         let days_in_months = [31, if is_leap_year(year) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
         if (month as usize) >= 1 && (month as usize) <= 12 {
-            for m in 0..(month - 1) as usize {
-                d += days_in_months[m];
-            }
+            d += days_in_months[..(month - 1) as usize].iter().sum::<i64>();
             Some(d * 86400 + hour * 3600 + min * 60 + sec)
         } else {
             None
@@ -469,7 +467,7 @@ pub fn parse_antigravity_usage(text: &str) -> Option<RateLimits> {
                 for b in buckets {
                     let window_kind = b.get("window").and_then(|w| w.as_str()).unwrap_or("");
                     let rem_frac = b.get("remainingFraction").and_then(|x| x.as_f64()).unwrap_or(1.0);
-                    let used_pct = (1.0 - rem_frac).max(0.0).min(1.0) * 100.0;
+                    let used_pct = (1.0 - rem_frac).clamp(0.0, 1.0) * 100.0;
                     let desc_str = b.get("description").and_then(|x| x.as_str()).map(|x| x.to_string());
                     let reset_iso = b.get("resetTime").and_then(|x| x.as_str());
                     let resets_at = reset_iso.and_then(parse_iso_to_unix);
@@ -563,7 +561,7 @@ pub fn parse_antigravity_usage(text: &str) -> Option<RateLimits> {
             five_hour_used = Some((1.0 - rf) * 100.0);
             if five_hour_reset.is_none() {
                 if let Some(sec) = v.get("reset_in_seconds").and_then(|x| x.as_f64()) {
-                    let now_sec = (now_ms() / 1000) as i64;
+                    let now_sec = now_ms() / 1000;
                     five_hour_reset = Some(now_sec + sec as i64);
                 }
             }
@@ -741,7 +739,7 @@ mod tests {
         assert_eq!(p.window_minutes, Some(300));
         assert_eq!(p.resets_at, Some(1791564080));
         let s = r.secondary.unwrap();
-        assert_eq!(s.used_percent, 46.693975000000002);
+        assert_eq!(s.used_percent, 46.693975);
         assert_eq!(s.window_minutes, Some(10080));
         assert_eq!(s.resets_at, Some(1791949101));
     }

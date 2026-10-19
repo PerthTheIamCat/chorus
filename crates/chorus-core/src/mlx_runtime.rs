@@ -224,7 +224,10 @@ mod tests {
             temperature: 0.2,
         };
 
-        engine.load_model(config, 4.2).expect("model loading must succeed");
+        // The ceiling scales with this host's RAM (4.0 GB off macOS), so size
+        // the model under it; rejection is covered by the ceiling test above.
+        let size_gb = engine.hardware.recommended_max_model_gb.min(4.2);
+        engine.load_model(config, size_gb).expect("model loading must succeed");
 
         let (text, stats) = engine
             .generate_tokens("fn main() { println!(\"Chorus\"); }", 20)

@@ -35,6 +35,7 @@ impl InteractionStatus {
         }
     }
 
+    #[allow(clippy::should_implement_trait)] // returns Option, kept for existing callers
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "pending" => Some(Self::Pending),
@@ -64,6 +65,7 @@ impl InteractionDecision {
         }
     }
 
+    #[allow(clippy::should_implement_trait)] // returns Option, kept for existing callers
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "allow" => Some(Self::Allow),
@@ -94,6 +96,7 @@ impl RiskLevel {
         }
     }
 
+    #[allow(clippy::should_implement_trait)] // returns Option, kept for existing callers
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "low" => Some(Self::Low),

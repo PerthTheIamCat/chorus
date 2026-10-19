@@ -30,6 +30,7 @@ impl LifecycleMode {
         }
     }
 
+    #[allow(clippy::should_implement_trait)] // returns Option, kept for existing callers
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "foreground" => Some(Self::Foreground),
@@ -147,8 +148,8 @@ pub fn install_signal_handlers(manager: LifecycleManager) {
     unsafe {
         // Ignore SIGPIPE so disconnected HTTP/SSE clients don't kill the daemon process
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
-        libc::signal(libc::SIGINT, sigint_handler as usize);
-        libc::signal(libc::SIGTERM, sigterm_handler as usize);
+        libc::signal(libc::SIGINT, sigint_handler as extern "C" fn(libc::c_int) as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, sigterm_handler as extern "C" fn(libc::c_int) as libc::sighandler_t);
     }
 
     // Spawn a background watcher thread that bridges GLOBAL_SHUTDOWN to the manager

@@ -135,6 +135,7 @@ pub fn snapshot(_opts: &SnapshotOptions) -> Snapshot {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)] // only stop.rs on macOS asks for it
 pub(crate) fn daemon_pids() -> Vec<i32> {
     Vec::new()
 }
@@ -149,10 +150,13 @@ pub(crate) fn daemon_pids() -> Vec<i32> {
         .collect()
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only read by the macOS sampler
 type Key = (i32, u64, u64);
 /// `(port, pid, local addr)` of a listener another user owns.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only read by the macOS sampler
 type Foreign = (u16, i32, String);
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only read by the macOS sampler
 #[derive(Default)]
 struct State {
     /// Previous CPU sample per process, for CPU% = Δcpu / Δwall.
@@ -163,6 +167,7 @@ struct State {
     netstat: Option<(std::time::Instant, Vec<Foreign>)>,
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only read by the macOS sampler
 static STATE: std::sync::Mutex<Option<State>> = std::sync::Mutex::new(None);
 
 #[cfg(target_os = "macos")]
@@ -541,6 +546,7 @@ pub fn handle(req: Request, protect: &[String]) -> Result<serde_json::Value, Str
 
 /// UDP is noisy: drop port 0 and the ephemeral range (49152–65535) — those
 /// are clients, not services.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only read by the macOS sampler
 fn keep_socket(udp: bool, port: u16) -> bool {
     port != 0 && !(udp && port >= 49152)
 }
@@ -560,6 +566,7 @@ fn netstat_listeners() -> Vec<Foreign> {
     parse_netstat(&String::from_utf8_lossy(&out.stdout))
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only read by the macOS sampler
 pub(crate) fn parse_netstat(text: &str) -> Vec<Foreign> {
     let mut out = Vec::new();
     for line in text.lines() {

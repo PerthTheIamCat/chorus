@@ -42,10 +42,11 @@ Swift ทำแค่วาดกับรับ input เพื่อให้�
 
 ---
 
-## 3. สถานะตอนนี้ (12 ก.ย. 2026)
+## 3. สถานะตอนนี้ (19 ต.ค. 2026 · ปล่อยแล้วถึง v0.1.4 — ดู `CHANGELOG.md`)
 
-**Phase 0–2 ครบ + macOS shell ครบ + warm tier + UI ที่เลือกโหมดเองแล้ว** — เทสต์ผ่าน 76/76 · clippy 0 warning · build 0 warning
-(ตัวเลขนี้ verify โดย build ใหม่จากศูนย์บนเครื่องอื่น ไม่ใช่เชื่อ log เดิม)
+**Phase 0–2 ครบ + macOS shell ครบ + warm tier + UX v2 (workbench / orchestra / sub sessions / live updates) ครบ**
+— บน Linux: เทสต์ผ่าน 371 · ล้ม 6 ตัวที่ต้องมี Seatbelt (ดู 7.22) · clippy 0 warning · build 0 warning · bench invariant ครบ
+(ตัวเลขนี้ verify บน container Linux 19 ต.ค. — ยังไม่ได้รันซ้ำบน macOS · `SCHEMA_VERSION` = 7)
 
 | crate | ทำอะไร |
 |---|---|
@@ -53,6 +54,8 @@ Swift ทำแค่วาดกับรับ input เพื่อให้�
 | `chorus-acp` | ACP client + `acp-probe` + mock (`--fail`) + `CodexAgent` + `bridge_for` (codex/claude/gemini) · strip `CLAUDECODE` |
 | `chorus-cli` | lib+bin · `bench`/`run`(+`--chain`/`--read-only`)/`handoff`/`memory`/`compare` · `Session` engine |
 | `chorus-ffi` | C ABI (`chorus.h`) — engine/run_turn(+interactive callback)/run_relay/compare/handoff/events_since/working_diff/snapshot/restore/reject_hunks/memory_state+review/**compact/uncompacted/task_state** · JSON ล้วน · panic-guarded |
+| `chorus-daemon` | `chorusd` headless engine — Unix socket `~/.chorus/engine.sock` + SSE ให้ shell/CLI/มือถือ · System Monitor · pairing |
+| `chorus-eval` | harness eval — Tier 0 invariants · Tier 1 router gate · metrics |
 | `apps/macos` | SwiftUI shell — sidebar (single/relay/compare/**ask-each**) · thread + agent blame · Context/Changes(**per-hunk keep-reject**)/Memory panes · handoff + compare sheets · **interactive permission dialog** · **Task state pane + warm-tier backlog (`compactIfIdle` หลังทุกเทิร์น)** · `apps/macos/build.sh` |
 
 **Flow ที่ทำงานจริงกับ Codex**: หลาย agent ใน session เดียว · ledger เป็น SoT · จำข้ามเทิร์นจาก ledger
@@ -65,7 +68,6 @@ relay auto-failover 429/quota · compare (fork ต่อ agent) · projector เ
 - **Ollama compaction** — ใช้ได้จริงแล้วผ่าน `chorus compact` (ไม่อยู่บน turn path อีกต่อไป) · `brew install ollama && ollama pull qwen2.5:3b` แล้วตั้ง `CHORUS_SUMMARY_MODEL`
 - **embedding + sqlite-vec** — ต้องตัดสิน dep (MLX / `NLEmbedding` / sqlite-vec)
 - **Seatbelt sandbox · notarize · .app bundle** — ต้อง Apple Developer account
-- **event push** — shell ยัง**ไม่ poll และไม่มี push**: panel อัปเดตตอนจบเทิร์นเท่านั้น (ยกเว้น context meter ที่วิ่งผ่าน progress callback) · ตัดสินวิธีแล้วใน `.scratch/chorus-ux-overhaul/issues/19-live-updates.md` (push สัญญาณ + pull delta ผ่าน handle อ่านอย่างเดียว)
 
 ### ตัวเลขจาก `chorus bench` (78 events) — baseline ที่ห้ามถอยหลัง
 
@@ -74,7 +76,7 @@ relay auto-failover 429/quota · compare (fork ต่อ agent) · projector เ
 ledger ดิบ 103,553 token
   @200k window → 16,226 token (15.7%)   demoted/dropped 0/0
   @6k  window →  2,490 token (2.4%)     demoted/dropped 40/11
-store.db 100 KB / 78 events   (schema v3 เพิ่มตาราง summary)
+store.db 172 KB / 78 events   (schema v7 · เดิม 100 KB ตอน v3 — ไม่ใช่ invariant แต่จับตาไว้)
 ```
 
 **Invariant 3 ข้อ** — ถ้า bench แสดงผิดจากนี้แปลว่ามี regression:
@@ -104,7 +106,7 @@ cargo install --path crates/chorus-acp    # ได้ acp-probe ซึ่ง `ch
 ไม่ลงก็ได้ ใช้ `cargo run -p chorus-cli -- <คำสั่ง>` ในโฟลเดอร์โปรเจกต์แทน
 
 ```bash
-cargo test                              # 76 tests
+cargo test                              # ~377 tests (6 ตัวผ่านเฉพาะ macOS — ดู 7.22)
 cargo run -p chorus-cli --bin chorus -- bench   # วัด invariant (ต้องใส่ --bin chorus เพราะ crate มีหลาย binary)
 cargo run --bin acp-probe -- --cwd /tmp/acp-scratch --mock         # ลอง ACP กับ agent ปลอม
 cargo run -p chorus-acp --example codex_smoke -- /tmp/codex-smoke   # CodexAgent กับ bridge จริง (ต้อง codex login)
@@ -437,6 +439,14 @@ sandbox ที่ทำให้คนทำงานไม่ได้คือ
   อนุญาตเฉพาะ `known_hosts*` กับ `control/` — `config` ต้องอ่านอย่างเดียว (`ProxyCommand` รันนอก sandbox ทีหลัง)
 
 ยังเป็นข้อจำกัดโดยตั้งใจ: `git push -u` / `git branch --set-upstream-to` เขียน `.git/config` ไม่ได้ (carve-out ใน 7.20)
+
+### 7.22 เทสต์ 6 ตัวผ่านได้เฉพาะบน macOS (วัด 19 ต.ค. 2026)
+
+turn ที่ policy เป็น read-only (`DenyAll`, `ReadOnly`, orchestrator, reader child ที่ไม่มี worktree)
+**ต้องปฏิเสธ**ถ้าครอบด้วย Seatbelt ไม่ได้ (`Cannot enforce read-only sandbox`) — ตั้งใจไว้ ห้ามแก้ให้รันต่อ
+บน Linux จึงล้ม: `orchestra_core` ×4, `orchestra_failover::lead_at_its_limit…`, `session::the_ledger_survives…`
+ไม่ใช่ regression · ฝั่ง Linux มี `restrictive_policies_fail_closed_without_seatbelt` ยืนยันว่าปฏิเสธจริง
+จะ gate ด้วย `cfg_attr(..., ignore)` หรือไม่ ต้องให้เจ้าของโปรเจกต์ตัดสิน · CI ตอนนี้มีแค่ release บน `macos-14`
 
 ### 7.3 repo เงาสำหรับ checkpoint
 ต้องยึด `.gitignore` ของผู้ใช้ ไม่งั้น `.chorus/` จะโตกว่าโปรเจกต์จริง

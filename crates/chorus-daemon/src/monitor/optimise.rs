@@ -527,7 +527,7 @@ fn worktree_items(ws: &Path) -> Vec<Item> {
             selectable: matches!(kind, "orphaned" | "merged" | "discarded"),
         });
     }
-    items.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    items.sort_by_key(|i| std::cmp::Reverse(i.bytes));
     items
 }
 
@@ -569,7 +569,7 @@ fn model_items() -> Vec<Item> {
             selectable: true,
         });
     }
-    items.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    items.sort_by_key(|i| std::cmp::Reverse(i.bytes));
     items
 }
 

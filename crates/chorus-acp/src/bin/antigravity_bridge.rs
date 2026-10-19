@@ -121,7 +121,7 @@ fn main() -> anyhow::Result<()> {
                         let mut sent_any = false;
                         if let Some(stdout_stream) = child.stdout.take() {
                             let reader = BufReader::new(stdout_stream);
-                            for stream_line in reader.lines().flatten() {
+                            for stream_line in reader.lines().map_while(Result::ok) {
                                 if let Ok(event_json) = serde_json::from_str::<Value>(stream_line.trim()) {
                                     handle_agy_event(&mut out, session_id, &event_json, &mut sent_any)?;
                                 }

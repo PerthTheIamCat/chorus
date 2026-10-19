@@ -43,6 +43,21 @@ fn restrictive_policies_fail_closed_when_sandbox_is_disabled() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Off macOS there is no Seatbelt, so a read-only promise cannot be kept and
+/// the turn must refuse to start — no env switch involved.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn restrictive_policies_fail_closed_without_seatbelt() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Session::create(&dir.path().join("ledger.db"), dir.path(), "no seatbelt").unwrap()
+        .with_bridge(rogue_bridge("must-not-be-written"));
+    for policy in [Policy::DenyAll, Policy::ReadOnly] {
+        let err = s.run_turn("codex", "openai", "fixture", policy).err().expect("restrictive turn must fail");
+        assert!(err.to_string().contains("Cannot enforce read-only sandbox"), "{err}");
+        assert!(!dir.path().join("must-not-be-written").exists());
+    }
+}
+
 /// A mock that writes `name` into the workspace mid-turn without asking.
 fn rogue_bridge(name: &str) -> Vec<String> {
     vec![

@@ -96,7 +96,7 @@ impl SymbolExtractor {
                     });
                 }
             } else if let Some(rest) = trimmed.strip_prefix("pub struct ").or_else(|| trimmed.strip_prefix("struct ")) {
-                if let Some(name) = rest.split(|c: char| c == '{' || c == '(' || c == ';' || c == '<').next().map(str::trim) {
+                if let Some(name) = rest.split(['{', '(', ';', '<']).next().map(str::trim) {
                     out.push(SymbolDef {
                         file_path: path.to_string(),
                         name: name.to_string(),
@@ -106,7 +106,7 @@ impl SymbolExtractor {
                     });
                 }
             } else if let Some(rest) = trimmed.strip_prefix("pub trait ").or_else(|| trimmed.strip_prefix("trait ")) {
-                if let Some(name) = rest.split(|c: char| c == '{' || c == ':' || c == '<').next().map(str::trim) {
+                if let Some(name) = rest.split(['{', ':', '<']).next().map(str::trim) {
                     out.push(SymbolDef {
                         file_path: path.to_string(),
                         name: name.to_string(),
@@ -116,7 +116,7 @@ impl SymbolExtractor {
                     });
                 }
             } else if let Some(rest) = trimmed.strip_prefix("pub enum ").or_else(|| trimmed.strip_prefix("enum ")) {
-                if let Some(name) = rest.split(|c: char| c == '{' || c == '<').next().map(str::trim) {
+                if let Some(name) = rest.split(['{', '<']).next().map(str::trim) {
                     out.push(SymbolDef {
                         file_path: path.to_string(),
                         name: name.to_string(),
@@ -142,7 +142,7 @@ impl SymbolExtractor {
                     let lead = trimmed[..pos].trim();
                     if lead.is_empty() || ["public", "private", "open", "fileprivate", "internal", "final", "mutating", "static"].contains(&lead) {
                         let rest = &trimmed[pos + prefix.len()..];
-                        let name = rest.split(|c: char| c == '(' || c == '<' || c == ':' || c == '{').next().unwrap_or("").trim();
+                        let name = rest.split(['(', '<', ':', '{']).next().unwrap_or("").trim();
                         if !name.is_empty() {
                             let kind = prefix.trim();
                             let sig = trimmed.split('{').next().unwrap_or(trimmed).trim();
@@ -169,9 +169,9 @@ impl SymbolExtractor {
 
             for prefix in &["export function ", "function ", "export class ", "class ", "export interface ", "interface ", "export type ", "type "] {
                 if let Some(rest) = trimmed.strip_prefix(prefix) {
-                    let name = rest.split(|c: char| c == '(' || c == '<' || c == '=' || c == '{' || c == ' ').next().unwrap_or("").trim();
+                    let name = rest.split(['(', '<', '=', '{', ' ']).next().unwrap_or("").trim();
                     if !name.is_empty() {
-                        let kind = prefix.trim().split_whitespace().last().unwrap_or("fn");
+                        let kind = prefix.split_whitespace().last().unwrap_or("fn");
                         let sig = trimmed.split('{').next().unwrap_or(trimmed).trim();
                         out.push(SymbolDef {
                             file_path: path.to_string(),
@@ -206,7 +206,7 @@ impl SymbolExtractor {
                     });
                 }
             } else if let Some(rest) = trimmed.strip_prefix("class ") {
-                let name = rest.split(|c: char| c == '(' || c == ':').next().unwrap_or("").trim();
+                let name = rest.split(['(', ':']).next().unwrap_or("").trim();
                 if !name.is_empty() {
                     let sig = trimmed.split(':').next().unwrap_or(trimmed).trim();
                     out.push(SymbolDef {
@@ -334,10 +334,10 @@ impl RepoMapEngine {
         for _ in 0..max_iterations {
             let mut dangling_mass = 0.0;
 
-            for i in 0..n {
+            for (i, &ri) in r.iter().enumerate() {
                 let out_deg = graph.outgoing_edges.get(&i).map_or(0, |set| set.len());
                 if out_deg == 0 {
-                    dangling_mass += r[i];
+                    dangling_mass += ri;
                 }
             }
 

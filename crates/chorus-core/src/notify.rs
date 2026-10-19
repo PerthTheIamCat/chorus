@@ -6,6 +6,7 @@
 
 use crate::Result;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
 /// Default subtle macOS system chime.

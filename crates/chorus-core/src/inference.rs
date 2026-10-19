@@ -59,7 +59,7 @@ impl LocalInferenceEngine for InProcessEngine {
     }
 
     fn is_ready(&self) -> bool {
-        self.model_path.as_ref().map_or(false, |p| p.exists())
+        self.model_path.as_ref().is_some_and(|p| p.exists())
     }
 
     fn tokenize(&self, text: &str) -> Result<Vec<u32>> {

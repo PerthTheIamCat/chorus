@@ -56,15 +56,10 @@ impl StructuralDiff {
             }
         }
 
-        let mut cosmetic_lines = cosmetic_lines;
-        let mut semantic_lines = semantic_lines;
-
         let old_norm = Self::normalize_tokens(old_code);
         let new_norm = Self::normalize_tokens(new_code);
 
-        let significance = if total_lines_changed == 0 {
-            ChangeSignificance::Cosmetic
-        } else if old_norm == new_norm {
+        let significance = if total_lines_changed == 0 || old_norm == new_norm {
             ChangeSignificance::Cosmetic
         } else if semantic_lines == 0 {
             ChangeSignificance::Documentation

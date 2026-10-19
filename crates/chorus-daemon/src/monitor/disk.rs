@@ -199,7 +199,7 @@ pub fn report(workspaces: &[String]) -> DiskReport {
         cats.other += u.other;
         projects.push(u);
     }
-    projects.sort_by(|a, b| b.total.cmp(&a.total));
+    projects.sort_by_key(|p| std::cmp::Reverse(p.total));
     cats.models = du(&models_dir(), &mut seen);
     if let Some(dir) = app_support() {
         cats.memory = du(&dir.join("projects"), &mut seen);

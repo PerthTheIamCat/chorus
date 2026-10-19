@@ -94,10 +94,13 @@ impl TaskClassifier {
             "why", "analyze", "explain", "compare", "plan how", "investigate",
             "tradeoff",
         ];
-        if think_keywords.iter().any(|k| text.contains(k)) {
-            if !text.contains("แก้") && !text.contains("fix") && !text.contains("implement") && !text.contains("สร้าง") {
-                return TaskKind::Think;
-            }
+        if think_keywords.iter().any(|k| text.contains(k))
+            && !text.contains("แก้")
+            && !text.contains("fix")
+            && !text.contains("implement")
+            && !text.contains("สร้าง")
+        {
+            return TaskKind::Think;
         }
 
         // Default to Do for actionable tasks
