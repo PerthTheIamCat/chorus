@@ -796,7 +796,14 @@ struct ContentView: View {
         }
     }
 
+    // One chain this long made the type-checker give up ("unable to
+    // type-check this expression in reasonable time") on CI's macos-26
+    // runner. Each `some View` property below is checked on its own.
     var body: some View {
+        bodyModals
+    }
+
+    private var bodyLayout: some View {
         GeometryReader { proxy in
             Group {
                 if maximizedPanel != .none {
@@ -1047,6 +1054,10 @@ struct ContentView: View {
         .onChange(of: engine.routerModels) { _, _ in
             reconcileRouterModel()
         }
+    }
+
+    private var bodyObservers: some View {
+        bodyLayout
         .onChange(of: dismissedSetupCards) { _, value in
             if value.isEmpty { suggestionsPaused = false }
         }
@@ -1156,6 +1167,10 @@ struct ContentView: View {
         .onChange(of: engine.subagentsByDB) { _, dbSubs in
             checkSubagentNotifications(in: dbSubs)
         }
+    }
+
+    private var bodyModals: some View {
+        bodyObservers
         .onReceive(AppCommandCenter.shared.fire) { run($0) }
         .onAppear { syncCommandState() }
         .onChange(of: engine.sessionID) { _, _ in syncCommandState() }
