@@ -23,12 +23,18 @@ struct ConnectionPermit(Arc<AtomicUsize>);
 
 impl ConnectionPermit {
     fn acquire(active: &Arc<AtomicUsize>) -> Option<Self> {
-        active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < MAX_CONNECTIONS).then_some(n + 1)
-            })
-            .ok()
-            .map(|_| Self(active.clone()))
+        // A plain CAS loop: `fetch_update` is deprecated from Rust 1.99 in
+        // favour of `try_update`, which older toolchains don't have.
+        let mut n = active.load(Ordering::Acquire);
+        loop {
+            if n >= MAX_CONNECTIONS {
+                return None;
+            }
+            match active.compare_exchange_weak(n, n + 1, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return Some(Self(active.clone())),
+                Err(current) => n = current,
+            }
+        }
     }
 }
 

@@ -467,7 +467,7 @@ pub fn snapshot(opts: &SnapshotOptions) -> Snapshot {
             });
         }
     }
-    services.sort_by(|a, b| (a.port, a.udp, a.process.pid).cmp(&(b.port, b.udp, b.process.pid)));
+    services.sort_by_key(|s| (s.port, s.udp, s.process.pid));
 
     // Forget processes that are gone so the caches do not grow forever.
     if !opts.chorus_only {

@@ -2,7 +2,9 @@ name: ci
 
 # Every push and pull request: the checks a contributor runs locally
 # (CLAUDE.md §4), on macOS because the Seatbelt sandbox, and the tests that
-# need it to refuse or allow a read-only turn, only exist there.
+# need it to refuse or allow a read-only turn, only exist there. macos-26:
+# the shell uses macOS 26 SDK symbols (ToolbarSpacer) behind #available,
+# which still need that SDK to compile — macos-14's Xcode cannot build it.
 on:
   push:
     branches: [main]
@@ -17,7 +19,7 @@ concurrency:
 
 jobs:
   rust:
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -34,7 +36,7 @@ jobs:
         run: cargo run -p chorus-cli --bin chorus -- bench
 
   macos-app:
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
