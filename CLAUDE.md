@@ -64,7 +64,8 @@ Swift ทำแค่วาดกับรับ input เพื่อให้�
 relay auto-failover 429/quota · compare (fork ต่อ agent) · projector เขียน agent files · memory `memory_propose`→approve queue · per-hunk diff reject · interactive permission
 
 **ยังต้องเพื่อน (แต่ไม่บล็อกอะไร)**:
-- **Gemini adapter** — ไม่มี `gemini` CLI (`bridge_for` เตรียมไว้ · ลง CLI แล้วใช้ได้ทันที)
+- **Gemini adapter** — ไม่มี `gemini` CLI (`bridge_for` เตรียมไว้ · ใช้ `gemini --acp` ตาม docs ทางการ 19 ต.ค. 2026 — `--experimental-acp` deprecated · CLI เก่าตั้ง `CHORUS_GEMINI_BRIDGE`)
+- **ทดสอบกับ agent จริงทั้ง flow** — `scripts/smoke-real-agents.sh [claude gemini codex]` บน Mac ที่ login แล้ว: เขียนไฟล์ได้ · agent ตัวที่สองรู้ว่าตัวแรกทำอะไร (จาก ledger) · relay ข้าม bridge ที่พัง — **ยังไม่เคยรันกับ Claude/Gemini จริง**
 - **Claude bridge** — package ถูก rename เป็น `@zed-industries/claude-agent-acp` (ตัวเก่า `claude-code-acp` deprecated) · `bridge_for` ชี้ตัวใหม่แล้ว ถ้าเครื่องยังมีแต่ตัวเก่าให้ตั้ง `CHORUS_CLAUDE_BRIDGE="npx -y @zed-industries/claude-code-acp"` · เครื่องนี้ `claude` OAuth หมดอายุ → login ใหม่
 - **Ollama compaction** — ใช้ได้จริงแล้วผ่าน `chorus compact` (ไม่อยู่บน turn path อีกต่อไป) · `brew install ollama && ollama pull qwen2.5:3b` แล้วตั้ง `CHORUS_SUMMARY_MODEL`
 - **embedding + sqlite-vec** — ต้องตัดสิน dep (MLX / `NLEmbedding` / sqlite-vec)
@@ -121,6 +122,7 @@ cargo run -p chorus-cli -- compare "<prompt>" --db /tmp/s.db --session 1 --agent
 cargo run -p chorus-cli -- memory pending --db /tmp/s.db          # approve queue
 cargo run -p chorus-cli -- compact --db /tmp/s.db --session 1 [--limit N]   # เติม warm tier (L1/L2)
 cargo run -p chorus-cli -- demo          # เล่าทั้งเรื่องด้วย agent ปลอม ไม่ต้องมี API key
+scripts/smoke-real-agents.sh            # e2e กับ agent จริงที่ login ไว้ (ส่ง request จริง ไม่กี่ครั้ง)
 cargo run -p chorus-cli -- doctor        # ทำไมเทิร์นถึงรัน/ไม่รัน — agent, login, bridge, env, error ที่ failover ไม่รู้จัก
 cargo run -p chorus-cli -- sessions list                     # session ของ Claude Code / Codex / Gemini CLI ในเครื่อง
 cargo run -p chorus-cli -- sessions search "<คำ>"            # ค้นชื่อ/โฟลเดอร์/เนื้อหา

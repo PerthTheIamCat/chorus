@@ -76,7 +76,10 @@ pub fn bridge_for(agent_name: &str) -> Vec<String> {
     } else if n.contains("antigravity") || n.contains("agy") {
         ("CHORUS_ANTIGRAVITY_BRIDGE", &["antigravity-acp"])
     } else if n.contains("gemini") {
-        ("CHORUS_GEMINI_BRIDGE", &["gemini", "--experimental-acp"])
+        // `--acp` per google-gemini/gemini-cli docs/cli/acp-mode.md (checked
+        // 19 Oct 2026); `--experimental-acp` is the deprecated spelling. An
+        // older CLI: CHORUS_GEMINI_BRIDGE="gemini --experimental-acp".
+        ("CHORUS_GEMINI_BRIDGE", &["gemini", "--acp"])
     } else {
         ("CHORUS_CODEX_BRIDGE", DEFAULT_BRIDGE)
     };
