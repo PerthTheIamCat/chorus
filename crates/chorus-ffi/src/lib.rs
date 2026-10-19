@@ -1406,6 +1406,40 @@ pub unsafe extern "C" fn chorus_run_plan_with_attachments(
     }
 }
 
+/// Rewind to just before the user's message `seq` (see
+/// `Session::rewind_before`). `code` restores the workspace files as they
+/// were when it was sent; `conversation` continues the chat in a fork that
+/// ends right before it. Returns `{ok, session_id, text, code_restored,
+/// backup}` — the shell opens `session_id` and offers `text` again.
+///
+/// # Safety
+/// `e` must be live or null.
+/// The returned string must be freed with `chorus_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_rewind_before_json(
+    e: *mut ChorusEngine,
+    seq: i64,
+    code: c_int,
+    conversation: c_int,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        engine
+            .session
+            .rewind_before(seq, code != 0, conversation != 0)
+    })) {
+        Ok(Ok(r)) => {
+            let mut v = serde_json::to_value(&r).unwrap_or_default();
+            v["ok"] = serde_json::Value::Bool(true);
+            out(v.to_string())
+        }
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in rewind_before"),
+    }
+}
+
 /// The message the shell sends, with the user's own permission, when they
 /// approve a plan. Kept in Rust so the shell holds no prompt text.
 /// The returned string must be freed with `chorus_string_free`.

@@ -1765,7 +1765,10 @@ struct ContentView: View {
                  attachments: atts,
                  agents: engine.agents,
                  thoughts: th,
-                 onDeleteAttachment: engine.deleteAttachment)
+                 onDeleteAttachment: engine.deleteAttachment,
+                 // Echoed rows (negative seq) aren't in the ledger yet.
+                 onRewind: isUser && ev.kind == "msg" && ev.seq > 0
+                     ? { code in rewindChat(before: ev.seq, code: code) } : nil)
             .id(ev.seq)
     }
 
@@ -2602,6 +2605,21 @@ struct ContentView: View {
             engine.sendInteractive(text, agent: first)
         } else {
             engine.sendRelay(text, agents: agents, level: permission.rawValue)
+        }
+    }
+
+    /// Right-click › ย้อน on one of the user's messages: continue from just
+    /// before it in a fork, with the message back in the composer to edit.
+    private func rewindChat(before seq: Int64, code: Bool) {
+        engine.rewind(beforeSeq: seq, code: code, conversation: true, db: dbPath) { text, error in
+            if let error {
+                engine.lastError = error
+                return
+            }
+            if let text {
+                draftBox.text = text
+                composerFocus &+= 1
+            }
         }
     }
 
@@ -3800,14 +3818,50 @@ struct FileChangesHeader: View {
     }
 }
 
+/// Right-click menu on a user message: edit-and-resend (chat only), or chat
+/// and files, which asks first because it changes the workspace.
+private struct RewindMenu: ViewModifier {
+    let onRewind: ((Bool) -> Void)?
+    @Binding var confirmFiles: Bool
+
+    func body(content: Content) -> some View {
+        if let onRewind {
+            content
+                .contextMenu {
+                    Button {
+                        onRewind(false)
+                    } label: {
+                        Label("แก้ข้อความนี้แล้วส่งใหม่", systemImage: "arrow.uturn.backward")
+                    }
+                    Button {
+                        confirmFiles = true
+                    } label: {
+                        Label("ย้อนแชทและไฟล์กลับไปก่อนข้อความนี้…", systemImage: "clock.arrow.circlepath")
+                    }
+                }
+                .confirmationDialog("ย้อนไฟล์กลับไปก่อนข้อความนี้?", isPresented: $confirmFiles) {
+                    Button("ย้อนแชทและไฟล์", role: .destructive) { onRewind(true) }
+                } message: {
+                    Text("ไฟล์ใน workspace จะกลับไปเหมือนตอนส่งข้อความนี้ Chorus เก็บสภาพปัจจุบันไว้ใน shadow repo ก่อน และแชทเดิมยังอยู่ครบ — คุยต่อใน session ที่แตกออกมา")
+                }
+        } else {
+            content
+        }
+    }
+}
+
 struct EventRow: View {
     let event: LedgerEvent
     var attachments: [SessionAttachment] = []
     var agents: [Engine.AgentInfo] = []
     var thoughts: String? = nil
     var onDeleteAttachment: (Int64) -> Void = { _ in }
+    /// Set on the user's own messages: rewind to just before it
+    /// (`true` = files too). Rust does the work; this only asks.
+    var onRewind: ((Bool) -> Void)? = nil
 
     @State private var isHovered = false
+    @State private var confirmFileRewind = false
     @State private var copied = false
 
     private var isUser: Bool { event.actor == "user" }
@@ -3905,6 +3959,7 @@ struct EventRow: View {
                 )
                 .shadow(color: .black.opacity(isUser ? 0.04 : 0.03), radius: 6, y: 2)
                 .frame(maxWidth: isUser ? 680 : .infinity, alignment: isUser ? .trailing : .leading)
+                .modifier(RewindMenu(onRewind: onRewind, confirmFiles: $confirmFileRewind))
 
             if !attachments.isEmpty {
                 ForEach(attachments) { file in

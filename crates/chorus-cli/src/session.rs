@@ -13,6 +13,7 @@ pub use chorus_acp::codex::{Permission, PermissionAsk};
 use chorus_acp::sandbox;
 use chorus_core::attachments::{self, Attachment};
 use chorus_core::checkpoint::Checkpoint;
+use chorus_core::checkpoint_dag::CheckpointDag;
 use chorus_core::compaction;
 use chorus_core::context::{AssembleInput, Assembler, Budget, Tier, TurnItem};
 use chorus_core::handoff::{Brief, BriefInput, HandoffMeta, HandoffReason};
@@ -147,6 +148,20 @@ pub struct HandoffResult {
     pub agent_seqs: Vec<i64>,
     pub stop_reason: String,
 }
+
+/// What `Session::rewind_before` did.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RewindReport {
+    /// The fork the conversation continues in (the original is untouched).
+    pub session_id: i64,
+    /// The message rewound to, for the composer to offer again.
+    pub text: String,
+    pub code_restored: bool,
+    /// Snapshot of the workspace taken just before the code was restored,
+    /// so the rewind itself can be undone with `restore_to`.
+    pub backup: Option<String>,
+}
+
 /// The never-trimmed tier of the context window.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskState {
@@ -1202,6 +1217,7 @@ impl Session {
             attachments::link_to_event(self.store.conn_mut(), self.sess, &event, attachment_ids)?
         };
         self.announce(user_seq);
+        self.mark_rewind_point(user_seq, user_text);
         let bridge = self.resolve_bridge(agent_name, &[]);
         let outcome = self.one_turn(agent_name, &bridge, &prompt, policy, attachment_ids)?;
         let agent_seqs = self.persist_outcome(&outcome, agent_actor, user_seq)?;
@@ -2314,6 +2330,7 @@ impl Session {
             attachments::link_to_event(self.store.conn_mut(), self.sess, &event, attachment_ids)?
         };
         self.announce(user_seq);
+        self.mark_rewind_point(user_seq, user_text);
         let bridge = self.resolve_bridge(agent_name, &[]);
 
         // A dialog the agent never opens protects nothing. Codex writes files
@@ -2569,6 +2586,86 @@ impl Session {
 
     /// Tell the shell this session's ledger now reaches `seq`. A hint only:
     /// the shell pulls the rows itself on its read-only handle.
+    /// Remember the workspace as it was when the user sent `seq` — the turn
+    /// guard taken just before it — so the message can later be rewound to.
+    /// A failed bind only costs that message its code rewind; never the turn.
+    fn mark_rewind_point(&self, seq: i64, text: &str) {
+        let Some(sha) = self.last_turn_guard.as_deref().filter(|s| !s.is_empty()) else {
+            return;
+        };
+        let label: String = text.chars().take(80).collect();
+        if let Err(e) = CheckpointDag::bind(&self.store, self.sess, seq, sha, &label) {
+            eprintln!("chorus: no rewind point for message {seq}: {e}");
+        }
+    }
+
+    /// Go back to just before the user's message `seq`. With `conversation`,
+    /// the chat continues in a fork that ends right before it — nothing is
+    /// deleted and the original stays one click away (rule 2.2). With `code`,
+    /// the workspace returns to how it was when that message was sent, after
+    /// a snapshot of the current tree so the rewind itself can be undone.
+    pub fn rewind_before(
+        &mut self,
+        seq: i64,
+        code: bool,
+        conversation: bool,
+    ) -> Result<RewindReport> {
+        anyhow::ensure!(code || conversation, "nothing to rewind");
+        let c = self.store.conn();
+        let hist = ledger::history(c, self.sess, 1_000_000)?;
+        let i = hist
+            .iter()
+            .position(|e| e.seq == seq)
+            .context("that message is not in this session")?;
+        let ev = &hist[i];
+        anyhow::ensure!(
+            ev.kind == EventKind::Msg && ev.actor == self.user,
+            "only a message the user sent can be rewound to"
+        );
+        let text = ledger::body(c, ev)?;
+
+        let (mut backup, mut code_restored) = (None, false);
+        if code {
+            let ck = self
+                .checkpoint
+                .as_ref()
+                .context("this workspace has no shadow repo, so its files cannot be rewound")?;
+            let rec = CheckpointDag::get_turn_checkpoint(&self.store, seq)?.context(
+                "no file snapshot for this message (sent before rewind existed) — \
+                 rewind the conversation only",
+            )?;
+            backup = Some(ck.snapshot("before rewind")?);
+            ck.restore(&rec.commit_sha)?;
+            code_restored = true;
+        }
+
+        if !conversation {
+            return Ok(RewindReport {
+                session_id: self.sess,
+                text,
+                code_restored,
+                backup,
+            });
+        }
+        // Fork right before the message; seqs are global, so the previous
+        // event may live in a parent session and the fork still reads it.
+        let at = if i > 0 { hist[i - 1].seq } else { seq - 1 };
+        let title: String = c
+            .query_row(
+                "SELECT title FROM session WHERE id = ?1",
+                [self.sess],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        let fork = ledger::fork(c, self.sess, at, &format!("{title} (ย้อนกลับ)"))?;
+        Ok(RewindReport {
+            session_id: fork,
+            text,
+            code_restored,
+            backup,
+        })
+    }
+
     fn announce(&self, seq: i64) {
         chorus_acp::push(self.sess, seq, "events", "");
     }

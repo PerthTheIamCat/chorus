@@ -2844,28 +2844,50 @@ final class Engine: ObservableObject {
         }
     }
 
+    /// Timeline buttons. Same rewind as a message's right-click menu: the
+    /// chat continues in a fork (nothing is deleted) and files are restored
+    /// after a snapshot of the current tree. `ws`/`sessionID` are kept for the
+    /// call sites; the open engine handle is the session that is rewound.
     func rewindCheckpoint(db: String, ws: String, sessionID: Int64, targetSeq: Int64, mode: String, completion: @escaping (Bool, String?) -> Void) {
-        guard sessionID >= 0, !db.isEmpty, !ws.isEmpty else {
+        guard sessionID == self.sessionID, !ws.isEmpty else {
             completion(false, "session หรือโฟลเดอร์ไม่ถูกต้อง")
             return
         }
-        ioQueue.async {
-            let json = db.withCString { cDb in
-                ws.withCString { cWs in
-                    mode.withCString { cMode in
-                        Self.string(from: chorus_checkpoint_rewind_json(cDb, cWs, sessionID, targetSeq, cMode))
-                    }
+        rewind(beforeSeq: targetSeq,
+               code: mode != "ledger_only",
+               conversation: mode != "code_only",
+               db: db) { _, error in completion(error == nil, error) }
+    }
+
+    private struct RewindResult: Codable {
+        let ok: Bool
+        let session_id: Int64?
+        let text: String?
+        let error: String?
+    }
+
+    /// Rewind to just before the user's message `seq`; Rust decides what that
+    /// means (fork, file restore, backup snapshot). On success the fork is
+    /// opened and `completion` gets the message text to offer again.
+    func rewind(beforeSeq seq: Int64, code: Bool, conversation: Bool, db: String,
+                completion: @escaping (_ text: String?, _ error: String?) -> Void) {
+        guard let h = handle, !busy, !switching else {
+            completion(nil, "รอให้เทิร์นนี้จบก่อนแล้วค่อยย้อน")
+            return
+        }
+        let current = sessionID
+        queue.async { [weak self] in
+            let json = Self.string(from: chorus_rewind_before_json(h.raw, seq, code ? 1 : 0, conversation ? 1 : 0))
+            let r = Self.decode(RewindResult.self, json)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard let r, r.ok, let id = r.session_id else {
+                    completion(nil, r?.error ?? "ย้อนกลับไม่สำเร็จ")
+                    return
                 }
-            }
-            let res = Self.decode(CheckpointRewindResponse.self, json)
-            DispatchQueue.main.async { [weak self] in
-                if res?.ok == true {
-                    self?.reopen(db: db, sessionID: sessionID)
-                    self?.setWorkingDiff("", hunks: [])
-                    completion(true, nil)
-                } else {
-                    completion(false, res?.error ?? "ย้อนเวลาไม่สำเร็จ")
-                }
+                if code { self.setWorkingDiff("", hunks: []) }
+                if id != current { self.reopen(db: db, sessionID: id) } else { self.refresh() }
+                completion(r.text, nil)
             }
         }
     }

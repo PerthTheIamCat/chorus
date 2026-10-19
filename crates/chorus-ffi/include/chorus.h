@@ -258,6 +258,13 @@ char *chorus_run_plan_with_attachments(ChorusEngine *e, const char *agents,
                                        const char *prompt,
                                        const char *attachment_ids_json);
 
+/* Rewind to just before the user's message seq. code: restore the files as
+ * they were when it was sent (current tree snapshotted first, see "backup").
+ * conversation: continue in a fork ending right before it — nothing deleted.
+ * -> {"ok":true,"session_id":N,"text":"...","code_restored":b,"backup":sha|null} */
+char *chorus_rewind_before_json(ChorusEngine *e, int64_t seq, int code,
+                                int conversation);
+
 /* The message to send (with the user's permission) when a plan is approved. */
 char *chorus_plan_approved_prompt(void);
 

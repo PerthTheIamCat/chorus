@@ -73,10 +73,17 @@ impl CheckpointDag {
         seq: i64,
         message: &str,
     ) -> Result<String> {
-        Self::ensure_schema(store)?;
         let commit_msg = format!("turn:{}:{} {}", session_id, seq, message);
         let sha = ckpt.snapshot(&commit_msg)?;
+        Self::bind(store, session_id, seq, &sha, message)?;
+        Ok(sha)
+    }
 
+    /// Link `seq` to a snapshot that was already taken — the session engine
+    /// snapshots before every turn anyway ("turn guard"), so binding that sha
+    /// to the user's message costs one row instead of a second commit.
+    pub fn bind(store: &Store, session_id: i64, seq: i64, sha: &str, message: &str) -> Result<()> {
+        Self::ensure_schema(store)?;
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
@@ -89,8 +96,7 @@ impl CheckpointDag {
             params![seq, session_id, sha, message, now_ms],
         )
         .map_err(ChorusError::Sqlite)?;
-
-        Ok(sha)
+        Ok(())
     }
 
     /// Retrieve the checkpoint record for a given sequence number.

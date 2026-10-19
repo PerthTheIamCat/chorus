@@ -100,6 +100,50 @@ fn a_plan_turn_fails_closed_without_seatbelt() {
     assert!(!dir.path().join("planned-but-written").exists());
 }
 
+#[test]
+fn rewinding_before_a_message_forks_the_chat_and_restores_the_files_it_saw() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("ledger.db");
+    let cwd = dir.path().join("w");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let file = cwd.join("a.txt");
+    std::fs::write(&file, "v1").unwrap();
+    let mut s = Session::create(&db, &cwd, "rewind").unwrap().with_bridge(mock_bridge());
+
+    s.run_turn("codex", "openai", "first", Policy::AllowAll).unwrap();
+    std::fs::write(&file, "v2").unwrap(); // what the workspace was when "second" was sent
+    let second = s.run_turn("codex", "openai", "second", Policy::AllowAll).unwrap();
+    std::fs::write(&file, "v3").unwrap();
+    let original = s.session_id();
+
+    // Only the user's own messages are rewind points.
+    let agent_seq = *second.agent_seqs.first().expect("mock answers");
+    assert!(s.rewind_before(agent_seq, false, true).is_err());
+
+    let r = s.rewind_before(second.user_seq, true, true).unwrap();
+    assert_eq!(r.text, "second");
+    assert!(r.code_restored);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "v2");
+
+    let store = chorus_core::Store::open(&db).unwrap();
+    let said = |sess: i64| -> Vec<String> {
+        let c = store.conn();
+        chorus_core::ledger::history(c, sess, 1000)
+            .unwrap()
+            .iter()
+            .map(|e| chorus_core::ledger::body(c, e).unwrap())
+            .collect()
+    };
+    let fork = said(r.session_id);
+    assert!(fork.iter().any(|b| b == "first"), "{fork:?}");
+    assert!(!fork.iter().any(|b| b == "second"), "the fork ends before the message: {fork:?}");
+    assert!(said(original).iter().any(|b| b == "second"), "nothing is deleted");
+
+    // The rewind itself can be undone.
+    s.restore_to(r.backup.as_deref().unwrap()).unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "v3");
+}
+
 /// A mock that writes `name` into the workspace mid-turn without asking.
 fn rogue_bridge(name: &str) -> Vec<String> {
     vec![
