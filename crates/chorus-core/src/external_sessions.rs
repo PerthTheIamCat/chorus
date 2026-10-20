@@ -801,7 +801,8 @@ fn append_turns(c: &Connection, sess: i64, user: i64, agent: i64, turns: &[Exter
             TurnRole::ToolCall => (EventKind::ToolCall, agent),
             TurnRole::ToolResult => (EventKind::ToolResult, agent),
         };
-        ledger::append(c, &NewEvent::new(sess, kind, who, t.text.clone()))?;
+        // Another CLI's transcript holds whatever was pasted into it.
+        ledger::append(c, &NewEvent::new(sess, kind, who, crate::secrets::user_vault().mask(&t.text).text))?;
     }
     Ok(turns.len())
 }
@@ -816,6 +817,8 @@ pub fn import(c: &Connection, s: &ExternalSession, cwd: &str) -> Result<ImportRe
         return Err(ChorusError::Invalid(format!("{} session {} has no messages", s.provider.label(), s.id)));
     }
     let goal = turns.iter().find(|t| t.role == TurnRole::User).map(|t| t.text.as_str()).unwrap_or_default();
+    let goal = crate::secrets::user_vault().mask(goal).text;
+    let goal = goal.as_str();
     let tx = c.unchecked_transaction()?;
     let user = actor::intern(&tx, "user", "human")?;
     let agent = actor::intern(&tx, &s.agent_name(), s.provider.vendor())?;
@@ -838,7 +841,7 @@ pub fn import(c: &Connection, s: &ExternalSession, cwd: &str) -> Result<ImportRe
             ImportReport { session_id: m.sess, events: n + 1, reused: true, not_appended: 0 }
         }
     } else {
-        let title = format!("{} · {}", s.provider.label(), s.title);
+        let title = crate::secrets::user_vault().mask(&format!("{} · {}", s.provider.label(), s.title)).text;
         let sess = ledger::new_session(&tx, &title, cwd)?;
         let n = append_turns(&tx, sess, user, agent, &merge(turns.clone()))?;
         ledger::append(&tx, &NewEvent::new(sess, EventKind::Handoff, agent, marker_body(s, goal, turns.len())?))?;

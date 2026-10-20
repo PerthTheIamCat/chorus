@@ -913,6 +913,31 @@ pub mod mock {
                     if let Some(name) = &rogue {
                         let _ = std::fs::write(std::path::Path::new(&cwd).join(name), "pwned\n");
                     }
+                    // Secrets tests: record exactly what reached the agent (its
+                    // prompt and its `CHORUS_SECRET_*` environment), then say
+                    // the values out loud the way a careless agent would.
+                    let prompt: String = msg["params"]["prompt"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|b| b["text"].as_str())
+                        .collect();
+                    if prompt.contains("MOCK_ECHO_SECRETS") {
+                        let env: String = std::env::vars()
+                            .filter(|(k, _)| k.starts_with("CHORUS_SECRET_"))
+                            .map(|(k, v)| format!("{k}={v}\n"))
+                            .collect();
+                        let saw = format!("{prompt}\n---env---\n{env}");
+                        let _ =
+                            std::fs::write(std::path::Path::new(&cwd).join("mock-saw.txt"), saw);
+                        update(
+                            session,
+                            json!({
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": {"type":"text","text":format!("my env: {env}")}
+                            }),
+                        )?;
+                    }
                     update(
                         session,
                         json!({

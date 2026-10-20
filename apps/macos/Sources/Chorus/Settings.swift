@@ -499,6 +499,37 @@ struct RoutingSettings: View {
 
 // MARK: สิทธิ์และความปลอดภัย
 
+/// Secrets: what is hidden and what Chorus remembers. Detection, masking and
+/// the Keychain live in chorus-core/src/secrets.rs; this lists names only.
+struct SecretsSettings: View {
+    @EnvironmentObject var engine: Engine
+    @AppStorage(Engine.hideSecretFilesKey) private var hideFiles = true
+    @State private var entries: [Engine.SecretEntry] = []
+
+    var body: some View {
+        SettingsGroup(title: "Secret",
+                      footer: "key/token/รหัสผ่านที่พิมพ์ แปะ หรือ agent พูดออกมา จะถูกแทนด้วยชื่ออย่าง $CHORUS_SECRET_GITHUB_1 ก่อนเข้าแชท ประวัติ และโมเดล · ค่าจริงเก็บใน Keychain ของเครื่องนี้ และถูกส่งให้ agent เป็นตัวแปร environment ตอนที่มันต้องใช้เท่านั้น") {
+            SettingsRow(title: "ซ่อนไฟล์ .env และไฟล์ key จาก agent",
+                        info: "agent เปิดอ่าน .env, .env.local, *.pem, *.key ในโปรเจกต์ไม่ได้ (ยังเห็นชื่อไฟล์และเขียนได้) — Chorus อ่าน .env เองแล้วส่งตัวแปรให้ agent แทน · .env.example อ่านได้ปกติ · framework ที่อ่าน .env จากไฟล์เองอาจต้องใช้ตัวแปร environment แทน") {
+                Toggle("ซ่อนไฟล์ secret", isOn: Binding(
+                    get: { hideFiles },
+                    set: { hideFiles = $0; engine.setHideSecretFiles($0) }))
+                    .labelsHidden().toggleStyle(.switch)
+            }
+            ForEach(entries) { e in
+                RowDivider()
+                SettingsRow(title: "$\(e.name)", detail: e.kind) {
+                    Button("ลืม") {
+                        engine.forgetSecret(e.name)
+                        entries = engine.secrets()
+                    }
+                }
+            }
+        }
+        .onAppear { entries = engine.secrets() }
+    }
+}
+
 /// Each provider's own browser integration, where one works from Chorus.
 /// What is possible per provider is decided in chorus-cli
 /// (`provider_browser_env`); this only shows it and holds the switch.
@@ -632,6 +663,7 @@ struct SafetySettings: View {
         }
         ComputerUseSettings()
         ProviderBrowserSettings()
+        SecretsSettings()
         SettingsGroup(title: "โปรเจกต์ที่เชื่อถือ",
                       footer: "repo ใหม่จะไม่รันอะไรจนกว่าคุณเปิดเอง") {
             if projects.isEmpty {

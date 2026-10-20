@@ -23,6 +23,7 @@ use chorus_core::mcp::McpServer;
 use chorus_core::mcp_config;
 use chorus_core::projector::{self, AgentFile, Drift, Projection};
 use chorus_core::render::ContextItem;
+use chorus_core::secrets;
 use chorus_core::skills;
 use chorus_core::tokens::{CachedCounter, HeuristicCounter};
 use chorus_core::{actor, ledger, memory, usage, Event, EventKind, NewEvent, Store};
@@ -739,6 +740,24 @@ pub struct Session {
     /// Let Claude use the user's own Chrome through the Claude in Chrome
     /// extension (Settings › off by default).
     claude_chrome: bool,
+    /// The agent sandbox denies reading `.env*` and key files; Chorus reads
+    /// the project `.env` itself and passes its variables as environment
+    /// (Settings › on by default).
+    hide_secret_files: bool,
+}
+
+/// Replace every secret in `text` with its `$CHORUS_SECRET_…` name, before
+/// it reaches the ledger or a prompt. Never fails: when the Keychain refuses
+/// a value it is still masked, it just cannot be injected back later.
+fn mask_secrets(text: &str) -> String {
+    let m = secrets::user_vault().mask(text);
+    if m.unstored > 0 {
+        eprintln!(
+            "  ⚠  ซ่อน secret {} ค่าแล้ว แต่เก็บลง Keychain ไม่ได้ — agent จะใช้ค่าจริงไม่ได้",
+            m.unstored
+        );
+    }
+    m.text
 }
 
 /// Environment that turns on a provider's *own* browser integration for its
@@ -832,7 +851,8 @@ impl Session {
         let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
         let store = Store::open(db).context("open store")?;
         let user = actor::intern(store.conn(), "user", "human")?;
-        let sess = ledger::new_session(store.conn(), title, &cwd.to_string_lossy())?;
+        let title = mask_secrets(title);
+        let sess = ledger::new_session(store.conn(), &title, &cwd.to_string_lossy())?;
         let (checkpoint, default_base) = open_checkpoint(&cwd);
         let _ = usage::set_review_base(store.conn(), sess, Some(&default_base));
         let base_ckpt = default_base;
@@ -862,6 +882,7 @@ impl Session {
             plan_turn: false,
             computer_use: false,
             claude_chrome: false,
+            hide_secret_files: true,
         })
     }
 
@@ -914,6 +935,7 @@ impl Session {
             plan_turn: false,
             computer_use: false,
             claude_chrome: false,
+            hide_secret_files: true,
         })
     }
 
@@ -1213,6 +1235,8 @@ impl Session {
         policy: Policy,
         attachment_ids: &[i64],
     ) -> Result<TurnReport> {
+        let masked = mask_secrets(user_text);
+        let user_text = masked.as_str();
         if let Ok(mut s) = self.runner_state.lock() {
             s.parent_policy = self.lead_policy.unwrap_or(policy);
         }
@@ -1255,7 +1279,7 @@ impl Session {
         Ok(TurnReport {
             user_seq,
             agent_seqs,
-            message: outcome.message,
+            message: mask_secrets(&outcome.message),
             context_used: outcome.context_used,
             context_window: outcome.context_window,
             stop_reason: outcome.stop_reason,
@@ -2133,7 +2157,10 @@ impl Session {
         } else {
             sandbox::Profile::Workspace
         };
-        let command = match sandbox::wrap(bridge, &self.cwd, profile) {
+        let opts = sandbox::Options {
+            hide_secret_files: self.hide_secret_files,
+        };
+        let command = match sandbox::wrap_with(bridge, &self.cwd, profile, opts) {
             Ok(c) => c,
             Err(why) => {
                 anyhow::ensure!(
@@ -2161,6 +2188,19 @@ impl Session {
 
         let mut env = crate::accounts::env_for(agent_name);
         env.extend(provider_browser_env(agent_name, self.claude_chrome));
+        // Secrets the prompt names reach the agent's shell as variables; the
+        // model only ever sees `$CHORUS_SECRET_…`.
+        let vault = secrets::user_vault();
+        let named = secrets::referenced(text);
+        env.extend(vault.resolve(&named));
+        // Only when the sandbox really hides `.env`: otherwise the agent can
+        // read it anyway and being told it cannot would be a lie.
+        let project_env = if self.hide_secret_files && sandboxed {
+            secrets::project_env(&self.cwd, vault)
+        } else {
+            secrets::ProjectEnv::default()
+        };
+        env.extend(project_env.env.iter().cloned());
         let cli_paths = integration_catalog::cli_paths_for(&self.cwd)
             .context("load enabled catalog CLI tools")?;
         if !cli_paths.is_empty() {
@@ -2229,6 +2269,10 @@ impl Session {
         if self.plan_turn {
             prompt_text.push_str(PLAN_MODE_GUIDANCE);
         }
+        if !named.is_empty() {
+            prompt_text.push_str(secrets::AGENT_GUIDANCE);
+        }
+        prompt_text.push_str(&secrets::project_env_guidance(&project_env.names));
         let available: Vec<_> = attachments::list(self.store.conn(), self.sess)?
             .into_iter()
             .filter(|a| a.status == "sent")
@@ -2268,6 +2312,7 @@ impl Session {
             {
                 let content = String::from_utf8(bytes)
                     .with_context(|| format!("attachment {} is not valid UTF-8", meta.name))?;
+                let content = mask_secrets(&content);
                 if content.chars().count() <= 12_000 && agent.supports_embedded_context() {
                     blocks.push(serde_json::json!({
                         "type": "resource",
@@ -2341,6 +2386,8 @@ impl Session {
         attachment_ids: &[i64],
         decide: &mut dyn FnMut(&PermissionAsk) -> Permission,
     ) -> Result<TurnReport> {
+        let masked = mask_secrets(user_text);
+        let user_text = masked.as_str();
         // Every action that changes something goes through the same dialog
         // as a file write (the shell registers it with `set_computer_asker`).
         let access = if self.computer_use {
@@ -2426,7 +2473,7 @@ impl Session {
         Ok(TurnReport {
             user_seq,
             agent_seqs,
-            message: outcome.message,
+            message: mask_secrets(&outcome.message),
             context_used: outcome.context_used,
             context_window: outcome.context_window,
             stop_reason: outcome.stop_reason,
@@ -2529,7 +2576,8 @@ impl Session {
         let mut cost = outcome.cost_usd;
         for ev in &outcome.events {
             let (kind, body) = event_row(ev, &children);
-            let mut ne = NewEvent::new(self.sess, kind, agent_actor, body).parent(parent);
+            let mut ne =
+                NewEvent::new(self.sess, kind, agent_actor, mask_secrets(&body)).parent(parent);
             if matches!(ev, AgentEvent::Message(_)) {
                 ne.tok_out = outcome.context_used;
                 ne.model_id = outcome.model.clone();
@@ -2590,12 +2638,17 @@ impl Session {
             let mut prev: Option<i64> = None;
             if !child.task.is_empty() {
                 // What the child was asked, as the parent agent said it.
-                let ne = NewEvent::new(child_sess, EventKind::Msg, agent_actor, child.task.clone());
+                let ne = NewEvent::new(
+                    child_sess,
+                    EventKind::Msg,
+                    agent_actor,
+                    mask_secrets(&child.task),
+                );
                 prev = Some(ledger::append(c, &ne)?);
             }
             for ev in &child.events {
                 let (kind, body) = event_row(ev, &sessions);
-                let mut ne = NewEvent::new(child_sess, kind, agent_actor, body);
+                let mut ne = NewEvent::new(child_sess, kind, agent_actor, mask_secrets(&body));
                 if let Some(p) = prev {
                     ne = ne.parent(p);
                 }
@@ -2636,6 +2689,11 @@ impl Session {
     /// Claude uses the user's Chrome through its own extension (Settings).
     pub fn set_claude_chrome(&mut self, on: bool) {
         self.claude_chrome = on;
+    }
+
+    /// Hide `.env*` and key files from the agent (Settings › on by default).
+    pub fn set_hide_secret_files(&mut self, on: bool) {
+        self.hide_secret_files = on;
     }
 
     /// Who answers "may the agent click here?" during an interactive turn.
@@ -3012,7 +3070,7 @@ pub struct SessionSummary {
 /// Rename a session in a store, without opening it.
 pub fn rename_session(db: &Path, id: i64, title: &str) -> Result<()> {
     let store = Store::open(db).context("open store")?;
-    Ok(ledger::rename_session(store.conn(), id, title)?)
+    Ok(ledger::rename_session(store.conn(), id, &mask_secrets(title))?)
 }
 
 /// Delete a session from a store (see [`ledger::delete_session`]).

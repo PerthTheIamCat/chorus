@@ -1237,3 +1237,64 @@ fn claude_in_chrome_is_switched_on_for_claude_only_and_only_when_asked() {
     assert!(provider_browser_env("codex", true).is_empty(), "Codex's extension only works in its own app");
     assert!(provider_browser_env("antigravity", true).is_empty(), "agy's browser subagent needs no switch");
 }
+
+/// Layers 1–2 of the secrets design, end to end through the mock agent:
+/// the user pastes a key, the ledger and the prompt only ever hold its
+/// `$CHORUS_SECRET_…` name, the agent's shell gets the real value, and when
+/// the agent says it back the ledger masks it again.
+#[test]
+fn a_pasted_key_reaches_the_agents_env_but_never_the_ledger_or_prompt() {
+    // Never the developer's real Keychain.
+    std::env::set_var("CHORUS_SECRETS_BACKEND", "memory");
+    // Built at runtime so no scanner mistakes the test for a leak.
+    let key = format!("ghp_{}", "Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0FeDcBa".chars().take(36).collect::<String>());
+    let tmp = std::env::temp_dir().join(format!("chorus-secrets-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let db = tmp.join("store.db");
+    let _ = std::fs::remove_file(&db);
+    let mut s = Session::create(&db, &tmp, &format!("push with {key}"))
+        .unwrap()
+        .with_bridge(mock_bridge());
+
+    let report = s
+        .run_turn("codex", "openai", &format!("MOCK_ECHO_SECRETS use {key} to push"), Policy::AllowAll)
+        .expect("turn runs");
+
+    let saw = std::fs::read_to_string(tmp.join("mock-saw.txt")).expect("mock recorded its prompt");
+    let (prompt, env) = saw.split_once("---env---").unwrap();
+    assert!(!prompt.contains(&key), "the model saw the value: {prompt}");
+    assert!(prompt.contains("$CHORUS_SECRET_GITHUB_"), "{prompt}");
+    assert!(env.contains(&format!("={key}")), "the shell did not get the value: {env}");
+
+    let ledger: String = s.transcript().unwrap().into_iter().map(|(_, b)| b + "\n").collect();
+    assert!(!ledger.contains(&key), "value reached the ledger: {ledger}");
+    assert!(!report.message.contains(&key));
+    let title = chorus_cli::session::list_sessions(&db).unwrap()[0].title.clone();
+    assert!(!title.contains(&key), "{title}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Layer 3: with the sandbox hiding `.env`, Chorus reads it itself and the
+/// agent gets the variables — secrets also under their placeholder — plus
+/// their names in the prompt, never the values.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_project_env_reaches_the_agent_as_variables_not_as_text() {
+    std::env::set_var("CHORUS_SECRETS_BACKEND", "memory");
+    let tmp = std::env::temp_dir().join(format!("chorus-dotenv-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join(".env"), "PORT=3000\nDB_PASSWORD=Hunter2Hunter2xyz\n").unwrap();
+    let db = tmp.join("store.db");
+    let _ = std::fs::remove_file(&db);
+    let mut s = Session::create(&db, &tmp, "dotenv").unwrap().with_bridge(mock_bridge());
+    s.run_turn("codex", "openai", "MOCK_ECHO_SECRETS start the server", Policy::AllowAll)
+        .expect("turn runs");
+    let saw = std::fs::read_to_string(tmp.join("mock-saw.txt")).unwrap();
+    let (prompt, env) = saw.split_once("---env---").unwrap();
+    assert!(prompt.contains("PORT") && prompt.contains("$CHORUS_SECRET_DB_PASSWORD_"), "{prompt}");
+    assert!(!prompt.contains("Hunter2Hunter2xyz"), "{prompt}");
+    assert!(env.contains("=Hunter2Hunter2xyz"), "{env}");
+    let ledger: String = s.transcript().unwrap().into_iter().map(|(_, b)| b + "\n").collect();
+    assert!(!ledger.contains("Hunter2Hunter2xyz"), "{ledger}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}

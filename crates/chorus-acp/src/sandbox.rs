@@ -46,6 +46,25 @@ pub enum Profile {
 /// meant to be shown to the user — silently running unconfined is how a safety
 /// feature becomes a lie.
 pub fn wrap(cmd: &[String], cwd: &Path, profile: Profile) -> Result<Vec<String>, String> {
+    wrap_with(cmd, cwd, profile, Options::default())
+}
+
+/// Extra confinement on top of a [`Profile`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Options {
+    /// Deny *reading* `.env*` and key files in the workspace. Chorus reads
+    /// the project `.env` itself and hands its variables to the agent as
+    /// environment, so the values never have to pass through the model.
+    pub hide_secret_files: bool,
+}
+
+/// [`wrap`] with [`Options`].
+pub fn wrap_with(
+    cmd: &[String],
+    cwd: &Path,
+    profile: Profile,
+    opts: Options,
+) -> Result<Vec<String>, String> {
     if std::env::var("CHORUS_SANDBOX").is_ok_and(|v| matches!(v.as_str(), "off" | "0" | "false")) {
         return Err("ปิดด้วย CHORUS_SANDBOX=off".into());
     }
@@ -58,7 +77,10 @@ pub fn wrap(cmd: &[String], cwd: &Path, profile: Profile) -> Result<Vec<String>,
     if cmd.is_empty() {
         return Err("คำสั่งว่าง".into());
     }
-    let profile_text = checked_policy(cwd, profile)?;
+    let mut profile_text = checked_policy(cwd, profile)?;
+    if opts.hide_secret_files {
+        profile_text.push_str(&secret_file_rules(cwd)?);
+    }
     let mut out = vec![
         "/usr/bin/sandbox-exec".to_string(),
         "-p".to_string(),
@@ -77,6 +99,28 @@ fn regex_escape(s: &str) -> String {
         out.push(c);
     }
     out
+}
+
+/// Read rules that keep the workspace's secret files away from the agent.
+///
+/// `file-read-data` only, not `file-read*`: the files still show up in `ls`
+/// and `git status` (metadata), they just cannot be opened. Denying metadata
+/// too makes tools that stat every file report errors that look like bugs.
+/// Templates (`.env.example` and friends) are meant to be read and come
+/// back with an allow after the deny — Seatbelt takes the last match.
+///
+/// Home-directory credentials (`~/.netrc`, `~/.aws/credentials`, …) are left
+/// readable on purpose: git, aws and npm need them to work for the agent.
+pub fn secret_file_rules(cwd: &Path) -> Result<String, String> {
+    let ws = cwd
+        .canonicalize()
+        .map_err(|e| format!("resolve sandbox workspace: {e}"))?;
+    let root = regex_escape(checked_path(&ws)?);
+    Ok(format!(
+        "(deny file-read-data (regex #\"^{root}/(.*/)?\\.env(rc)?(\\.[^/]*)?$\"))\n\
+         (deny file-read-data (regex #\"^{root}/.*\\.(pem|key|p12|pfx|jks|keystore)$\"))\n\
+         (allow file-read-data (regex #\"^{root}/(.*/)?\\.env\\.(example|sample|template|dist|defaults)$\"))\n"
+    ))
 }
 
 /// The Seatbelt profile, as a single `-p` argument.
@@ -392,6 +436,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn secret_rules_deny_reading_env_and_keys_then_allow_templates() {
+        let d = std::env::temp_dir().join(format!("chorus-secret-rules-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let r = secret_file_rules(&d).unwrap();
+        let root = regex_escape(canonical(&d).to_str().unwrap());
+        let _ = std::fs::remove_dir_all(&d);
+        let deny = r
+            .find(&format!(
+                "(deny file-read-data (regex #\"^{root}/(.*/)?\\.env"
+            ))
+            .unwrap();
+        let allow = r.find("(allow file-read-data").unwrap();
+        // Seatbelt takes the last match: the template allow must follow.
+        assert!(deny < allow, "{r}");
+        assert!(!r.contains("file-read*"), "metadata stays readable: {r}");
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn wrapping_puts_sandbox_exec_in_front_and_keeps_the_command() {
@@ -608,6 +670,52 @@ mod tests {
             assert!(!sh(&ws, Profile::ReadOnly, "echo x > forbidden.txt"));
             assert!(!ws.join("forbidden.txt").exists());
             assert!(sh(&ws, Profile::Workspace, "echo x > allowed.txt"));
+            let _ = std::fs::remove_dir_all(ws);
+        }
+
+        #[test]
+        fn secret_files_cannot_be_read_but_templates_and_code_can() {
+            let ws = scratch("secrets");
+            std::fs::create_dir_all(ws.join("app")).unwrap();
+            for f in [
+                ".env",
+                ".env.local",
+                "app/.env.production",
+                "certs.pem",
+                ".envrc",
+            ] {
+                std::fs::write(ws.join(f), "SECRET=x\n").unwrap();
+            }
+            std::fs::write(ws.join(".env.example"), "SECRET=\n").unwrap();
+            std::fs::write(ws.join("main.rs"), "fn main() {}\n").unwrap();
+            let hide = Options {
+                hide_secret_files: true,
+            };
+            let run = |script: &str| {
+                let cmd: Vec<String> = ["/bin/sh", "-c", script].map(String::from).to_vec();
+                let argv = wrap_with(&cmd, &ws, Profile::Workspace, hide).unwrap();
+                Command::new(&argv[0])
+                    .args(&argv[1..])
+                    .current_dir(&ws)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            };
+            for f in [
+                ".env",
+                ".env.local",
+                "app/.env.production",
+                "certs.pem",
+                ".envrc",
+            ] {
+                assert!(!run(&format!("cat {f}")), "{f} must not be readable");
+            }
+            assert!(run("cat .env.example && cat main.rs"));
+            // Still listed, still writable: only the contents are hidden.
+            assert!(run("ls -la .env && echo NEW=1 >> .env"));
+            // Without the option nothing changes.
+            assert!(sh(&ws, Profile::Workspace, "cat .env"));
             let _ = std::fs::remove_dir_all(ws);
         }
     }

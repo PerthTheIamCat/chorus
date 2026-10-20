@@ -62,13 +62,52 @@ fn main() -> Result<()> {
         "demo" => demo_cmd(&args[1..]),
         "agent" => agent_cmd(&args[1..]),
         "sessions" => sessions_cmd(&args[1..]),
+        "secrets" => secrets_cmd(&args[1..]),
         other => {
             eprintln!(
-                "unknown command {other:?}; try: chorus agent | demo | doctor | bench | run | handoff | memory | compare | compact | context | skills | mcp | models | sessions"
+                "unknown command {other:?}; try: chorus agent | demo | doctor | bench | run | handoff | memory | compare | compact | context | skills | mcp | models | sessions | secrets"
             );
             std::process::exit(2);
         }
     }
+}
+
+/// `chorus secrets [list|forget NAME|scan FILE]`
+///
+/// What the vault remembers — names and kinds, never values. `scan` shows
+/// what masking would do to a file without storing anything.
+fn secrets_cmd(args: &[String]) -> Result<()> {
+    use chorus_core::secrets;
+    let vault = secrets::user_vault();
+    match args.first().map(String::as_str).unwrap_or("list") {
+        "list" => {
+            let all = vault.list();
+            if all.is_empty() {
+                println!("ยังไม่มี secret ที่จำไว้");
+            }
+            for e in all {
+                println!("  ${}  ({})", e.name, e.kind);
+            }
+        }
+        "forget" => {
+            let name = args.get(1).context("usage: chorus secrets forget NAME")?;
+            let name = name.trim_start_matches('$');
+            vault.forget(name).map_err(anyhow::Error::msg)?;
+            println!("ลืม ${name} แล้ว");
+        }
+        "scan" => {
+            let path = args.get(1).context("usage: chorus secrets scan FILE")?;
+            let text = std::fs::read_to_string(path).with_context(|| format!("read {path}"))?;
+            // Kinds and positions only: printing what was found would print
+            // the secret.
+            for f in secrets::find(&text) {
+                let line = text[..f.start].matches('\n').count() + 1;
+                println!("  {path}:{line}  {}", f.kind);
+            }
+        }
+        other => anyhow::bail!("unknown: chorus secrets {other} (list | forget NAME | scan FILE)"),
+    }
+    Ok(())
 }
 
 /// `chorus memory <pending|approve ID|reject ID|add TEXT> --db PATH [--scope N]`
@@ -296,6 +335,7 @@ fn run(args: &[String]) -> Result<()> {
     let mut model: Option<String> = None;
     let mut computer_use = false;
     let mut claude_chrome = false;
+    let mut show_secret_files = false;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -318,6 +358,7 @@ fn run(args: &[String]) -> Result<()> {
             "--model" => model = it.next().cloned(),
             "--computer" => computer_use = true,
             "--claude-chrome" => claude_chrome = true,
+            "--show-secret-files" => show_secret_files = true,
             "--session" => continue_session = it.next().and_then(|v| v.parse().ok()),
             "--yes" => policy = Policy::AllowAll,
             "--read-only" => policy = Policy::ReadOnly,
@@ -360,6 +401,7 @@ fn run(args: &[String]) -> Result<()> {
         s.set_computer_use(true);
     }
     s.set_claude_chrome(claude_chrome);
+    s.set_hide_secret_files(!show_secret_files);
     if let Some(m) = &model {
         // Pinned for whoever answers, including anyone the relay hands to:
         // "use the cheap model" is a statement about the task, not about one

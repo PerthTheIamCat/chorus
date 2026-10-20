@@ -267,6 +267,16 @@ void chorus_set_computer_use(ChorusEngine *e, int on);
  * (sets CLAUDE_CODE_ENABLE_CFC=1 on the Claude bridge). Off by default. */
 void chorus_set_claude_chrome(ChorusEngine *e, int on);
 
+/* Deny the agent reading .env* and key files; Chorus passes the project .env
+ * as environment instead. On by default. */
+void chorus_set_hide_secret_files(ChorusEngine *e, int on);
+
+/* [{"name","kind","fingerprint"}] — remembered secrets, never values. */
+char *chorus_secrets_json(void);
+
+/* Forget one secret ("$NAME" or "NAME"): {"ok":true} or {"error":...}. */
+char *chorus_secret_forget(const char *name);
+
 /* {"supported":b,"screen_recording":b,"accessibility":b}. request != 0 first
  * shows macOS's Screen Recording prompt (shown once per app). */
 char *chorus_computer_permissions_json(int request);

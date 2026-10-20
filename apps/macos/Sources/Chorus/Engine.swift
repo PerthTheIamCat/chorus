@@ -336,6 +336,7 @@ final class Engine: ObservableObject {
             if let h {
                 chorus_set_computer_use(h, UserDefaults.standard.bool(forKey: Self.computerUseKey) ? 1 : 0)
                 chorus_set_claude_chrome(h, UserDefaults.standard.bool(forKey: Self.claudeChromeKey) ? 1 : 0)
+                chorus_set_hide_secret_files(h, Self.hideSecretFiles ? 1 : 0)
             }
             let eventsJSON = h.map { Self.string(from: chorus_transcript_json($0)) } ?? ""
             let presetJSON = h.map { Self.initialRoutePreset($0) } ?? ""
@@ -1577,6 +1578,33 @@ final class Engine: ObservableObject {
     }
 
     nonisolated static let claudeChromeKey = "chorus.claudeChrome"
+
+    nonisolated static let hideSecretFilesKey = "chorus.hideSecretFiles"
+    /// On unless the user turned it off (`bool(forKey:)` would read unset as off).
+    nonisolated static var hideSecretFiles: Bool {
+        UserDefaults.standard.object(forKey: hideSecretFilesKey) as? Bool ?? true
+    }
+
+    func setHideSecretFiles(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: Self.hideSecretFilesKey)
+        guard let h = handle else { return }
+        queue.async { chorus_set_hide_secret_files(h.raw, on ? 1 : 0) }
+    }
+
+    struct SecretEntry: Decodable, Identifiable {
+        let name: String
+        let kind: String
+        var id: String { name }
+    }
+
+    /// Names Chorus remembers, never values (the values are in the Keychain).
+    func secrets() -> [SecretEntry] {
+        Self.decode([SecretEntry].self, Self.string(from: chorus_secrets_json())) ?? []
+    }
+
+    func forgetSecret(_ name: String) {
+        _ = Self.string(from: chorus_secret_forget(name))
+    }
 
     /// Claude in Chrome (Claude's own extension). Stored and applied like
     /// `setComputerUse`; takes effect from the next turn's bridge.

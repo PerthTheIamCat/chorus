@@ -1440,6 +1440,46 @@ pub unsafe extern "C" fn chorus_set_claude_chrome(e: *mut ChorusEngine, on: c_in
     }
 }
 
+/// Hide `.env*` and key files from the agent's sandbox; Chorus passes the
+/// project `.env` as environment instead (Settings). On by default.
+///
+/// # Safety
+/// `e` must be live or null.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_hide_secret_files(e: *mut ChorusEngine, on: c_int) {
+    if let Some(engine) = e.as_mut() {
+        engine.session.set_hide_secret_files(on != 0);
+    }
+}
+
+/// `[{"name","kind","fingerprint"}]` — the secrets Chorus remembers. Never
+/// a value. The returned string must be freed with `chorus_string_free`.
+#[no_mangle]
+pub extern "C" fn chorus_secrets_json() -> *mut c_char {
+    match catch_unwind(|| chorus_core::secrets::user_vault().list()) {
+        Ok(list) => out(serde_json::to_string(&list).unwrap_or_default()),
+        Err(_) => err("panic in secrets_json"),
+    }
+}
+
+/// Forget one remembered secret (Keychain item and name). `{"ok":true}` or
+/// `{"error":…}`; free with `chorus_string_free`.
+///
+/// # Safety
+/// `name` must be a valid C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_secret_forget(name: *const c_char) -> *mut c_char {
+    let Some(name) = borrow(name) else {
+        return err("name is required");
+    };
+    let name = name.trim_start_matches('$').to_string();
+    match catch_unwind(move || chorus_core::secrets::user_vault().forget(&name)) {
+        Ok(Ok(())) => out(r#"{"ok":true}"#.to_string()),
+        Ok(Err(e)) => err(&e),
+        Err(_) => err("panic in secret_forget"),
+    }
+}
+
 /// `{"supported":b,"screen_recording":b,"accessibility":b}` — what macOS has
 /// granted this process. With `request` != 0, first shows the Screen
 /// Recording prompt (macOS only shows it once per app).

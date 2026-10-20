@@ -538,6 +538,8 @@ fn call_tool(
             let next_offset = (end < total).then_some(end);
             let next_offset =
                 next_offset.map_or_else(|| "none".to_string(), |value| value.to_string());
+            // Same masking as a message: a pasted .env must not reach the model.
+            let excerpt = crate::secrets::user_vault().mask(&excerpt).text;
             json!({"type":"text","text":format!("Attachment {} ({}); characters {}–{} of {}; next_offset_chars={}\n{}",meta.name,mime,start,end,total,next_offset,excerpt)})
         };
         return Ok(json!({"content":[block]}));
@@ -552,6 +554,9 @@ fn call_tool(
             .and_then(Value::as_str)
             .ok_or("text is required")?;
         let scope = args.get("scope").and_then(Value::as_i64).unwrap_or(1);
+        // Memory is projected into CLAUDE.md/AGENTS.md on disk: never a value.
+        let masked = crate::secrets::user_vault().mask(text).text;
+        let text = masked.as_str();
 
         return match memory::propose(conn, scope, text, None) {
             Ok(id) => Ok(json!({

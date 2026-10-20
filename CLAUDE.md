@@ -123,6 +123,7 @@ cargo run -p chorus-cli -- memory pending --db /tmp/s.db          # approve queu
 cargo run -p chorus-cli -- compact --db /tmp/s.db --session 1 [--limit N]   # เติม warm tier (L1/L2)
 cargo run -p chorus-cli -- demo          # เล่าทั้งเรื่องด้วย agent ปลอม ไม่ต้องมี API key
 scripts/smoke-real-agents.sh            # e2e กับ agent จริงที่ login ไว้ (ส่ง request จริง ไม่กี่ครั้ง)
+cargo run -p chorus-cli -- secrets [list|forget NAME|scan FILE]   # ชื่อ secret ที่จำไว้ (ไม่มีค่า) · scan บอกแค่บรรทัด+ชนิด
 cargo run -p chorus-cli -- doctor        # ทำไมเทิร์นถึงรัน/ไม่รัน — agent, login, bridge, env, error ที่ failover ไม่รู้จัก
 cargo run -p chorus-cli -- sessions list                     # session ของ Claude Code / Codex / Gemini CLI ในเครื่อง
 cargo run -p chorus-cli -- sessions search "<คำ>"            # ค้นชื่อ/โฟลเดอร์/เนื้อหา
@@ -202,6 +203,7 @@ evals/handoff/                          สไปก์ที่ 2 (README + เ
 | rewind | ย้อนแชท = `ledger::fork` ก่อนข้อความนั้น (ไม่ลบ) · ย้อนไฟล์ = sha ของ turn guard ที่ bind กับ seq ของข้อความ user (`checkpoint_turn`) + snapshot ก่อนย้อนเป็น backup | ledger เป็น SoT (2.2) — `CheckpointDag::rewind_to_seq` เดิมใช้ `DELETE FROM event` ตอนนี้แอปไม่เรียกแล้ว **อย่ากลับไปใช้** |
 | browser | **extension ของแต่ละเจ้า ไม่ใช่ browser ของเรา** (เพื่อนตัดสิน 20 ต.ค. 2026 — เอา Playwright ออกแล้ว) · Claude = `CLAUDE_CODE_ENABLE_CFC=1` บน bridge (`provider_browser_env`) · Codex: extension มีเฉพาะในแอป Codex · Google ในแอปคือ **Antigravity (`agy`)** ไม่ใช่ Gemini CLI — มี browser subagent ในตัว ไม่ต้องเปิดอะไรจากเรา แต่ยังไม่ได้ทดสอบว่ารันได้ใต้ `--input-format stream-json` + Seatbelt · Chrome DevTools ยังอยู่ใน catalog (`--isolated --no-usage-statistics --no-performance-crux`) | **ห้ามเปิดให้ Seatbelt เขียน `NativeMessagingHosts/`** — Chrome รัน binary ที่ manifest ชี้นอก sandbox = ทางหนี sandbox ให้ user รัน `claude --chrome` ใน Terminal เองครั้งแรก |
 | computer use | MCP tool `computer` ของ Chorus เอง (`chorus-core/src/computer.rs`) ไม่ใช้ community server · CoreGraphics + `screencapture`/`sips` ไม่มี dep ใหม่ | สิทธิ์ TCC อยู่กับ Chorus.app เท่านั้น · ทุก action ผ่าน gate: ปิดเป็นดีฟอลต์ · read-only/plan/orchestrator = ดูได้อย่างเดียว · ถามก่อน = ถามทุก action ผ่าน callback เดียวกับ permission · cap 300/เทิร์น · `TurnGuard` ปิด gate เมื่อเทิร์นจบ |
+| secrets | 3 ชั้นใน `chorus-core/src/secrets.rs`: **mask** ทุกข้อความที่ผ่าน Chorus (user/agent/แนบไฟล์/memory/import/ชื่อ session) เป็น `$CHORUS_SECRET_<KIND>_<N>` · **inject** ค่าจริงเป็น env ของ bridge เฉพาะชื่อที่ prompt อ้าง · **block** Seatbelt `deny file-read-data` บน `.env*`/`*.pem|key|p12|pfx|jks|keystore` ใน workspace แล้ว Chorus อ่าน `.env` เองส่งเป็น env | ค่าอยู่ใน login Keychain (`security -i` ทาง stdin, hex) · ดิสก์มีแค่ชื่อ+BLAKE3 (`~/.chorus/secrets.json`) · ไม่มี regex dep — scanner เขียนมือ |
 | bridge ของแต่ละเจ้า | override ได้ด้วย env (`CHORUS_CLAUDE_BRIDGE` ฯลฯ) | package ถูก rename มาแล้วครั้งหนึ่ง ไม่ควรต้อง rebuild เพื่อตามชื่อ |
 
 ---
@@ -519,6 +521,16 @@ cache ใน `RepoMapCache` (หน่วยความจำ ไม่ลง�
 - `Package.swift` ต้อง link `CoreGraphics` + `ApplicationServices` (staticlib ไม่พา `#[link]` ไปให้ Swift linker)
 - ส่วน `mac` ใน computer.rs คอมไพล์เฉพาะ macOS — clippy/test ของมันอยู่ที่ CI · ตรรกะ (gate, parse, scaling) เทสต์บน Linux ด้วย `Desktop` ปลอม
 - โหมดถามก่อน: FFI ลงทะเบียน `computer_asker` ก่อน `run_turn_decide*` แล้วถอดหลังจบ — **เทิร์นที่ไม่มี asker จะปฏิเสธ action ที่เปลี่ยนสถานะ** ไม่ใช่ปล่อยผ่าน
+
+### 7.28 secrets — กับดักที่ต้องรู้ (20 ต.ค. 2026 · Keychain/Seatbelt ยังไม่เคยรันบน Mac จริง)
+
+- **`assemble_context` ไม่ต้อง mask** เพราะทุกทางที่ข้อความเข้า ledger mask ไปแล้ว (`mask_secrets` ใน session.rs, `secrets::user_vault().mask` ใน mcp.rs/external_sessions.rs) — ทางเข้าใหม่ต้องเพิ่มเอง
+- ค่าที่ไม่มี pattern (URL ที่มีรหัสผ่านใน `.env`) จับได้เพราะ vault จำค่าที่เคยเห็นในรอบนี้ (`known`) แล้วแทนแบบตรงตัว — agent `echo $X` แล้วพูดค่ากลับมา ledger ยังได้ชื่อ แต่ **provider ของ agent ตัวนั้นเห็นค่าไปแล้ว** ป้องกันไม่ได้ ได้แค่ไม่ให้ไปต่อ
+- `.env` ที่ฉีดเป็น env ห้ามทับตัวแปรที่ bridge ใช้เอง (`ANTHROPIC_*` `OPENAI_*` `CLAUDE*` `CODEX_*` `GEMINI_*` `CHORUS_*` `PATH` `DYLD_*` …) — `ANTHROPIC_API_KEY` ของโปรเจกต์จะเปลี่ยน Claude จาก login เป็นจ่ายตาม API เงียบ ๆ ตัวพวกนี้ยังได้ทางชื่อ `$CHORUS_SECRET_…`
+- deny แค่ `file-read-data` ไม่ใช่ `file-read*` — ไฟล์ยังโผล่ใน `ls`/`git status` และเขียนได้ · template (`.env.example` ฯลฯ) allow กลับหลัง deny (last-match-wins) · **ไม่**ปิด `~/.netrc` `~/.aws/credentials` `~/.ssh` — git/aws/npm ของ agent ต้องใช้ (7.21)
+- framework ที่อ่าน `.env` จากไฟล์เองโดยไม่ดู env (บางเวอร์ชันของ Next.js) จะเห็นไฟล์อ่านไม่ได้ → ปิดใน Settings › Secret
+- เทสต์ตั้ง `CHORUS_SECRETS_BACKEND=memory` — `user_vault()` เช็คทุกครั้ง ไม่งั้น `cargo test` บน Mac จะเขียนค่าปลอมลง Keychain จริงของคนรัน · Keychain ล็อก (CI) → เก็บในหน่วยความจำรอบนี้แทน (`fallback`) ยัง mask และ inject ได้
+- เทสต์สร้าง key ปลอมตอนรัน (`fake()`) ห้ามเขียนเป็น literal — GitHub push protection จะบล็อก push
 
 ### 7.3 repo เงาสำหรับ checkpoint
 ต้องยึด `.gitignore` ของผู้ใช้ ไม่งั้น `.chorus/` จะโตกว่าโปรเจกต์จริง
