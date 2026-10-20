@@ -258,6 +258,15 @@ char *chorus_run_plan_with_attachments(ChorusEngine *e, const char *agents,
                                        const char *prompt,
                                        const char *attachment_ids_json);
 
+/* Computer use (the `computer` MCP tool) on/off for the open session.
+ * Off by default. Read-only turns may only take screenshots; interactive
+ * turns ask through the permission callback for every action. */
+void chorus_set_computer_use(ChorusEngine *e, int on);
+
+/* {"supported":b,"screen_recording":b,"accessibility":b}. request != 0 first
+ * shows macOS's Screen Recording prompt (shown once per app). */
+char *chorus_computer_permissions_json(int request);
+
 /* Rewind to just before the user's message seq. code: restore the files as
  * they were when it was sent (current tree snapshotted first, see "backup").
  * conversation: continue in a fork ending right before it — nothing deleted.

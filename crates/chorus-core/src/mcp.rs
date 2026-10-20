@@ -30,7 +30,9 @@
 //! actor its ledger writes are attributed to.
 
 use crate::types::{EventKind, NewEvent};
-use crate::{actor, agent_control, attachments, ledger, memory, notify, roles, Result, Store};
+use crate::{
+    actor, agent_control, attachments, computer, ledger, memory, notify, roles, Result, Store,
+};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -399,6 +401,11 @@ fn dispatch(req: &Value, conn: &rusqlite::Connection, caller: &Caller) -> Value 
                     jump_to_file_schema(),
                     request_review_schema(),
                 ]);
+                // Listed only for a session whose user turned it on: an agent
+                // that never sees the tool never tries it.
+                if session_scope.is_some_and(|s| computer::enabled(conn, s)) {
+                    tools.push(computer::tool_schema());
+                }
             }
             tools.extend([synthesize_role_schema(), notify_user_schema()]);
             Ok(json!({ "tools": tools }))
@@ -534,6 +541,10 @@ fn call_tool(
             json!({"type":"text","text":format!("Attachment {} ({}); characters {}–{} of {}; next_offset_chars={}\n{}",meta.name,mime,start,end,total,next_offset,excerpt)})
         };
         return Ok(json!({"content":[block]}));
+    }
+    if name == "computer" {
+        let sess = session_scope.ok_or("computer use is only available in a session")?;
+        return computer::call(conn, sess, &args, computer::system());
     }
     if name == "memory_propose" {
         let text = args

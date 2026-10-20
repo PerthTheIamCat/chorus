@@ -629,3 +629,62 @@ fn agent_notification_is_prefixed_and_sanitized() {
         "notification title must be prefixed with Chorus Agent: to prevent spoofing"
     );
 }
+
+/// Computer use over the real MCP path: invisible until the user turns it on
+/// for this session, and inert outside a turn even then.
+#[test]
+fn the_computer_tool_appears_only_when_enabled_and_acts_only_in_a_turn() {
+    use chorus_core::computer;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("store.db");
+    let store = Store::open(&db).unwrap();
+    let sess = chorus_core::ledger::new_session(store.conn(), "root", "/tmp").unwrap();
+    let server = McpServer::start_for_session(db.to_str().unwrap(), sess).unwrap();
+    let names = || -> Vec<String> {
+        rpc(
+            &server,
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+        )["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(String::from))
+            .collect()
+    };
+    let call = |args: Value| {
+        rpc(
+            &server,
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                             "params": { "name": "computer", "arguments": args } }),
+        )
+    };
+
+    assert!(!names().iter().any(|n| n == "computer"));
+    assert!(call(json!({"action":"screenshot"}))["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("turned off"));
+
+    // The server has its own connection; the gate is keyed by the db file.
+    computer::set_enabled(store.conn(), sess, true);
+    assert!(names().iter().any(|n| n == "computer"));
+    let err = call(json!({"action":"left_click","coordinate":[1,1]}));
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("during a turn"),
+        "{err}"
+    );
+
+    // A read-only turn may not click, whatever the OS would allow.
+    let _turn = computer::turn(store.conn(), sess, computer::Access::Look);
+    let err = call(json!({"action":"left_click","coordinate":[1,1]}));
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("read-only"),
+        "{err}"
+    );
+}

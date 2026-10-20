@@ -15,6 +15,7 @@ use chorus_core::attachments::{self, Attachment};
 use chorus_core::checkpoint::Checkpoint;
 use chorus_core::checkpoint_dag::CheckpointDag;
 use chorus_core::compaction;
+use chorus_core::computer;
 use chorus_core::context::{AssembleInput, Assembler, Budget, Tier, TurnItem};
 use chorus_core::handoff::{Brief, BriefInput, HandoffMeta, HandoffReason};
 use chorus_core::integration_catalog;
@@ -733,6 +734,8 @@ pub struct Session {
     /// Set while a plan turn runs (`run_plan_with_attachments`): the prompt
     /// carries `PLAN_MODE_GUIDANCE`, the ledger keeps only what the user typed.
     plan_turn: bool,
+    /// The user's computer-use switch (Settings › off by default).
+    computer_use: bool,
 }
 
 /// Rides with the prompt of a plan turn, never stored (rule 2.1). The turn
@@ -836,6 +839,7 @@ impl Session {
             lead_policy: None,
             repo_map: Default::default(),
             plan_turn: false,
+            computer_use: false,
         })
     }
 
@@ -886,6 +890,7 @@ impl Session {
             lead_policy: None,
             repo_map: Default::default(),
             plan_turn: false,
+            computer_use: false,
         })
     }
 
@@ -1188,6 +1193,7 @@ impl Session {
         if let Ok(mut s) = self.runner_state.lock() {
             s.parent_policy = self.lead_policy.unwrap_or(policy);
         }
+        let _computer = computer::turn(self.store.conn(), self.sess, self.computer_access(policy));
         self.check_user_commit().ok();
         let guard = self.snapshot("turn guard").ok();
         self.last_turn_guard = guard.clone();
@@ -2311,6 +2317,14 @@ impl Session {
         attachment_ids: &[i64],
         decide: &mut dyn FnMut(&PermissionAsk) -> Permission,
     ) -> Result<TurnReport> {
+        // Every action that changes something goes through the same dialog
+        // as a file write (the shell registers it with `set_computer_asker`).
+        let access = if self.computer_use {
+            computer::Access::Ask
+        } else {
+            computer::Access::Off
+        };
+        let _computer = computer::turn(self.store.conn(), self.sess, access);
         self.check_user_commit().ok();
         let agent_actor = actor::intern(self.store.conn(), agent_name, provider)?;
         let has_history = !ledger::history(self.store.conn(), self.sess, 1)?.is_empty();
@@ -2330,7 +2344,6 @@ impl Session {
             attachments::link_to_event(self.store.conn_mut(), self.sess, &event, attachment_ids)?
         };
         self.announce(user_seq);
-        self.mark_rewind_point(user_seq, user_text);
         let bridge = self.resolve_bridge(agent_name, &[]);
 
         // A dialog the agent never opens protects nothing. Codex writes files
@@ -2354,6 +2367,9 @@ impl Session {
         self.project_memory(agent_name);
         let guard = self.snapshot("turn guard").ok();
         self.last_turn_guard = guard.clone();
+        // After this turn's snapshot, not before: bound earlier, the message
+        // got the previous turn's sha and a rewind lost that turn's edits.
+        self.mark_rewind_point(user_seq, user_text);
         if self.agent_turn_start_guard.is_none() {
             self.agent_turn_start_guard = guard.clone();
         }
@@ -2586,6 +2602,30 @@ impl Session {
 
     /// Tell the shell this session's ledger now reaches `seq`. A hint only:
     /// the shell pulls the rows itself on its read-only handle.
+    /// Let agents see and drive this Mac through the `computer` MCP tool.
+    /// What each turn may then do follows its policy (`computer_access`).
+    pub fn set_computer_use(&mut self, on: bool) {
+        self.computer_use = on;
+        computer::set_enabled(self.store.conn(), self.sess, on);
+    }
+
+    /// Who answers "may the agent click here?" during an interactive turn.
+    pub fn set_computer_asker(&self, asker: Option<computer::Asker>) {
+        computer::set_asker(self.store.conn(), self.sess, asker);
+    }
+
+    /// A turn that promises not to change anything (plan mode, read-only,
+    /// the orchestrator's own turn) may only look; "allow" may act.
+    fn computer_access(&self, policy: Policy) -> computer::Access {
+        if !self.computer_use {
+            computer::Access::Off
+        } else if self.plan_turn || self.lead_policy.is_some() || policy.restrictive() {
+            computer::Access::Look
+        } else {
+            computer::Access::Act
+        }
+    }
+
     /// Remember the workspace as it was when the user sent `seq` — the turn
     /// guard taken just before it — so the message can later be rewound to.
     /// A failed bind only costs that message its code rewind; never the turn.

@@ -499,6 +499,77 @@ struct RoutingSettings: View {
 
 // MARK: สิทธิ์และความปลอดภัย
 
+/// Computer use: the switch, what it means, and the two macOS permissions it
+/// needs. The rules themselves (read-only turns only look, "ถามก่อน" asks for
+/// every action, a cap per turn) live in chorus-core/src/computer.rs.
+struct ComputerUseSettings: View {
+    @EnvironmentObject var engine: Engine
+    @AppStorage(Engine.computerUseKey) private var enabled = false
+    @State private var confirming = false
+    @State private var perms: Engine.ComputerPermissions?
+
+    var body: some View {
+        SettingsGroup(title: "ควบคุมคอมพิวเตอร์",
+                      footer: "agent ทุกเจ้าใน session ใช้ได้ผ่านเครื่องมือ computer ของ Chorus · โหมด \"ถามก่อน\" จะถามทุกครั้งที่จะคลิกหรือพิมพ์ · วางแผนก่อน/อ่านอย่างเดียวดูหน้าจอได้อย่างเดียว · หยุดเทิร์นได้ทุกเมื่อด้วยปุ่มหยุด") {
+            SettingsRow(title: "ให้ agent ดูหน้าจอ ใช้เมาส์และคีย์บอร์ด",
+                        info: "agent จะคลิก พิมพ์ และเปิดแอปได้เหมือนคุณ ข้อความบนหน้าเว็บหรือในแอปอาจหลอกให้ agent ทำสิ่งที่คุณไม่ได้สั่ง — อย่าเปิดหน้าที่มีรหัสผ่านหรือข้อมูลการเงินไว้ระหว่างที่ agent ทำงาน") {
+                Toggle("ให้ agent ควบคุมคอมพิวเตอร์", isOn: Binding(
+                    get: { enabled },
+                    set: { on in
+                        if on { confirming = true } else { enabled = false; engine.setComputerUse(false) }
+                    }))
+                    .labelsHidden().toggleStyle(.switch)
+            }
+            if enabled, let p = perms, p.supported {
+                RowDivider()
+                permissionRow("บันทึกหน้าจอ (Screen Recording)", granted: p.screen_recording,
+                              pane: "Privacy_ScreenCapture") {
+                    perms = engine.computerPermissions(request: true)
+                }
+                RowDivider()
+                permissionRow("การช่วยการเข้าถึง (Accessibility)", granted: p.accessibility,
+                              pane: "Privacy_Accessibility", request: nil)
+            } else if enabled, perms?.supported == false {
+                RowDivider()
+                SettingsRow(title: "ใช้ได้เฉพาะบน macOS") { EmptyView() }
+            }
+        }
+        .onAppear { perms = engine.computerPermissions() }
+        .confirmationDialog("ให้ agent ควบคุมคอมพิวเตอร์?", isPresented: $confirming) {
+            Button("เปิดใช้", role: .destructive) {
+                enabled = true
+                engine.setComputerUse(true)
+                perms = engine.computerPermissions()
+            }
+        } message: {
+            Text("agent จะเห็นหน้าจอและคลิก/พิมพ์ได้ทั้งเครื่อง ไม่ใช่แค่ในโปรเจกต์ ใช้กับงานที่คุณนั่งดูอยู่ ปิดแอปที่มีข้อมูลสำคัญก่อน และเลือก \"ถามก่อน\" ถ้าอยากอนุมัติทีละขั้น")
+        }
+    }
+
+    @ViewBuilder
+    private func permissionRow(_ title: String, granted: Bool, pane: String,
+                               request: (() -> Void)?) -> some View {
+        SettingsRow(title: title, detail: granted ? "ได้รับสิทธิ์แล้ว" : "ยังไม่ได้รับสิทธิ์ — เปิดสวิตช์ของ Chorus แล้วเปิด Chorus ใหม่") {
+            if granted {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            } else {
+                HStack(spacing: 6) {
+                    if let request { Button("ขอสิทธิ์", action: request).controlSize(.small) }
+                    Button("เปิด System Settings") {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                    .controlSize(.small)
+                    Button { perms = engine.computerPermissions() } label: { Image(systemName: "arrow.clockwise") }
+                        .buttonStyle(.borderless)
+                        .help("ตรวจอีกครั้ง")
+                }
+            }
+        }
+    }
+}
+
 struct SafetySettings: View {
     let workspace: String
     @AppStorage("chorus.defaultPermission") private var defaultPermission = Int(PermissionLevel.ask.rawValue)
@@ -531,6 +602,7 @@ struct SafetySettings: View {
                 .pickerStyle(.segmented).labelsHidden().frame(width: 170)
             }
         }
+        ComputerUseSettings()
         SettingsGroup(title: "โปรเจกต์ที่เชื่อถือ",
                       footer: "repo ใหม่จะไม่รันอะไรจนกว่าคุณเปิดเอง") {
             if projects.isEmpty {

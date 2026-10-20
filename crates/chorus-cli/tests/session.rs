@@ -144,6 +144,30 @@ fn rewinding_before_a_message_forks_the_chat_and_restores_the_files_it_saw() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "v3");
 }
 
+/// The interactive ("ถามก่อน") path snapshots later in the turn than the
+/// relay path; its rewind point must still be the workspace the message saw.
+/// macOS only: the interactive path enforces a deny with Seatbelt (7.22).
+#[cfg(target_os = "macos")]
+#[test]
+fn an_interactive_turn_rewinds_to_its_own_files_not_the_turn_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("w");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let file = cwd.join("a.txt");
+    std::fs::write(&file, "v1").unwrap();
+    let mut s = Session::create(&dir.path().join("ledger.db"), &cwd, "rewind ask").unwrap()
+        .with_bridge(mock_bridge());
+    let mut allow = |_: &chorus_cli::session::PermissionAsk| Permission::Allow;
+
+    s.run_turn_decide("codex", "openai", "first", &mut allow).unwrap();
+    std::fs::write(&file, "v2").unwrap();
+    let second = s.run_turn_decide("codex", "openai", "second", &mut allow).unwrap();
+    std::fs::write(&file, "v3").unwrap();
+
+    s.rewind_before(second.user_seq, true, false).unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "v2");
+}
+
 /// A mock that writes `name` into the workspace mid-turn without asking.
 fn rogue_bridge(name: &str) -> Vec<String> {
     vec![

@@ -37,6 +37,10 @@ let package = Package(
                     "-framework", "SystemConfiguration",
                     "-framework", "Vision",
                     "-framework", "CoreSpotlight",
+                    // chorus-core's computer use: CGEvent input, display
+                    // geometry and the TCC checks (AXIsProcessTrusted).
+                    "-framework", "CoreGraphics",
+                    "-framework", "ApplicationServices",
                 ])
             ]
         ),

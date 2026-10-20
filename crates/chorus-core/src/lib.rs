@@ -13,6 +13,7 @@ pub mod checkpoint;
 pub mod checkpoint_dag;
 pub mod compaction;
 pub mod composer;
+pub mod computer;
 pub mod context;
 pub mod darwin_qos;
 pub mod diff_align;

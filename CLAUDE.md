@@ -200,6 +200,8 @@ evals/handoff/                          สไปก์ที่ 2 (README + เ
 | MCP body | เพดาน 64 KB → 413 · `Origin` ใด ๆ → 403 · read timeout 30 นาที | `vec![0u8; content_length]` ตาม header = OOM จาก header บรรทัดเดียว · Origin guard คือกัน DNS-rebinding ตามที่ MCP spec แนะนำ |
 | plan mode | เทิร์นปกติ + `Policy::ReadOnly` + `PLAN_MODE_GUIDANCE` ต่อท้าย prompt (ไม่ลง ledger) · อนุมัติ = ส่ง `PLAN_APPROVED_PROMPT` ด้วยสิทธิ์ปกติของ user | ใช้ sandbox ที่มีอยู่บังคับ ไม่ใช่คำขอร้อง · ข้อความอนุมัติอยู่ใน ledger เพื่อให้ agent ถัดไปรู้ว่าแผนผ่านแล้ว |
 | rewind | ย้อนแชท = `ledger::fork` ก่อนข้อความนั้น (ไม่ลบ) · ย้อนไฟล์ = sha ของ turn guard ที่ bind กับ seq ของข้อความ user (`checkpoint_turn`) + snapshot ก่อนย้อนเป็น backup | ledger เป็น SoT (2.2) — `CheckpointDag::rewind_to_seq` เดิมใช้ `DELETE FROM event` ตอนนี้แอปไม่เรียกแล้ว **อย่ากลับไปใช้** |
+| browser | รายการใน integration catalog (`playwright` `--isolated` · `playwright-own-chrome` `--extension` · `chrome-devtools` `--isolated --no-usage-statistics --no-performance-crux`) pin เวอร์ชัน + เปิดต่อโปรเจกต์ + `BROWSER_INSTRUCTION` ทุกเทิร์น | ไม่ใช้ฟีเจอร์ browser ของแต่ละเจ้า (Claude in Chrome / Codex app / Gemini browser_agent) เพราะผูกกับเจ้าเดียวหรือใช้ผ่าน ACP ไม่ได้ · MCP ชุดเดียวถึงทุก agent (7.18) |
+| computer use | MCP tool `computer` ของ Chorus เอง (`chorus-core/src/computer.rs`) ไม่ใช้ community server · CoreGraphics + `screencapture`/`sips` ไม่มี dep ใหม่ | สิทธิ์ TCC อยู่กับ Chorus.app เท่านั้น · ทุก action ผ่าน gate: ปิดเป็นดีฟอลต์ · read-only/plan/orchestrator = ดูได้อย่างเดียว · ถามก่อน = ถามทุก action ผ่าน callback เดียวกับ permission · cap 300/เทิร์น · `TurnGuard` ปิด gate เมื่อเทิร์นจบ |
 | bridge ของแต่ละเจ้า | override ได้ด้วย env (`CHORUS_CLAUDE_BRIDGE` ฯลฯ) | package ถูก rename มาแล้วครั้งหนึ่ง ไม่ควรต้อง rebuild เพื่อตามชื่อ |
 
 ---
@@ -507,6 +509,16 @@ cache ใน `RepoMapCache` (หน่วยความจำ ไม่ลง�
 - สแกน identifier แยกไม่ออกว่าเป็นการเรียกจริงหรือคำในคอมเมนต์ → map เต็มไปด้วย `new`/`default`/`match`
   แก้ด้วย `name_weight`: ชื่อที่นิยาม > 3 ที่ = 0 · snake/camel ≥ 8 ตัว ×10 · คำล้วนตัวเล็ก ×0.1 · คูณ IDF
 - render นับด้วย `TokenCounter` ตัวเดียวกับชั้นอื่น ไม่ใช่ `len/4` (7.1)
+
+### 7.27 computer use — สิ่งที่ต้องรู้ก่อนแตะ (20 ต.ค. 2026 · ยังไม่เคยรันบน Mac จริง)
+
+- action ตามคำศัพท์ของ computer-use tool ของ Anthropic (`left_click`, `key` แบบ `cmd+s`, `coordinate` เป็น pixel ของ screenshot)
+  Claude เทรนกับชุดนี้ · screenshot ย่อให้ด้านยาว ≤ 1280 px แล้ว map กลับเป็น point ในโค้ด — Retina 2× ไม่ถึงโมเดล
+- TCC: Screen Recording (ภาพ) + Accessibility (เมาส์/คีย์บอร์ด) **ผูกกับ code signature** — build ad-hoc ใหม่แต่ละครั้ง
+  macOS อาจถือว่าเป็นแอปใหม่แล้วขอสิทธิ์ซ้ำ (แก้จริงด้วย notarize/Developer ID) · CLI ใช้สิทธิ์ของ Terminal ที่รัน
+- `Package.swift` ต้อง link `CoreGraphics` + `ApplicationServices` (staticlib ไม่พา `#[link]` ไปให้ Swift linker)
+- ส่วน `mac` ใน computer.rs คอมไพล์เฉพาะ macOS — clippy/test ของมันอยู่ที่ CI · ตรรกะ (gate, parse, scaling) เทสต์บน Linux ด้วย `Desktop` ปลอม
+- โหมดถามก่อน: FFI ลงทะเบียน `computer_asker` ก่อน `run_turn_decide*` แล้วถอดหลังจบ — **เทิร์นที่ไม่มี asker จะปฏิเสธ action ที่เปลี่ยนสถานะ** ไม่ใช่ปล่อยผ่าน
 
 ### 7.3 repo เงาสำหรับ checkpoint
 ต้องยึด `.gitignore` ของผู้ใช้ ไม่งั้น `.chorus/` จะโตกว่าโปรเจกต์จริง

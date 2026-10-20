@@ -899,11 +899,15 @@ pub unsafe extern "C" fn chorus_run_turn_interactive(
         }
     };
 
+    engine
+        .session
+        .set_computer_asker(Some(computer_asker(agent, callback, ctx_usize)));
     let r = catch_unwind(AssertUnwindSafe(|| {
         engine
             .session
             .run_turn_decide(agent, "openai", prompt, &mut decide)
     }));
+    engine.session.set_computer_asker(None);
     match r {
         Ok(Ok(t)) => out(serde_json::to_string(&TurnJson {
             ok: true,
@@ -957,7 +961,10 @@ pub unsafe extern "C" fn chorus_run_turn_interactive_with_attachments(
             chorus_cli::session::Permission::Deny
         }
     };
-    match catch_unwind(AssertUnwindSafe(|| {
+    engine
+        .session
+        .set_computer_asker(Some(computer_asker(agent, callback, ctx_usize)));
+    let r = catch_unwind(AssertUnwindSafe(|| {
         engine.session.run_turn_decide_with_attachments(
             agent,
             "openai",
@@ -965,7 +972,9 @@ pub unsafe extern "C" fn chorus_run_turn_interactive_with_attachments(
             &attachment_ids,
             &mut decide,
         )
-    })) {
+    }));
+    engine.session.set_computer_asker(None);
+    match r {
         Ok(Ok(t)) => out(serde_json::to_string(&turn_json(t)).unwrap()),
         Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in run_turn_interactive_with_attachments"),
@@ -1404,6 +1413,53 @@ pub unsafe extern "C" fn chorus_run_plan_with_attachments(
         Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in run_plan_with_attachments"),
     }
+}
+
+/// Computer use on/off for the open session (Settings). Off by default.
+///
+/// # Safety
+/// `e` must be live or null.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_computer_use(e: *mut ChorusEngine, on: c_int) {
+    if let Some(engine) = e.as_mut() {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            engine.session.set_computer_use(on != 0)
+        }));
+    }
+}
+
+/// `{"supported":b,"screen_recording":b,"accessibility":b}` — what macOS has
+/// granted this process. With `request` != 0, first shows the Screen
+/// Recording prompt (macOS only shows it once per app).
+/// The returned string must be freed with `chorus_string_free`.
+#[no_mangle]
+pub extern "C" fn chorus_computer_permissions_json(request: c_int) -> *mut c_char {
+    match catch_unwind(|| {
+        if request != 0 {
+            chorus_core::computer::request_screen_recording();
+        }
+        chorus_core::computer::permissions()
+    }) {
+        Ok(p) => out(serde_json::to_string(&p).unwrap_or_default()),
+        Err(_) => err("panic in computer_permissions"),
+    }
+}
+
+/// During an interactive turn, computer actions are asked through the same
+/// callback as file permissions: one dialog, one place to say no.
+fn computer_asker(
+    agent: &str,
+    callback: PermissionCallback,
+    ctx_usize: usize,
+) -> chorus_core::computer::Asker {
+    let agent = agent.to_string();
+    std::sync::Arc::new(move |what: &str| {
+        let payload = serde_json::json!({
+            "agent": agent, "tool": "computer", "kind": "computer", "detail": what
+        });
+        let c = std::ffi::CString::new(payload.to_string()).unwrap_or_default();
+        callback(ctx_usize as *mut std::ffi::c_void, c.as_ptr()) != 0
+    })
 }
 
 /// Rewind to just before the user's message `seq` (see

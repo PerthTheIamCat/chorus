@@ -63,7 +63,7 @@ static RUNNERS: std::sync::Mutex<Option<HashMap<RunnerKey, Arc<dyn ChildRunner>>
 
 /// Which store `conn` is, as a stable string. SQLite reports the main
 /// database's file; canonicalised so two handles on one file agree.
-fn db_key(conn: &Connection) -> String {
+pub(crate) fn db_key(conn: &Connection) -> String {
     match conn.path().filter(|p| !p.is_empty()) {
         Some(p) => std::fs::canonicalize(p)
             .map(|c| c.to_string_lossy().into_owned())
