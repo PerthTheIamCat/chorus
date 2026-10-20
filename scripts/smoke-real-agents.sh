@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # End-to-end check against the agents logged in on this Mac — what CI and the
-# mock agent cannot cover (CLAUDE.md §3: the Claude and Gemini bridges have
+# mock agent cannot cover (CLAUDE.md §3: the Claude and Antigravity bridges have
 # never been run through a whole relay). Sends a few real requests per agent.
 #
-#   scripts/smoke-real-agents.sh                  # claude gemini codex
+#   scripts/smoke-real-agents.sh                  # claude codex antigravity
 #   scripts/smoke-real-agents.sh claude codex
 #
 # For every agent: one turn that must write a file. Then, across the first two
@@ -17,7 +17,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-AGENTS="${*:-claude gemini codex}"
+AGENTS="${*:-claude codex antigravity}"
 TURN_SECS="${CHORUS_SMOKE_TIMEOUT:-300}"
 
 echo "── build ──"
@@ -51,7 +51,7 @@ with_timeout() {
 bridge_env() {
     case "$1" in
         claude*) echo CHORUS_CLAUDE_BRIDGE ;;
-        gemini*) echo CHORUS_GEMINI_BRIDGE ;;
+        antigravity*|agy*) echo CHORUS_ANTIGRAVITY_BRIDGE ;;
         *) echo CHORUS_CODEX_BRIDGE ;;
     esac
 }

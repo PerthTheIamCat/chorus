@@ -15,7 +15,7 @@
 //! Examples:
 //!   acp-probe --cwd /tmp/scratch --mock              # ลองกับ agent ปลอมในตัว
 //!   acp-probe --cwd /tmp/scratch -- codex acp
-//!   acp-probe --cwd /tmp/scratch -- gemini --acp
+//!   acp-probe --cwd /tmp/scratch -- antigravity-acp
 //!
 //! By default every permission request is DENIED. That is on purpose: we want to
 //! see the shape of the request, not let an agent loose on a real repo. Pass
@@ -110,7 +110,7 @@ fn parse_args() -> Result<Opts> {
             "no agent command. try:\n  \
              acp-probe --cwd /tmp/scratch --mock            (agent ปลอมในตัว)\n  \
              acp-probe --cwd /tmp/scratch -- codex acp\n  \
-             acp-probe --cwd /tmp/scratch -- gemini --acp"
+             acp-probe --cwd /tmp/scratch -- antigravity-acp"
         ));
     }
     let cwd = cwd.canonicalize().unwrap_or(cwd);

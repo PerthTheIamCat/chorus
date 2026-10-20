@@ -261,7 +261,7 @@ fn provider_of(name: &str) -> &'static str {
     let n = name.to_lowercase();
     if n.contains("claude") {
         "anthropic"
-    } else if n.contains("gemini") {
+    } else if n.contains("antigravity") || n.contains("agy") || n.contains("gemini") {
         "google"
     } else if n.contains("codex") || n.contains("gpt") || n.contains("o3") {
         "openai"

@@ -65,7 +65,7 @@ fn find_binary(name: &str) -> Option<PathBuf> {
 /// which process to spawn. An unknown name falls back to the Codex bridge.
 ///
 /// Each can be overridden by environment variable — `CHORUS_CLAUDE_BRIDGE`,
-/// `CHORUS_CODEX_BRIDGE`, `CHORUS_GEMINI_BRIDGE` — so a package rename (which
+/// `CHORUS_CODEX_BRIDGE`, `CHORUS_ANTIGRAVITY_BRIDGE` — so a package rename (which
 /// has already happened once for Claude) or a locally installed binary needs
 /// no rebuild. The value is a whitespace-separated command line, e.g.
 /// `CHORUS_CLAUDE_BRIDGE="npx -y @zed-industries/claude-code-acp"`.
@@ -75,11 +75,6 @@ pub fn bridge_for(agent_name: &str) -> Vec<String> {
         ("CHORUS_CLAUDE_BRIDGE", CLAUDE_BRIDGE)
     } else if n.contains("antigravity") || n.contains("agy") {
         ("CHORUS_ANTIGRAVITY_BRIDGE", &["antigravity-acp"])
-    } else if n.contains("gemini") {
-        // `--acp` per google-gemini/gemini-cli docs/cli/acp-mode.md (checked
-        // 19 Oct 2026); `--experimental-acp` is the deprecated spelling. An
-        // older CLI: CHORUS_GEMINI_BRIDGE="gemini --experimental-acp".
-        ("CHORUS_GEMINI_BRIDGE", &["gemini", "--acp"])
     } else {
         ("CHORUS_CODEX_BRIDGE", DEFAULT_BRIDGE)
     };

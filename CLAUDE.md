@@ -52,7 +52,7 @@ Swift ทำแค่วาดกับรับ input เพื่อให้�
 | crate | ทำอะไร |
 |---|---|
 | `chorus-core` | ledger (+ fork-chain `history()`), blob store, memory + approve queue (v2), token counter, render, context assembler, handoff brief, projector, checkpoint (shadow git + `apply_reverse`), compaction (Extractive + **Ollama**) — **รังส์ L1/L2 เก็บลงตาราง `summary` (เพิ่มใน schema v3 · ตอนนี้ `SCHEMA_VERSION` = 7) ไม่ generate ตอน assemble**, **mcp (Streamable-HTTP: `memory_propose` — ทำงานกับ Codex)** |
-| `chorus-acp` | ACP client + `acp-probe` + mock (`--fail`) + `CodexAgent` + `bridge_for` (codex/claude/gemini) · strip `CLAUDECODE` |
+| `chorus-acp` | ACP client + `acp-probe` + mock (`--fail`) + `CodexAgent` + `bridge_for` (codex/claude/antigravity) · strip `CLAUDECODE` |
 | `chorus-cli` | lib+bin · `bench`/`run`(+`--chain`/`--read-only`)/`handoff`/`memory`/`compare` · `Session` engine |
 | `chorus-ffi` | C ABI (`chorus.h`) — engine/run_turn(+interactive callback)/run_relay/compare/handoff/events_since/working_diff/snapshot/restore/reject_hunks/memory_state+review/**compact/uncompacted/task_state** · JSON ล้วน · panic-guarded |
 | `chorus-daemon` | `chorusd` headless engine — Unix socket `~/.chorus/engine.sock` + SSE ให้ shell/CLI/มือถือ · System Monitor · pairing |
@@ -64,8 +64,8 @@ Swift ทำแค่วาดกับรับ input เพื่อให้�
 relay auto-failover 429/quota · compare (fork ต่อ agent) · projector เขียน agent files · memory `memory_propose`→approve queue · per-hunk diff reject · interactive permission
 
 **ยังต้องเพื่อน (แต่ไม่บล็อกอะไร)**:
-- **Gemini adapter** — ไม่มี `gemini` CLI (`bridge_for` เตรียมไว้ · ใช้ `gemini --acp` ตาม docs ทางการ 19 ต.ค. 2026 — `--experimental-acp` deprecated · CLI เก่าตั้ง `CHORUS_GEMINI_BRIDGE`)
-- **ทดสอบกับ agent จริงทั้ง flow** — `scripts/smoke-real-agents.sh [claude gemini codex]` บน Mac ที่ login แล้ว: เขียนไฟล์ได้ · agent ตัวที่สองรู้ว่าตัวแรกทำอะไร (จาก ledger) · relay ข้าม bridge ที่พัง — **ยังไม่เคยรันกับ Claude/Gemini จริง**
+- **Gemini CLI — เอาออกแล้ว (20 ต.ค. 2026)** ไม่เคยมีใน `list_agents` ไม่ได้ติดตั้งบนเครื่องเพื่อน และไม่เคยถูกทดสอบ ฝั่ง Google ใช้ **Antigravity (`agy`)** ผ่าน `antigravity-acp` · การนำเข้า transcript ของ Gemini CLI (7.23) ยังอยู่
+- **ทดสอบกับ agent จริงทั้ง flow** — `scripts/smoke-real-agents.sh [claude codex antigravity]` บน Mac ที่ login แล้ว: เขียนไฟล์ได้ · agent ตัวที่สองรู้ว่าตัวแรกทำอะไร (จาก ledger) · relay ข้าม bridge ที่พัง — **ยังไม่เคยรันกับ Claude/Antigravity จริง**
 - **Claude bridge** — package ถูก rename เป็น `@zed-industries/claude-agent-acp` (ตัวเก่า `claude-code-acp` deprecated) · `bridge_for` ชี้ตัวใหม่แล้ว ถ้าเครื่องยังมีแต่ตัวเก่าให้ตั้ง `CHORUS_CLAUDE_BRIDGE="npx -y @zed-industries/claude-code-acp"` · เครื่องนี้ `claude` OAuth หมดอายุ → login ใหม่
 - **Ollama compaction** — ใช้ได้จริงแล้วผ่าน `chorus compact` (ไม่อยู่บน turn path อีกต่อไป) · `brew install ollama && ollama pull qwen2.5:3b` แล้วตั้ง `CHORUS_SUMMARY_MODEL`
 - **embedding + sqlite-vec** — ต้องตัดสิน dep (MLX / `NLEmbedding` / sqlite-vec)
