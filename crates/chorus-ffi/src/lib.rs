@@ -1428,6 +1428,18 @@ pub unsafe extern "C" fn chorus_set_computer_use(e: *mut ChorusEngine, on: c_int
     }
 }
 
+/// Claude uses the user's own Chrome through the Claude in Chrome extension
+/// for the open session's next turns (Settings). Off by default.
+///
+/// # Safety
+/// `e` must be live or null.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_claude_chrome(e: *mut ChorusEngine, on: c_int) {
+    if let Some(engine) = e.as_mut() {
+        engine.session.set_claude_chrome(on != 0);
+    }
+}
+
 /// `{"supported":b,"screen_recording":b,"accessibility":b}` — what macOS has
 /// granted this process. With `request` != 0, first shows the Screen
 /// Recording prompt (macOS only shows it once per app).

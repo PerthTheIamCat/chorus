@@ -1226,3 +1226,14 @@ fn project_memory_is_shared_across_folders() {
     sb.review_proposal(id, true).unwrap();
     assert!(sa.memory_state().unwrap().0.iter().any(|f| f == "from B"));
 }
+
+#[test]
+fn claude_in_chrome_is_switched_on_for_claude_only_and_only_when_asked() {
+    use chorus_cli::session::provider_browser_env;
+    let on = [("CLAUDE_CODE_ENABLE_CFC".to_string(), "1".to_string())];
+    assert_eq!(provider_browser_env("claude", true), on);
+    assert_eq!(provider_browser_env("claude-opus@work", true), on);
+    assert!(provider_browser_env("claude", false).is_empty(), "off leaves the user's /chrome default alone");
+    assert!(provider_browser_env("codex", true).is_empty(), "Codex's extension only works in its own app");
+    assert!(provider_browser_env("gemini", true).is_empty());
+}

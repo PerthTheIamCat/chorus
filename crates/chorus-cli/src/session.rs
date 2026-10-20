@@ -736,6 +736,24 @@ pub struct Session {
     plan_turn: bool,
     /// The user's computer-use switch (Settings › off by default).
     computer_use: bool,
+    /// Let Claude use the user's own Chrome through the Claude in Chrome
+    /// extension (Settings › off by default).
+    claude_chrome: bool,
+}
+
+/// Environment that turns on a provider's *own* browser integration for its
+/// bridge process. Only Claude has one that works outside its own app:
+/// `CLAUDE_CODE_ENABLE_CFC=1` starts Claude Code with Claude in Chrome on
+/// (code.claude.com/docs/en/env-vars, checked 20 Oct 2026; read from the
+/// process environment — Claude Code ignores it in project settings).
+/// Codex's Chrome extension works only in the Codex app, not its CLI.
+/// Off adds nothing, so the user's own `/chrome` default still applies.
+pub fn provider_browser_env(agent_name: &str, claude_chrome: bool) -> Vec<(String, String)> {
+    if claude_chrome && agent_name.to_lowercase().contains("claude") {
+        vec![("CLAUDE_CODE_ENABLE_CFC".to_string(), "1".to_string())]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Rides with the prompt of a plan turn, never stored (rule 2.1). The turn
@@ -840,6 +858,7 @@ impl Session {
             repo_map: Default::default(),
             plan_turn: false,
             computer_use: false,
+            claude_chrome: false,
         })
     }
 
@@ -891,6 +910,7 @@ impl Session {
             repo_map: Default::default(),
             plan_turn: false,
             computer_use: false,
+            claude_chrome: false,
         })
     }
 
@@ -2137,6 +2157,7 @@ impl Session {
         };
 
         let mut env = crate::accounts::env_for(agent_name);
+        env.extend(provider_browser_env(agent_name, self.claude_chrome));
         let cli_paths = integration_catalog::cli_paths_for(&self.cwd)
             .context("load enabled catalog CLI tools")?;
         if !cli_paths.is_empty() {
@@ -2607,6 +2628,11 @@ impl Session {
     pub fn set_computer_use(&mut self, on: bool) {
         self.computer_use = on;
         computer::set_enabled(self.store.conn(), self.sess, on);
+    }
+
+    /// Claude uses the user's Chrome through its own extension (Settings).
+    pub fn set_claude_chrome(&mut self, on: bool) {
+        self.claude_chrome = on;
     }
 
     /// Who answers "may the agent click here?" during an interactive turn.

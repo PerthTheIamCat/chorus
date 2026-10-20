@@ -295,6 +295,7 @@ fn run(args: &[String]) -> Result<()> {
     let mut chain: Vec<String> = Vec::new();
     let mut model: Option<String> = None;
     let mut computer_use = false;
+    let mut claude_chrome = false;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -316,6 +317,7 @@ fn run(args: &[String]) -> Result<()> {
             }
             "--model" => model = it.next().cloned(),
             "--computer" => computer_use = true,
+            "--claude-chrome" => claude_chrome = true,
             "--session" => continue_session = it.next().and_then(|v| v.parse().ok()),
             "--yes" => policy = Policy::AllowAll,
             "--read-only" => policy = Policy::ReadOnly,
@@ -357,6 +359,7 @@ fn run(args: &[String]) -> Result<()> {
         // The permissions belong to whatever ran `chorus` (Terminal, iTerm…).
         s.set_computer_use(true);
     }
+    s.set_claude_chrome(claude_chrome);
     if let Some(m) = &model {
         // Pinned for whoever answers, including anyone the relay hands to:
         // "use the cheap model" is a statement about the task, not about one

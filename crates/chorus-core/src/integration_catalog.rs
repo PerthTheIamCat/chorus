@@ -84,11 +84,11 @@ pub static CATALOG: &[Integration] = &[
     Integration { id:"serena", title:"Serena", source:"https://github.com/oraios/serena", maintainer:"Serena contributors", license:"GPL-3.0-or-later", reviewed_version:"1.7.0", modes:MCP_ONLY, required_runtimes:&["uv", "Python 3.13"], actions:&["Semantic source retrieval and editing over MCP"], project_access:&["Read and edit project files when an agent invokes tools"], network:"Local MCP process; language-server behavior depends on configured backend", secret_names:&[], recipe:Recipe{method:InstallMethod::Uv,package:"serena-agent",health_args:&["--version"],executable:"serena"} },
     Integration { id:"rtk", title:"RTK", source:"https://github.com/rtk-ai/rtk", maintainer:"RTK contributors", license:"Apache-2.0", reviewed_version:"0.51.0", modes:CLI_ONLY, required_runtimes:&["Homebrew"], actions:&["Run explicitly as rtk <command> to filter command output"], project_access:&["Commands invoked by the agent retain their normal filesystem access"], network:"No network needed for local command filtering", secret_names:&[], recipe:Recipe{method:InstallMethod::Homebrew,package:"rtk-ai/tap/rtk",health_args:&["--version"],executable:"rtk"} },
     Integration { id:"headroom", title:"Headroom", source:"https://github.com/headroomlabs-ai/headroom", maintainer:"Headroom Labs", license:"Apache-2.0", reviewed_version:"0.39.1", modes:GRAFT_MODES, required_runtimes:&["uv", "Python 3.11+"], actions:&["MCP compression, retrieval and stats tools", "Explicit CLI commands where supported"], project_access:&["Receives content the agent explicitly submits to its tools"], network:"MCP mode is local; remote proxy and request-wrapper modes are excluded", secret_names:&[], recipe:Recipe{method:InstallMethod::Uv,package:"headroom-ai",health_args:&["--version"],executable:"headroom"} },
-    // Browsers: versions, bin names and flags checked against the published
-    // packages' own --help on 2026-10-20. All three are MCP servers the
-    // agents start themselves, so every agent gets the same browser tools.
-    Integration { id:"playwright", title:"Browser (Playwright)", source:"https://github.com/microsoft/playwright-mcp", maintainer:"Microsoft", license:"Apache-2.0", reviewed_version:"0.0.83", modes:MCP_ONLY, required_runtimes:&["Node.js", "npm"], actions:&["Open web pages in a separate browser window", "Click, type, read and screenshot pages for the agent"], project_access:&["None — the browser runs outside the project"], network:"Visits whatever sites the agent opens; the profile is kept in memory (--isolated), so none of your logins or cookies are in it", secret_names:&[], recipe:Recipe{method:InstallMethod::Npm,package:"@playwright/mcp",health_args:&["--version"],executable:"playwright-mcp"} },
-    Integration { id:"playwright-own-chrome", title:"Browser: your own Chrome", source:"https://github.com/microsoft/playwright-mcp", maintainer:"Microsoft", license:"Apache-2.0", reviewed_version:"0.0.83", modes:MCP_ONLY, required_runtimes:&["Node.js", "npm", "Google Chrome with the Playwright Extension"], actions:&["Drive tabs in the Chrome you already use, through the Playwright Extension (--extension)"], project_access:&["None — the browser runs outside the project"], network:"Acts as you on every site you are signed in to; a web page can try to steer the agent (prompt injection) — enable only when you need a logged-in site. Each connection is approved in the extension's popup", secret_names:&[], recipe:Recipe{method:InstallMethod::Npm,package:"@playwright/mcp",health_args:&["--version"],executable:"playwright-mcp"} },
+    // Chrome DevTools (console, network, performance) for any agent; version,
+    // bin name and flags checked against the package's own --help on
+    // 2026-10-20. Browsing as the user is each provider's own extension
+    // (Claude in Chrome — `provider_browser_env` in chorus-cli), not a
+    // catalog entry.
     Integration { id:"chrome-devtools", title:"Chrome DevTools", source:"https://github.com/ChromeDevTools/chrome-devtools-mcp", maintainer:"Google Chrome DevTools", license:"Apache-2.0", reviewed_version:"1.11.0", modes:MCP_ONLY, required_runtimes:&["Node.js 20.19+", "npm", "Google Chrome"], actions:&["Inspect console, network and performance of pages in a Chrome it launches"], project_access:&["None — the browser runs outside the project"], network:"Launches its own temporary Chrome profile (--isolated); usage statistics and CrUX lookups are turned off", secret_names:&[], recipe:Recipe{method:InstallMethod::Npm,package:"chrome-devtools-mcp",health_args:&["--version"],executable:"chrome-devtools-mcp"} },
     Integration { id:"chorus-review", title:"Chorus Review", source:"https://github.com/PerthTheIamCat/chorus", maintainer:"Chorus", license:"MIT", reviewed_version:"1.0.0", modes:SKILL_ONLY, required_runtimes:&[], actions:&["Review code changes for actionable correctness and regression risks"], project_access:&["Reads changed code and nearby call sites when invoked"], network:"No network access is built into this skill", secret_names:&[], recipe:Recipe{method:InstallMethod::Bundled,package:"chorus-review",health_args:&[],executable:"SKILL.md"} },
 ];
@@ -1024,7 +1024,7 @@ pub fn cli_paths_for(project: &Path) -> Result<Vec<PathBuf>, CatalogError> {
 }
 
 fn is_browser(id: &str) -> bool {
-    matches!(id, "playwright" | "playwright-own-chrome" | "chrome-devtools")
+    id == "chrome-devtools"
 }
 
 /// Rides with every turn while a browser is enabled. A page the agent reads
@@ -1077,10 +1077,6 @@ fn server_for(entry: &Integration, record: &InstallRecord, project: &Path) -> Va
             serde_json::json!({"name":"serena","command":path,"args":["start-mcp-server","--context=ide","--project",project.to_string_lossy()],"env":[]})
         }
         "headroom" => serde_json::json!({"name":"headroom","command":path,"args":["mcp"],"env":[]}),
-        "playwright" => serde_json::json!({"name":"browser","command":path,"args":["--isolated"],"env":[]}),
-        "playwright-own-chrome" => {
-            serde_json::json!({"name":"my-chrome","command":path,"args":["--extension"],"env":[]})
-        }
         "chrome-devtools" => serde_json::json!({"name":"chrome-devtools","command":path,"args":["--isolated","--no-usage-statistics","--no-performance-crux"],"env":[]}),
         _ => serde_json::json!({}),
     }
@@ -1577,27 +1573,14 @@ mod tests {
     }
 
     #[test]
-    fn browsers_launch_isolated_unless_the_user_picked_their_own_chrome() {
-        let args = |id: &str| -> Vec<String> {
-            let v = server_for(get(id).unwrap(), &record(id), Path::new("/p"));
-            v["args"].as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_string()).collect()
-        };
-        assert_eq!(args("playwright"), ["--isolated"]);
-        assert_eq!(args("playwright-own-chrome"), ["--extension"]);
-        let devtools = args("chrome-devtools");
-        assert!(devtools.contains(&"--isolated".to_string()));
-        assert!(devtools.contains(&"--no-usage-statistics".to_string()));
-        assert!(devtools.contains(&"--no-performance-crux".to_string()));
-        for id in ["playwright", "playwright-own-chrome", "chrome-devtools"] {
-            let v = server_for(get(id).unwrap(), &record(id), Path::new("/p"));
-            assert_eq!(v["command"], "/managed/bin/tool", "{id}");
-            assert!(is_browser(id));
-        }
-        // The server names are what agents show as the tool prefix.
-        let names: Vec<String> = ["playwright", "playwright-own-chrome", "chrome-devtools"]
-            .iter()
-            .map(|id| server_for(get(id).unwrap(), &record(id), Path::new("/p"))["name"].as_str().unwrap().to_string())
-            .collect();
-        assert_eq!(names, ["browser", "my-chrome", "chrome-devtools"]);
+    fn chrome_devtools_launches_isolated_without_telemetry() {
+        let id = "chrome-devtools";
+        let v = server_for(get(id).unwrap(), &record(id), Path::new("/p"));
+        let args: Vec<&str> = v["args"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect();
+        assert_eq!(args, ["--isolated", "--no-usage-statistics", "--no-performance-crux"]);
+        assert_eq!(v["command"], "/managed/bin/tool");
+        assert!(is_browser(id));
+        // Browsing as the user is the provider's own extension, not ours.
+        assert!(get("playwright").is_none() && get("playwright-own-chrome").is_none());
     }
 }

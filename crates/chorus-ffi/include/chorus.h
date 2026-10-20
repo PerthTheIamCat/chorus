@@ -263,6 +263,10 @@ char *chorus_run_plan_with_attachments(ChorusEngine *e, const char *agents,
  * turns ask through the permission callback for every action. */
 void chorus_set_computer_use(ChorusEngine *e, int on);
 
+/* Claude uses the user's own Chrome via the Claude in Chrome extension
+ * (sets CLAUDE_CODE_ENABLE_CFC=1 on the Claude bridge). Off by default. */
+void chorus_set_claude_chrome(ChorusEngine *e, int on);
+
 /* {"supported":b,"screen_recording":b,"accessibility":b}. request != 0 first
  * shows macOS's Screen Recording prompt (shown once per app). */
 char *chorus_computer_permissions_json(int request);

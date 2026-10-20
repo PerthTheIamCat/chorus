@@ -333,7 +333,10 @@ final class Engine: ObservableObject {
         queue.async { [weak self] in
             let h = make()
             // Every session starts with the user's computer-use switch.
-            if let h { chorus_set_computer_use(h, UserDefaults.standard.bool(forKey: Self.computerUseKey) ? 1 : 0) }
+            if let h {
+                chorus_set_computer_use(h, UserDefaults.standard.bool(forKey: Self.computerUseKey) ? 1 : 0)
+                chorus_set_claude_chrome(h, UserDefaults.standard.bool(forKey: Self.claudeChromeKey) ? 1 : 0)
+            }
             let eventsJSON = h.map { Self.string(from: chorus_transcript_json($0)) } ?? ""
             let presetJSON = h.map { Self.initialRoutePreset($0) } ?? ""
             let attachmentsJSON = h.map { Self.string(from: chorus_list_attachments($0)) } ?? ""
@@ -1558,7 +1561,8 @@ final class Engine: ObservableObject {
 
     // MARK: - Computer use
 
-    static let computerUseKey = "chorus.computerUse"
+    /// `nonisolated`: read on `queue` when a session handle is created.
+    nonisolated static let computerUseKey = "chorus.computerUse"
 
     struct ComputerPermissions: Codable, Equatable {
         let supported: Bool
@@ -1570,6 +1574,16 @@ final class Engine: ObservableObject {
     /// prompt first (macOS shows it once per app).
     func computerPermissions(request: Bool = false) -> ComputerPermissions? {
         Self.decode(ComputerPermissions.self, Self.string(from: chorus_computer_permissions_json(request ? 1 : 0)))
+    }
+
+    nonisolated static let claudeChromeKey = "chorus.claudeChrome"
+
+    /// Claude in Chrome (Claude's own extension). Stored and applied like
+    /// `setComputerUse`; takes effect from the next turn's bridge.
+    func setClaudeChrome(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: Self.claudeChromeKey)
+        guard let h = handle else { return }
+        queue.async { chorus_set_claude_chrome(h.raw, on ? 1 : 0) }
     }
 
     /// Settings switch. Stored for the next sessions and applied to the open one.

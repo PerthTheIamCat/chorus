@@ -499,6 +499,34 @@ struct RoutingSettings: View {
 
 // MARK: สิทธิ์และความปลอดภัย
 
+/// Each provider's own browser integration, where one works from Chorus.
+/// What is possible per provider is decided in chorus-cli
+/// (`provider_browser_env`); this only shows it and holds the switch.
+struct ProviderBrowserSettings: View {
+    @EnvironmentObject var engine: Engine
+    @AppStorage(Engine.claudeChromeKey) private var claudeChrome = false
+
+    var body: some View {
+        SettingsGroup(title: "Browser ของ agent",
+                      footer: "agent ใช้ browser ผ่าน extension ของเจ้าตัวเอง ไม่ใช่ browser ใน Chorus · ข้อความบนเว็บอาจหลอก agent ได้ — เว็บที่ login ค้างไว้ agent ทำแทนคุณได้ทุกอย่าง") {
+            SettingsRow(title: "Claude in Chrome",
+                        detail: "ใช้ Chrome ของคุณผ่าน extension ของ Claude",
+                        info: "ต้องมีแพ็กเกจ Pro/Max/Team/Enterprise · login Claude Code แบบ /login (ไม่ใช่ API key) · ติดตั้ง extension \"Claude\" จาก Chrome Web Store · ครั้งแรกให้รัน claude --chrome ใน Terminal หนึ่งครั้งเพื่อให้ Chrome รู้จัก Claude Code (Chorus ไม่ให้ agent เขียนไฟล์นี้เอง เพราะ Chrome รันมันนอก sandbox)") {
+                Toggle("Claude in Chrome", isOn: Binding(
+                    get: { claudeChrome },
+                    set: { claudeChrome = $0; engine.setClaudeChrome($0) }))
+                    .labelsHidden().toggleStyle(.switch)
+            }
+            RowDivider()
+            SettingsRow(title: "Codex",
+                        detail: "extension Chrome ของ Codex ใช้ได้เฉพาะในแอป Codex — CLI ที่ Chorus ใช้ยังไม่รองรับ") { EmptyView() }
+            RowDivider()
+            SettingsRow(title: "Gemini",
+                        detail: "browser agent ของ Gemini CLI เปิดเองใน ~/.gemini/settings.json — ยังไม่ได้ยืนยันว่าใช้ผ่าน Chorus ได้") { EmptyView() }
+        }
+    }
+}
+
 /// Computer use: the switch, what it means, and the two macOS permissions it
 /// needs. The rules themselves (read-only turns only look, "ถามก่อน" asks for
 /// every action, a cap per turn) live in chorus-core/src/computer.rs.
@@ -603,6 +631,7 @@ struct SafetySettings: View {
             }
         }
         ComputerUseSettings()
+        ProviderBrowserSettings()
         SettingsGroup(title: "โปรเจกต์ที่เชื่อถือ",
                       footer: "repo ใหม่จะไม่รันอะไรจนกว่าคุณเปิดเอง") {
             if projects.isEmpty {
