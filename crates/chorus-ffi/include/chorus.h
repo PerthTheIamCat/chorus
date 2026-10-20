@@ -267,6 +267,11 @@ void chorus_set_computer_use(ChorusEngine *e, int on);
  * (sets CLAUDE_CODE_ENABLE_CFC=1 on the Claude bridge). Off by default. */
 void chorus_set_claude_chrome(ChorusEngine *e, int on);
 
+/* Every folder of the session's project as a JSON array of paths; agents see
+ * and (outside read-only turns) may edit the others too.
+ * {"ok":true,"folders":[kept…]} or {"error":...}. */
+char *chorus_set_project_folders(ChorusEngine *e, const char *json);
+
 /* Deny the agent reading .env* and key files; Chorus passes the project .env
  * as environment instead. On by default. */
 void chorus_set_hide_secret_files(ChorusEngine *e, int on);

@@ -1440,6 +1440,38 @@ pub unsafe extern "C" fn chorus_set_claude_chrome(e: *mut ChorusEngine, on: c_in
     }
 }
 
+/// Every folder of the session's project, as a JSON array of paths. Agents
+/// are told about the ones other than the working directory every turn, and
+/// the sandbox lets them write there like in the working directory.
+/// `{"ok":true,"folders":[…]}` (the ones kept) or `{"error":…}`; free with
+/// `chorus_string_free`.
+///
+/// # Safety
+/// `e` must be live or null; `json` a valid C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_project_folders(
+    e: *mut ChorusEngine,
+    json: *const c_char,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let Some(json) = borrow(json) else {
+        return err("folders must be valid UTF-8");
+    };
+    let folders: Vec<std::path::PathBuf> = match serde_json::from_str(json) {
+        Ok(f) => f,
+        Err(e) => return err(format!("folders: {e}")),
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        engine.session.set_project_folders(&folders);
+        engine.session.project_folders().to_vec()
+    })) {
+        Ok(kept) => out(serde_json::json!({ "ok": true, "folders": kept }).to_string()),
+        Err(_) => err("panic in set_project_folders"),
+    }
+}
+
 /// Hide `.env*` and key files from the agent's sandbox; Chorus passes the
 /// project `.env` as environment instead (Settings). On by default.
 ///

@@ -1298,3 +1298,33 @@ fn the_project_env_reaches_the_agent_as_variables_not_as_text() {
     assert!(!ledger.contains("Hunter2Hunter2xyz"), "{ledger}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// A project with several folders: the agent is told about the others every
+/// turn (not stored in the ledger), and only as editable when it can write.
+#[test]
+fn agents_are_told_about_the_other_folders_of_their_project() {
+    std::env::set_var("CHORUS_SECRETS_BACKEND", "memory");
+    let base = std::env::temp_dir().join(format!("chorus-project-{}", std::process::id()));
+    let (gateway, auth) = (base.join("gateway"), base.join("auth-service"));
+    std::fs::create_dir_all(&gateway).unwrap();
+    std::fs::create_dir_all(&auth).unwrap();
+    let db = gateway.join("store.db");
+    let mut s = Session::create(&db, &gateway, "project").unwrap().with_bridge(mock_bridge());
+    // The working directory, a duplicate and a missing folder are dropped.
+    s.set_project_folders(&[gateway.clone(), auth.clone(), auth.clone(), base.join("gone")]);
+    assert_eq!(s.project_folders(), [auth.canonicalize().unwrap()]);
+
+    s.run_turn("codex", "openai", "MOCK_ECHO_SECRETS look around", Policy::AllowAll)
+        .expect("turn runs");
+    let saw = std::fs::read_to_string(gateway.join("mock-saw.txt")).unwrap();
+    let auth_path = auth.canonicalize().unwrap().display().to_string();
+    assert!(saw.contains(&format!("- auth-service: {auth_path}")), "{saw}");
+    assert!(saw.contains("read and edit"), "{saw}");
+    let ledger: String = s.transcript().unwrap().into_iter().map(|(_, b)| b + "\n").collect();
+    assert!(!ledger.contains(&auth_path), "guidance must not land in the ledger: {ledger}");
+
+    let ro = chorus_cli::session::project_folders_guidance(s.project_folders(), false);
+    assert!(ro.contains("this turn writes nothing") && !ro.contains("edit them"), "{ro}");
+    assert!(chorus_cli::session::project_folders_guidance(&[], true).is_empty());
+    let _ = std::fs::remove_dir_all(&base);
+}

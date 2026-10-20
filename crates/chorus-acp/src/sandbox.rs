@@ -50,12 +50,18 @@ pub fn wrap(cmd: &[String], cwd: &Path, profile: Profile) -> Result<Vec<String>,
 }
 
 /// Extra confinement on top of a [`Profile`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Options {
     /// Deny *reading* `.env*` and key files in the workspace. Chorus reads
     /// the project `.env` itself and hands its variables to the agent as
     /// environment, so the values never have to pass through the model.
     pub hide_secret_files: bool,
+    /// The other folders of the session's project (Projects › แก้ไขโปรเจกต์).
+    /// They get exactly what the workspace gets under the same profile:
+    /// writable under `Workspace` with the same carve-outs, denied under
+    /// `ReadOnly`. A folder that no longer exists is skipped — it cannot be
+    /// written either way.
+    pub extra_roots: Vec<PathBuf>,
 }
 
 /// [`wrap`] with [`Options`].
@@ -77,9 +83,18 @@ pub fn wrap_with(
     if cmd.is_empty() {
         return Err("คำสั่งว่าง".into());
     }
-    let mut profile_text = checked_policy(cwd, profile)?;
+    let mut roots: Vec<&Path> = vec![cwd];
+    roots.extend(
+        opts.extra_roots
+            .iter()
+            .map(PathBuf::as_path)
+            .filter(|r| r.is_dir() && !too_broad(r)),
+    );
+    let mut profile_text = checked_policy_roots(&roots, profile)?;
     if opts.hide_secret_files {
-        profile_text.push_str(&secret_file_rules(cwd)?);
+        for root in &roots {
+            profile_text.push_str(&secret_file_rules(root)?);
+        }
     }
     let mut out = vec![
         "/usr/bin/sandbox-exec".to_string(),
@@ -135,11 +150,22 @@ pub fn policy(cwd: &Path, profile: Profile) -> String {
 }
 
 fn checked_policy(cwd: &Path, profile: Profile) -> Result<String, String> {
-    let ws = cwd
-        .canonicalize()
-        .map_err(|e| format!("resolve sandbox workspace: {e}"))?;
-    checked_path(&ws)?;
-    let mut guards = git_guards(&ws, profile)?;
+    checked_policy_roots(&[cwd], profile)
+}
+
+/// The profile for one or more workspace roots: the session's folder first,
+/// then the other folders of its project.
+fn checked_policy_roots(roots: &[&Path], profile: Profile) -> Result<String, String> {
+    let mut resolved: Vec<PathBuf> = Vec::new();
+    let mut guards = Vec::new();
+    for root in roots {
+        let ws = root
+            .canonicalize()
+            .map_err(|e| format!("resolve sandbox workspace: {e}"))?;
+        checked_path(&ws)?;
+        guards.extend(git_guards(&ws, profile)?);
+        resolved.push(ws);
+    }
     let mut allow: Vec<PathBuf> = Vec::new();
 
     // Temp. Node, npx and every agent write here constantly.
@@ -177,7 +203,7 @@ fn checked_policy(cwd: &Path, profile: Profile) -> Result<String, String> {
     }
 
     if profile == Profile::Workspace {
-        allow.push(canonical(cwd));
+        allow.extend(resolved.iter().cloned());
     }
 
     let mut s = String::from(
@@ -244,16 +270,19 @@ fn checked_policy(cwd: &Path, profile: Profile) -> Result<String, String> {
     if profile == Profile::ReadOnly {
         // The workspace can itself be under an allowed temp/cache directory.
         // An explicit deny keeps read-only meaningful in that case too.
-        let ws = canonical(cwd);
-        if let Some(p) = ws.to_str().filter(|p| !p.contains('"')) {
-            s.push_str(&format!("(deny file-write* (subpath \"{p}\"))\n"));
+        for ws in &resolved {
+            if let Some(p) = ws.to_str().filter(|p| !p.contains('"')) {
+                s.push_str(&format!("(deny file-write* (subpath \"{p}\"))\n"));
+            }
         }
     }
     // Protect routing entries themselves as well as their resolved targets.
     // A linked worktree's shared hooks/config may live in an allowed temp tree.
-    let shadow = ws.join(".chorus");
-    guards.push((protected_target(&shadow)?, false));
-    guards.push((shadow, false));
+    for ws in &resolved {
+        let shadow = ws.join(".chorus");
+        guards.push((protected_target(&shadow)?, false));
+        guards.push((shadow, false));
+    }
     // A protected file's absolute path changes if an ancestor is renamed.
     // Literal directory denies seal that namespace without blocking writes
     // to ordinary children (index, refs and workspace files).
@@ -385,6 +414,19 @@ fn git_guards(ws: &Path, profile: Profile) -> Result<Vec<(PathBuf, bool)>, Strin
     Ok(guards)
 }
 
+/// A project folder that is `/`, the home directory or one of its ancestors
+/// would make the whole home writable — `~/.ssh/config`, shell rc files,
+/// LaunchAgents — which no project needs. Such a folder is left read-only.
+fn too_broad(root: &Path) -> bool {
+    let root = canonical(root);
+    if root.parent().is_none() {
+        return true;
+    }
+    std::env::var_os("HOME")
+        .map(|h| canonical(Path::new(&h)))
+        .is_some_and(|home| home.starts_with(&root))
+}
+
 /// macOS hands out `/tmp` and `/var` as symlinks into `/private`, and Seatbelt
 /// matches the resolved path — a profile written with the symlink silently
 /// allows nothing.
@@ -438,6 +480,54 @@ mod tests {
             p.contains("/private/tmp"),
             "Seatbelt matches resolved paths: {p}"
         );
+    }
+
+    #[test]
+    fn project_folders_get_the_workspace_rules_too() {
+        let base = std::env::temp_dir().join(format!("chorus-roots-{}", std::process::id()));
+        let (a, b) = (base.join("gateway"), base.join("auth"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let (ca, cb) = (canonical(&a), canonical(&b));
+        let (pa, pb) = (ca.to_str().unwrap(), cb.to_str().unwrap());
+
+        let ws = checked_policy_roots(&[&a, &b], Profile::Workspace).unwrap();
+        for p in [pa, pb] {
+            let allow = ws
+                .find(&format!("(allow file-write* (subpath \"{p}\"))"))
+                .unwrap();
+            // The second folder keeps the same carve-outs, after its allow.
+            let hooks = ws
+                .find(&format!("(deny file-write* (subpath \"{p}/.git/hooks\"))"))
+                .unwrap();
+            let shadow = ws
+                .find(&format!("(deny file-write* (subpath \"{p}/.chorus\"))"))
+                .unwrap();
+            assert!(allow < hooks && allow < shadow, "{ws}");
+        }
+        let ro = checked_policy_roots(&[&a, &b], Profile::ReadOnly).unwrap();
+        assert!(
+            ro.contains(&format!("(deny file-write* (subpath \"{pb}\"))")),
+            "{ro}"
+        );
+        assert!(
+            !ro.contains(&format!("(allow file-write* (subpath \"{pb}\"))")),
+            "{ro}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn home_or_root_never_becomes_a_writable_project_folder() {
+        assert!(too_broad(Path::new("/")));
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = PathBuf::from(home);
+            assert!(too_broad(&home));
+            if let Some(parent) = home.parent() {
+                assert!(too_broad(parent));
+            }
+            assert!(!too_broad(&home.join("some-project")));
+        }
     }
 
     #[test]
@@ -678,6 +768,38 @@ mod tests {
         }
 
         #[test]
+        fn a_second_project_folder_is_writable_but_its_hooks_are_not() {
+            let ws = scratch("roots-main");
+            let other = scratch("roots-other");
+            let outside = scratch("roots-outside");
+            std::fs::create_dir_all(other.join(".git/hooks")).unwrap();
+            let opts = Options {
+                extra_roots: vec![other.clone()],
+                ..Options::default()
+            };
+            let run = |script: &str| {
+                let cmd: Vec<String> = ["/bin/sh", "-c", script].map(String::from).to_vec();
+                let argv = wrap_with(&cmd, &ws, Profile::Workspace, opts.clone()).unwrap();
+                Command::new(&argv[0])
+                    .args(&argv[1..])
+                    .current_dir(&ws)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            };
+            assert!(run(&format!("echo x > '{}/edit.txt'", other.display())));
+            assert!(!run(&format!(
+                "echo x > '{}/.git/hooks/pre-commit'",
+                other.display()
+            )));
+            assert!(!run(&format!("echo x > '{}/nope.txt'", outside.display())));
+            for d in [ws, other, outside] {
+                let _ = std::fs::remove_dir_all(d);
+            }
+        }
+
+        #[test]
         fn secret_files_cannot_be_read_but_templates_and_code_can() {
             let ws = scratch("secrets");
             std::fs::create_dir_all(ws.join("app")).unwrap();
@@ -697,7 +819,7 @@ mod tests {
             };
             let run = |script: &str| {
                 let cmd: Vec<String> = ["/bin/sh", "-c", script].map(String::from).to_vec();
-                let argv = wrap_with(&cmd, &ws, Profile::Workspace, hide).unwrap();
+                let argv = wrap_with(&cmd, &ws, Profile::Workspace, hide.clone()).unwrap();
                 Command::new(&argv[0])
                     .args(&argv[1..])
                     .current_dir(&ws)

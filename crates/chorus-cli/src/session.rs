@@ -744,6 +744,35 @@ pub struct Session {
     /// the project `.env` itself and passes its variables as environment
     /// (Settings › on by default).
     hide_secret_files: bool,
+    /// The other folders of this session's project (the app's Projects).
+    /// Agents are told about them every turn and the sandbox treats them
+    /// like the working directory.
+    project_folders: Vec<PathBuf>,
+}
+
+/// What an agent is told about the rest of its project. Names and absolute
+/// paths only; the files themselves it reads like any other.
+pub fn project_folders_guidance(folders: &[PathBuf], can_write: bool) -> String {
+    if folders.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "\n\n(Chorus: this session's project has more folders than the working directory. ",
+    );
+    s.push_str(if can_write {
+        "You can read and edit them too; use their absolute paths:\n"
+    } else {
+        "You can read them (this turn writes nothing); use their absolute paths:\n"
+    });
+    for f in folders {
+        let name = f
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        s.push_str(&format!("- {name}: {}\n", f.display()));
+    }
+    s.push_str(")\n");
+    s
 }
 
 /// Replace every secret in `text` with its `$CHORUS_SECRET_…` name, before
@@ -883,6 +912,7 @@ impl Session {
             computer_use: false,
             claude_chrome: false,
             hide_secret_files: true,
+            project_folders: Vec::new(),
         })
     }
 
@@ -936,6 +966,7 @@ impl Session {
             computer_use: false,
             claude_chrome: false,
             hide_secret_files: true,
+            project_folders: Vec::new(),
         })
     }
 
@@ -2159,6 +2190,7 @@ impl Session {
         };
         let opts = sandbox::Options {
             hide_secret_files: self.hide_secret_files,
+            extra_roots: self.project_folders.clone(),
         };
         let command = match sandbox::wrap_with(bridge, &self.cwd, profile, opts) {
             Ok(c) => c,
@@ -2273,6 +2305,12 @@ impl Session {
             prompt_text.push_str(secrets::AGENT_GUIDANCE);
         }
         prompt_text.push_str(&secrets::project_env_guidance(&project_env.names));
+        // Without the sandbox nothing stops writes there anyway, so "edit" is
+        // true whenever the mode lets the agent write at all.
+        prompt_text.push_str(&project_folders_guidance(
+            &self.project_folders,
+            mode != "read-only",
+        ));
         let available: Vec<_> = attachments::list(self.store.conn(), self.sess)?
             .into_iter()
             .filter(|a| a.status == "sent")
@@ -2696,6 +2734,24 @@ impl Session {
         self.hide_secret_files = on;
     }
 
+    /// Every folder of the session's project. The working directory itself,
+    /// duplicates and folders that do not exist are dropped.
+    pub fn set_project_folders(&mut self, folders: &[PathBuf]) {
+        let own = self.cwd.canonicalize().unwrap_or_else(|_| self.cwd.clone());
+        let mut keep: Vec<PathBuf> = Vec::new();
+        for f in folders {
+            let Ok(c) = f.canonicalize() else { continue };
+            if c != own && c.is_dir() && !keep.contains(&c) {
+                keep.push(c);
+            }
+        }
+        self.project_folders = keep;
+    }
+
+    pub fn project_folders(&self) -> &[PathBuf] {
+        &self.project_folders
+    }
+
     /// Who answers "may the agent click here?" during an interactive turn.
     pub fn set_computer_asker(&self, asker: Option<computer::Asker>) {
         computer::set_asker(self.store.conn(), self.sess, asker);
@@ -3070,7 +3126,11 @@ pub struct SessionSummary {
 /// Rename a session in a store, without opening it.
 pub fn rename_session(db: &Path, id: i64, title: &str) -> Result<()> {
     let store = Store::open(db).context("open store")?;
-    Ok(ledger::rename_session(store.conn(), id, &mask_secrets(title))?)
+    Ok(ledger::rename_session(
+        store.conn(),
+        id,
+        &mask_secrets(title),
+    )?)
 }
 
 /// Delete a session from a store (see [`ledger::delete_session`]).

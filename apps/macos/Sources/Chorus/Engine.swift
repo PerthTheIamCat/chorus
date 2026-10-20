@@ -2265,6 +2265,20 @@ final class Engine: ObservableObject {
 
     /// Share facts/approve queue with every folder in the project. Queued
     /// right after open, so it lands before the first turn can.
+    /// The project's folders, so agents in this session see the others too.
+    func setProjectFolders(_ folders: [String]) {
+        guard let h = handle,
+              let data = try? JSONEncoder().encode(folders),
+              let json = String(data: data, encoding: .utf8) else { return }
+        queue.async { [weak self] in
+            let res = json.withCString { Self.string(from: chorus_set_project_folders(h.raw, $0)) }
+            let r = Self.decode(SimpleResult.self, res)
+            DispatchQueue.main.async {
+                if r?.ok != true { self?.lastError = "ตั้งโฟลเดอร์ของโปรเจกต์ไม่ได้: \(r?.error ?? "unknown")" }
+            }
+        }
+    }
+
     func setMemoryDB(_ path: String, projectName: String) {
         guard let h = handle else { return }
         queue.async { [weak self] in

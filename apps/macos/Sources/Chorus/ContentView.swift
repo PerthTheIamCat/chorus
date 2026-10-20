@@ -1096,6 +1096,7 @@ struct ContentView: View {
             engine.loadSessions(db: dbPath)
             if id >= 0, let p = projects.project(containing: workspace) {
                 engine.setMemoryDB(ProjectStore.memoryPath(p), projectName: p.name)
+                engine.setProjectFolders(p.folders)
             }
             if id >= 0 {
                 engine.updateSessionCost(db: dbPath, id: id)
@@ -1155,6 +1156,10 @@ struct ContentView: View {
                               projects.upsert(saved)
                               expanded.insert(saved.id.uuidString)
                               loadSessions(of: saved)
+                              // The open session sees a folder added or removed from its next turn.
+                              if engine.sessionID >= 0, saved.folders.contains(workspace) {
+                                  engine.setProjectFolders(saved.folders)
+                              }
                           },
                           onDelete: editingIsNew ? nil : { projects.remove(p) })
         }
