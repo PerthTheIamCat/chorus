@@ -421,7 +421,7 @@ eval log ซึ่งรู้แค่สำนวนที่บังเอ�
 ไม่ได้หรือต่อ API ตัวเองไม่ได้ไม่ใช่ agent และรูที่วัดเจอจริงคือการเขียน
 
 ที่ต้องอนุญาตกลับ ไม่งั้น agent พังแบบดูเหมือนบั๊กของเรา:
-`~/.codex` `~/.claude` (auth + session state) · `~/.npm` `~/.cache` `~/.config`
+`~/.codex` `~/.claude` `~/.gemini` (auth + session state — Antigravity ไม่มี `~/.gemini` เขียนได้จะขึ้น "You are not logged into Antigravity" ทั้งที่ login แล้ว · วัดจริง 20 ต.ค. 2026) · `~/.npm` `~/.cache` `~/.config`
 `Library/Caches` · temp ทั้งหมด · `/dev`
 
 ⚠️ **path ต้อง canonicalize** — macOS ให้ `/tmp` กับ `/var` เป็น symlink ไป `/private`

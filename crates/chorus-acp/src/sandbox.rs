@@ -157,6 +157,10 @@ fn checked_policy(cwd: &Path, profile: Profile) -> Result<String, String> {
         for rel in [
             ".codex",
             ".claude",
+            // Antigravity (`agy`): logs, crash reports, its SQLite stores and
+            // token refresh live under ~/.gemini/antigravity-cli. Read-only,
+            // it starts but reports "You are not logged into Antigravity".
+            ".gemini",
             ".config",
             ".cache",
             ".npm",
