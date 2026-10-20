@@ -31,6 +31,14 @@ SPARKLE_PUBLIC_KEY="E5axgieMsKgEtIIFf18pp0kcfcR0U3MLahF4QqB0ejc="
 # linked (14.0)": a binary that claims 14.0 support but may not load there.
 # Match LSMinimumSystemVersion below.
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+# blake3's build script does not rerun when the target changes, so an object
+# compiled before this line existed keeps the old target forever (seen on CI
+# and locally). Rebuild it once whenever the target differs from last time.
+STAMP="../../target/.chorus-deployment-target"
+if [ "$(cat "$STAMP" 2>/dev/null)" != "$MACOSX_DEPLOYMENT_TARGET" ]; then
+    (cd ../.. && cargo clean -q -p blake3)
+    mkdir -p ../../target && echo "$MACOSX_DEPLOYMENT_TARGET" > "$STAMP"
+fi
 
 echo "── cargo build ($MODE) ──"
 if [ "$MODE" = "release" ]; then

@@ -3011,7 +3011,7 @@ final class Engine: ObservableObject {
     func verifyWorkspace(ws: String, completion: ((VerificationData?, String?) -> Void)? = nil) {
         guard !ws.isEmpty else { return }
         isVerifyingWorkspace = true
-        ioQueue.async {
+        ioQueue.async { [weak self] in
             let json = ws.withCString { cWs in
                 Self.string(from: chorus_verify_workspace_json(cWs))
             }
