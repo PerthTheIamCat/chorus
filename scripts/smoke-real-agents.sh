@@ -97,9 +97,9 @@ if [ $# -ge 2 ]; then
     } > "$out" 2>&1
     cat "$out" >> "$LOG"
     if grep -q "smoke-$A.txt" "$out"; then
-        record "$A→$B" "shared memory" PASS
+        record "${A}→${B}" "shared memory" PASS
     else
-        record "$A→$B" "shared memory" "FAIL ($B did not name smoke-$A.txt)"
+        record "${A}→${B}" "shared memory" "FAIL (${B} did not name smoke-${A}.txt)"
     fi
 
     echo "── 3. relay: broken $A → $B ──"
@@ -112,9 +112,9 @@ if [ $# -ge 2 ]; then
     } > "$out" 2>&1
     cat "$out" >> "$LOG"
     if grep -q "relay: $A → $B" "$out" && grep -qi "pong" "$out"; then
-        record "$A→$B" "failover" PASS
+        record "${A}→${B}" "failover" PASS
     else
-        record "$A→$B" "failover" "FAIL (no relay to $B — see log)"
+        record "${A}→${B}" "failover" "FAIL (no relay to ${B} — see log)"
     fi
 else
     record "-" "shared memory + failover" "SKIP (needs two agents that passed step 1)"
