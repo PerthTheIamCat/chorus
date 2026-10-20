@@ -521,8 +521,8 @@ struct ProviderBrowserSettings: View {
             SettingsRow(title: "Codex",
                         detail: "extension Chrome ของ Codex ใช้ได้เฉพาะในแอป Codex — CLI ที่ Chorus ใช้ยังไม่รองรับ") { EmptyView() }
             RowDivider()
-            SettingsRow(title: "Gemini",
-                        detail: "browser agent ของ Gemini CLI เปิดเองใน ~/.gemini/settings.json — ยังไม่ได้ยืนยันว่าใช้ผ่าน Chorus ได้") { EmptyView() }
+            SettingsRow(title: "Antigravity",
+                        detail: "มี browser subagent ในตัว (Chrome profile แยกของ Antigravity) — ยังไม่ได้ทดสอบผ่าน Chorus") { EmptyView() }
         }
     }
 }

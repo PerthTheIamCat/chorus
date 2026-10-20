@@ -747,6 +747,9 @@ pub struct Session {
 /// (code.claude.com/docs/en/env-vars, checked 20 Oct 2026; read from the
 /// process environment — Claude Code ignores it in project settings).
 /// Codex's Chrome extension works only in the Codex app, not its CLI.
+/// Antigravity (`agy`) has a built-in browser subagent that needs no switch
+/// from us; whether it runs under `agy --input-format stream-json` and the
+/// Seatbelt profile is not verified yet.
 /// Off adds nothing, so the user's own `/chrome` default still applies.
 pub fn provider_browser_env(agent_name: &str, claude_chrome: bool) -> Vec<(String, String)> {
     if claude_chrome && agent_name.to_lowercase().contains("claude") {

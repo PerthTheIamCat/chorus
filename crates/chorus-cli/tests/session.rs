@@ -1235,5 +1235,5 @@ fn claude_in_chrome_is_switched_on_for_claude_only_and_only_when_asked() {
     assert_eq!(provider_browser_env("claude-opus@work", true), on);
     assert!(provider_browser_env("claude", false).is_empty(), "off leaves the user's /chrome default alone");
     assert!(provider_browser_env("codex", true).is_empty(), "Codex's extension only works in its own app");
-    assert!(provider_browser_env("gemini", true).is_empty());
+    assert!(provider_browser_env("antigravity", true).is_empty(), "agy's browser subagent needs no switch");
 }
