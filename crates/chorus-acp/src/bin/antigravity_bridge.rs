@@ -16,6 +16,9 @@ fn main() -> anyhow::Result<()> {
     let mut current_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut current_model = String::from("gemini-3.8-flash[high]");
     let mut session_counter = 0;
+    // Fail closed: until Chorus says otherwise, agy keeps its headless
+    // default, which auto-denies every tool that needs approval.
+    let mut current_mode = String::from(READ_ONLY);
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -43,7 +46,8 @@ fn main() -> anyhow::Result<()> {
                     "agentCapabilities": {
                         "modes": {
                             "availableModes": [
-                                { "id": "default", "name": "Default" }
+                                { "id": READ_ONLY, "name": "Read only" },
+                                { "id": AGENT, "name": "Agent" }
                             ]
                         },
                         "prompt": {
@@ -75,6 +79,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 let res = json!({
                     "sessionId": session_id,
+                    "modes": { "currentModeId": current_mode },
                     "models": {
                         "availableModels": models,
                         "currentModelId": current_model
@@ -89,12 +94,24 @@ fn main() -> anyhow::Result<()> {
                 send_response(&mut out, id, Ok(json!({ "models": { "currentModelId": current_model } })))?;
             }
             "session/set_config_option" => {
-                if let Some(cfg) = params.get("configId").and_then(Value::as_str) {
-                    if cfg == "model" {
-                        if let Some(val) = params.get("value").and_then(Value::as_str) {
-                            current_model = canonical_model_id(val);
-                        }
-                    }
+                let cfg = params.get("configId").and_then(Value::as_str);
+                let val = params.get("value").and_then(Value::as_str);
+                match (cfg, val) {
+                    (Some("model"), Some(v)) => current_model = canonical_model_id(v),
+                    (Some("mode"), Some(v)) => current_mode = normalize_mode(v).to_string(),
+                    _ => {}
+                }
+                // Report the mode back: Chorus treats a reply without it as
+                // "not confirmed" (codex.rs `pin_mode`).
+                send_response(
+                    &mut out,
+                    id,
+                    Ok(json!({ "configOptions": [{ "id": "mode", "currentValue": current_mode }] })),
+                )?;
+            }
+            "session/set_mode" => {
+                if let Some(v) = params.get("modeId").and_then(Value::as_str) {
+                    current_mode = normalize_mode(v).to_string();
                 }
                 send_response(&mut out, id, Ok(json!({})))?;
             }
@@ -110,7 +127,7 @@ fn main() -> anyhow::Result<()> {
                 // The prompt (context, memory, attachments) goes over stdin,
                 // never argv: argv is readable by every local user via `ps`
                 // and long prompts hit ARG_MAX.
-                cmd.args(agy_args(&current_model))
+                cmd.args(agy_args(&current_model, &current_mode))
                     .current_dir(&current_cwd)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
@@ -200,12 +217,35 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+const READ_ONLY: &str = "read-only";
+const AGENT: &str = "agent";
+
+/// Chorus asks for Codex's mode names (`read-only`, `agent`, and
+/// `agent-full-access` when its own Seatbelt is the wall). Anything that is
+/// not a known writing mode stays read-only.
+fn normalize_mode(mode: &str) -> &'static str {
+    match mode {
+        "agent" | "agent-full-access" => AGENT,
+        _ => READ_ONLY,
+    }
+}
+
 /// `agy` arguments for one print-mode turn. Deliberately has no prompt in it.
 /// Model and effort go separately (`--model gemini-4-argon --effort high`):
 /// measured 18 Oct 2026, agy reports the bare id back in `init.model` and
 /// the thinking-token count follows `--effort`.
-fn agy_args(current_model: &str) -> Vec<String> {
+///
+/// Headless agy cannot ask for permission, so without a flag it auto-denies
+/// every write ("a tool required the \"write_file\" permission that headless
+/// mode cannot prompt for, so it was auto-denied" — smoke run, 20 Oct 2026).
+/// In agent mode the flag that message suggests is passed; the wall is then
+/// Chorus' Seatbelt profile, as it is for Codex. Read-only passes nothing and
+/// keeps agy's own denial on top of the read-only profile.
+fn agy_args(current_model: &str, mode: &str) -> Vec<String> {
     let mut args: Vec<String> = vec!["--input-format".into(), "stream-json".into()];
+    if normalize_mode(mode) == AGENT {
+        args.push("--dangerously-skip-permissions".into());
+    }
     let (base, effort) = split_model(current_model);
     if !base.is_empty() {
         args.extend(["--model".into(), base.into()]);
@@ -496,7 +536,7 @@ mod tests {
     fn prompt_never_appears_in_argv() {
         let secret = "ข้อมูลลับ sk-test-123 context";
         for model in ["gemini-3.8-flash[high]", "gemini-pro-high", "x"] {
-            let args = agy_args(model);
+            let args = agy_args(model, AGENT);
             assert!(!args.iter().any(|a| a.contains("sk-test-123")), "{args:?}");
             assert!(!args.iter().any(|a| a == "-p" || a == "--print"), "{args:?}");
             assert!(args.windows(2).any(|w| w == ["--input-format", "stream-json"]));
@@ -509,8 +549,22 @@ mod tests {
     }
 
     #[test]
+    fn only_agent_mode_skips_agys_own_permission_prompts() {
+        let skip = |mode: &str| {
+            agy_args("gemini-3.8-flash[high]", mode)
+                .iter()
+                .any(|a| a == "--dangerously-skip-permissions")
+        };
+        assert!(skip("agent"));
+        assert!(skip("agent-full-access"));
+        assert!(!skip("read-only"));
+        assert!(!skip("default"), "unknown modes stay read-only");
+        assert!(!skip(""));
+    }
+
+    #[test]
     fn model_and_effort_are_split_as_before() {
-        let a = agy_args("gemini-3.8-flash[high]");
+        let a = agy_args("gemini-3.8-flash[high]", READ_ONLY);
         assert!(a.windows(4).any(|w| w == ["--model", "gemini-3.8-flash", "--effort", "high"]));
     }
 
@@ -518,11 +572,11 @@ mod tests {
     /// which the picker could not split, and passed them through whole.
     #[test]
     fn agy_list_ids_become_model_and_effort() {
-        let a = agy_args("gemini-4-argon-medium");
+        let a = agy_args("gemini-4-argon-medium", READ_ONLY);
         assert!(a.windows(4).any(|w| w == ["--model", "gemini-4-argon", "--effort", "medium"]), "{a:?}");
-        let a = agy_args("claude-opus-5-5[xhigh]");
+        let a = agy_args("claude-opus-5-5[xhigh]", READ_ONLY);
         assert!(a.windows(4).any(|w| w == ["--model", "claude-opus-5-5", "--effort", "xhigh"]), "{a:?}");
-        let a = agy_args("gemini-4-argon");
+        let a = agy_args("gemini-4-argon", READ_ONLY);
         assert!(a.windows(2).any(|w| w == ["--model", "gemini-4-argon"]));
         assert!(!a.iter().any(|x| x == "--effort"));
         assert_eq!(canonical_model_id("gpt-oss-120b-medium"), "gpt-oss-120b[medium]");
