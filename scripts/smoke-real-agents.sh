@@ -21,7 +21,10 @@ AGENTS="${*:-claude codex antigravity}"
 TURN_SECS="${CHORUS_SMOKE_TIMEOUT:-300}"
 
 echo "── build ──"
-cargo build -q -p chorus-cli --bin chorus -p chorus-acp || exit 1
+# Two builds: `--bin chorus` filters every -p on the same line, so a single
+# command never rebuilt antigravity-acp and the run used yesterday's bridge.
+cargo build -q -p chorus-cli --bin chorus || exit 1
+cargo build -q -p chorus-acp --bins || exit 1
 CH="$PWD/target/debug/chorus"
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/chorus-smoke.XXXXXX")"
