@@ -276,3 +276,20 @@ fn a_stored_brief_is_one_line_in_context() {
     assert_eq!(context_line("plain text handoff note"), None);
     assert_eq!(context_line(r#"{"goal":"no handoff key"}"#), None);
 }
+
+/// Kept verbatim (CLAUDE.md 7.17): a paraphrase would pass while the real
+/// message still slipped through.
+#[test]
+fn a_refused_model_is_a_reason_to_move_on_but_a_long_answer_is_not() {
+    use chorus_core::handoff::is_refused_configuration;
+    assert!(is_refused_configuration(
+        "The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account."
+    ));
+    assert!(!is_refused_configuration("PONG"));
+    assert!(!is_refused_configuration(""));
+    let long = format!(
+        "{} Note: the old model is not supported anymore, so I switched the config.",
+        "Updated the routing table and the tests. ".repeat(20)
+    );
+    assert!(!is_refused_configuration(&long));
+}

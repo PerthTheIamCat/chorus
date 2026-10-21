@@ -1481,7 +1481,7 @@ impl Session {
             policy,
             attachment_ids,
         ) {
-            Ok(turn) if !is_transient_stop(&turn.stop_reason) => {
+            Ok(turn) if !is_transient_stop(&turn.stop_reason) && !refused(&turn.message) => {
                 crate::limits::clear(&first.name);
                 Ok(RelayReport {
                     answered_by: first.name.clone(),
@@ -1490,8 +1490,13 @@ impl Session {
                 })
             }
             Ok(turn) => {
-                // Answered but stopped short — relay from here.
-                let reason = HandoffReason::ContextExhausted;
+                // Answered but stopped short, or "answered" with its provider
+                // refusing the model — relay from here.
+                let reason = if refused(&turn.message) {
+                    HandoffReason::Failover
+                } else {
+                    HandoffReason::ContextExhausted
+                };
                 match self.relay_rest(
                     &chain[1..],
                     &saved_bridge,
@@ -1611,7 +1616,7 @@ impl Session {
                 policy,
             );
             match h {
-                Ok(hr) if !is_transient_stop(&hr.stop_reason) => {
+                Ok(hr) if !is_transient_stop(&hr.stop_reason) && !refused(&hr.echo_back) => {
                     crate::limits::clear(&spec.name);
                     let turn = TurnReport {
                         user_seq: hr.handoff_seq,
@@ -1627,8 +1632,12 @@ impl Session {
                         handoffs: std::mem::take(handoffs),
                     }));
                 }
-                Ok(_) => {
-                    reason = HandoffReason::ContextExhausted;
+                Ok(hr) => {
+                    reason = if refused(&hr.echo_back) {
+                        HandoffReason::Failover
+                    } else {
+                        HandoffReason::ContextExhausted
+                    };
                     from = spec.name.clone();
                 }
                 Err(e) => {
@@ -2944,6 +2953,12 @@ impl Session {
 
 /// Stop reasons that mean the agent hit its own limit mid-answer — relay
 /// onward. A `cancelled` (a denied permission) is a real outcome, not this.
+/// A turn whose whole answer is the provider refusing its model (see
+/// [`chorus_core::handoff::is_refused_configuration`]).
+fn refused(message: &str) -> bool {
+    chorus_core::handoff::is_refused_configuration(message)
+}
+
 fn is_transient_stop(stop: &str) -> bool {
     matches!(stop, "max_tokens" | "context_exhausted" | "error")
 }

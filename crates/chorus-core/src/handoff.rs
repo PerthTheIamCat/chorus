@@ -247,6 +247,30 @@ pub struct Brief {
     pub handoff: HandoffMeta,
 }
 
+/// The agent "answered", but the answer is its provider refusing the turn's
+/// configuration — no work was done and the next agent in the chain could do
+/// it. Codex sends this as an ordinary message with `end_turn`, not an
+/// error, so [`HandoffReason::from_failure`] never sees it.
+///
+/// Verbatim from a real run (smoke, 20 Oct 2026, `~/.codex/config.toml` with
+/// a model the account lacks): "The 'gpt-6-astra' model is not supported
+/// when using Codex with a ChatGPT account."
+///
+/// Only short answers count: a real answer that discusses unsupported models
+/// is long, and failing over on it would throw away work.
+pub fn is_refused_configuration(answer: &str) -> bool {
+    const KEYS: &[&str] = &[
+        "model is not supported",
+        "model is not available",
+        "model not supported",
+        "model_not_found",
+        "does not have access to model",
+        "do not have access to the model",
+    ];
+    let a = answer.trim().to_lowercase();
+    !a.is_empty() && a.chars().count() <= 400 && KEYS.iter().any(|k| a.contains(k))
+}
+
 /// The hot form of a stored handoff event: one line for the conversation
 /// tier, or `None` when `stored` is not a brief.
 ///

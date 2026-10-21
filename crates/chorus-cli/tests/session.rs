@@ -1328,3 +1328,38 @@ fn agents_are_told_about_the_other_folders_of_their_project() {
     assert!(chorus_cli::session::project_folders_guidance(&[], true).is_empty());
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// Codex answers a model the account cannot use with an ordinary message
+/// and `end_turn` (smoke run, 20 Oct 2026). That is no answer: the relay
+/// must move on to the next agent instead of showing it as the result.
+#[test]
+fn a_model_refusal_dressed_as_an_answer_relays_to_the_next_agent() {
+    std::env::set_var("CHORUS_SECRETS_BACKEND", "memory");
+    let tmp = std::env::temp_dir().join(format!("chorus-refusal-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let frames = tmp.join("refusal.jsonl");
+    std::fs::write(
+        &frames,
+        r#"{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account."}}}"#,
+    )
+    .unwrap();
+    let refusing = vec![
+        probe_bin().to_string_lossy().into_owned(),
+        "--serve-mock".into(),
+        "--replay".into(),
+        frames.to_string_lossy().into_owned(),
+    ];
+    let db = tmp.join("store.db");
+    let _ = std::fs::remove_file(&db);
+    let mut s = Session::create(&db, &tmp, "refusal").unwrap();
+    let chain = [
+        AgentSpec { name: "codex".into(), provider: "openai".into(), bridge: refusing },
+        AgentSpec { name: "claude".into(), provider: "anthropic".into(), bridge: mock_bridge() },
+    ];
+    let r = s
+        .run_relay(&chain, "look at the readme", Policy::AllowAll)
+        .expect("relay runs");
+    assert_eq!(r.answered_by, "claude", "the refusal was taken as the answer");
+    assert_eq!(r.handoffs.len(), 1);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
