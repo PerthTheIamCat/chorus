@@ -816,6 +816,7 @@ mod tests {
             std::fs::write(ws.join("main.rs"), "fn main() {}\n").unwrap();
             let hide = Options {
                 hide_secret_files: true,
+                ..Options::default()
             };
             let run = |script: &str| {
                 let cmd: Vec<String> = ["/bin/sh", "-c", script].map(String::from).to_vec();
