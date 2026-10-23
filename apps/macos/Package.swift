@@ -12,6 +12,8 @@ let package = Package(
     platforms: [.macOS(.v14)],
     dependencies: [
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.4"),
+        // Terminal emulator view only — the PTY and shell live in Rust (chorus_term_*).
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm", from: "1.9.0"),
     ],
     targets: [
         .systemLibrary(name: "CChorus", path: "Sources/CChorus"),
@@ -20,6 +22,7 @@ let package = Package(
             dependencies: [
                 "CChorus",
                 .product(name: "Sparkle", package: "Sparkle"),
+                .product(name: "SwiftTerm", package: "SwiftTerm"),
             ],
             resources: [.process("Resources")],
             linkerSettings: [

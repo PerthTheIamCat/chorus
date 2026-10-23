@@ -14,6 +14,7 @@
 pub mod agy;
 pub mod codex;
 pub mod env;
+pub mod pty;
 pub mod registry;
 pub mod sandbox;
 

@@ -508,4 +508,12 @@ char *chorus_cancel_orchestration(const char *db_path, int64_t parent_sess);
 char *chorus_get_checklist_json(const char *db_path, int64_t session_id);
 char *chorus_update_checklist_json(const char *db_path, int64_t session_id, const char *items_json);
 
+/* Integrated terminal (PTY). Callbacks run on a reader thread. */
+typedef void (*chorus_term_data_cb)(void *ctx, uint64_t id, const uint8_t *data, size_t len);
+typedef void (*chorus_term_exit_cb)(void *ctx, uint64_t id, int code);
+char *chorus_term_open(const char *cwd, uint16_t cols, uint16_t rows, bool sandbox, void *ctx, chorus_term_data_cb on_data, chorus_term_exit_cb on_exit);
+bool chorus_term_write(uint64_t id, const uint8_t *data, size_t len);
+void chorus_term_resize(uint64_t id, uint16_t cols, uint16_t rows);
+void chorus_term_close(uint64_t id);
+
 #endif /* CHORUS_H */
