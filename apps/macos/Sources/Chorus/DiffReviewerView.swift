@@ -29,6 +29,7 @@ struct DiffReviewerView: View {
     @State private var verificationResult: Engine.VerificationResult? = nil
     @State private var isVerifying: Bool = false
     @State private var showVerificationSheet: Bool = false
+    @State private var showShipSheet: Bool = false
 
     enum ViewMode: String, CaseIterable {
         case unified = "Unified"
@@ -217,6 +218,19 @@ struct DiffReviewerView: View {
                     .help("ตรวจความถูกต้องของ workspace ด้วย Fast Compiler/Linter Loop")
                     .popover(isPresented: $showVerificationSheet) {
                         VerificationFindingsPopover(result: verificationResult)
+                    }
+
+                    Button {
+                        showShipSheet = true
+                    } label: {
+                        Label("ส่งขึ้น Git", systemImage: "arrow.up.circle").font(.system(size: 9.5))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .disabled(workspace.isEmpty)
+                    .help("commit → push → เปิด PR ในที่เดียว")
+                    .sheet(isPresented: $showShipSheet) {
+                        GitShipSheet(workspace: workspace) { showShipSheet = false }
                     }
                 }
 

@@ -516,4 +516,10 @@ bool chorus_term_write(uint64_t id, const uint8_t *data, size_t len);
 void chorus_term_resize(uint64_t id, uint16_t cols, uint16_t rows);
 void chorus_term_close(uint64_t id);
 
+/* Commit -> push -> PR. {"ok":true,"git"|"commit"|"branch"|"url":...} */
+char *chorus_git_status_json(const char *ws);
+char *chorus_git_commit_json(const char *ws, const char *message, const char *paths_json);
+char *chorus_git_push_json(const char *ws);
+char *chorus_git_pr_json(const char *ws, const char *title, const char *body, const char *base);
+
 #endif /* CHORUS_H */

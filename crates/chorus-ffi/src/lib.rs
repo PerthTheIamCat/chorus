@@ -3785,6 +3785,193 @@ pub unsafe extern "C" fn chorus_highlight(path: *const c_char, text: *const c_ch
     }
 }
 
+
+// ── integrated terminal ────────────────────────────────────────────────────
+// Logic lives in `chorus_acp::pty`; this is only the C seam. Output arrives as
+// raw bytes through callbacks on a reader thread — the shell must hop to its
+// own queue before touching UI.
+
+struct TermCtx(*mut std::ffi::c_void);
+// SAFETY: the pointer is opaque to Rust and only handed back to the callbacks.
+unsafe impl Send for TermCtx {}
+unsafe impl Sync for TermCtx {}
+
+type TermDataCb = extern "C" fn(*mut std::ffi::c_void, u64, *const u8, usize);
+type TermExitCb = extern "C" fn(*mut std::ffi::c_void, u64, c_int);
+
+fn terminals(
+) -> &'static std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<chorus_acp::pty::Pty>>>
+{
+    static T: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<chorus_acp::pty::Pty>>>,
+    > = std::sync::OnceLock::new();
+    T.get_or_init(Default::default)
+}
+
+/// Open a login shell on a PTY in `cwd`. `sandbox` confines writes to the
+/// workspace like an agent turn. Returns `{"ok":true,"id":N,"sandbox_note":?}`.
+///
+/// # Safety
+/// `cwd` must be a NUL-terminated string. The callbacks may run on another
+/// thread until the exit callback has fired.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_term_open(
+    cwd: *const c_char,
+    cols: u16,
+    rows: u16,
+    sandbox: bool,
+    ctx: *mut std::ffi::c_void,
+    on_data: TermDataCb,
+    on_exit: TermExitCb,
+) -> *mut c_char {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let Some(cwd) = borrow(cwd) else {
+        return err("cwd must be valid UTF-8");
+    };
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (c1, c2) = (TermCtx(ctx), TermCtx(ctx));
+    let opts = chorus_acp::pty::PtyOptions {
+        cwd: PathBuf::from(cwd),
+        cols,
+        rows,
+        sandbox: sandbox.then_some(chorus_acp::sandbox::Profile::Workspace),
+        ..Default::default()
+    };
+    let spawned = catch_unwind(AssertUnwindSafe(|| {
+        chorus_acp::pty::Pty::spawn(
+            opts,
+            move |b| {
+                let c = &c1;
+                on_data(c.0, id, b.as_ptr(), b.len())
+            },
+            move |code| {
+                terminals().lock().unwrap().remove(&id);
+                let c = &c2;
+                on_exit(c.0, id, code)
+            },
+        )
+    }));
+    match spawned {
+        Ok(Ok(pty)) => {
+            let note = pty.sandbox_note.clone();
+            terminals().lock().unwrap().insert(id, pty);
+            out(serde_json::json!({"ok": true, "id": id, "sandbox_note": note}).to_string())
+        }
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in term open"),
+    }
+}
+
+/// # Safety
+/// `data` must point to `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_term_write(id: u64, data: *const u8, len: usize) -> bool {
+    let Some(bytes) = borrow_bytes(data, len) else {
+        return false;
+    };
+    let pty = terminals().lock().unwrap().get(&id).cloned();
+    pty.is_some_and(|p| p.write(bytes).is_ok())
+}
+
+#[no_mangle]
+pub extern "C" fn chorus_term_resize(id: u64, cols: u16, rows: u16) {
+    if let Some(p) = terminals().lock().unwrap().get(&id) {
+        p.resize(cols, rows);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn chorus_term_close(id: u64) {
+    let pty = terminals().lock().unwrap().remove(&id);
+    if let Some(p) = pty {
+        p.close();
+    }
+}
+
+// ── commit → push → PR (logic in chorus_core::gitflow) ─────────────────────
+
+fn git_json<T: Serialize>(r: Result<T, String>, key: &str) -> *mut c_char {
+    match r {
+        Ok(v) => out(serde_json::json!({"ok": true, key: v}).to_string()),
+        Err(e) => err(e),
+    }
+}
+
+/// # Safety
+/// `ws` must be a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_git_status_json(ws: *const c_char) -> *mut c_char {
+    let Some(ws) = borrow(ws) else { return err("ws must be valid UTF-8") };
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        chorus_core::gitflow::status(Path::new(ws)).map(|s| {
+            let suggestion = chorus_core::gitflow::suggest_message(&s.files);
+            serde_json::json!({"status": s, "suggestion": suggestion})
+        })
+    }));
+    match r {
+        Ok(v) => git_json(v, "git"),
+        Err(_) => err("panic in git status"),
+    }
+}
+
+/// `paths_json` is a JSON array of repo-relative paths to commit.
+///
+/// # Safety
+/// All pointers must be NUL-terminated strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_git_commit_json(
+    ws: *const c_char,
+    message: *const c_char,
+    paths_json: *const c_char,
+) -> *mut c_char {
+    let (Some(ws), Some(msg), Some(paths)) = (borrow(ws), borrow(message), borrow(paths_json)) else {
+        return err("arguments must be valid UTF-8");
+    };
+    let Ok(paths) = serde_json::from_str::<Vec<String>>(paths) else {
+        return err("paths must be a JSON array of strings");
+    };
+    let r = catch_unwind(AssertUnwindSafe(|| chorus_core::gitflow::commit(Path::new(ws), msg, &paths)));
+    match r {
+        Ok(v) => git_json(v, "commit"),
+        Err(_) => err("panic in git commit"),
+    }
+}
+
+/// # Safety
+/// `ws` must be a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_git_push_json(ws: *const c_char) -> *mut c_char {
+    let Some(ws) = borrow(ws) else { return err("ws must be valid UTF-8") };
+    let r = catch_unwind(AssertUnwindSafe(|| chorus_core::gitflow::push(Path::new(ws))));
+    match r {
+        Ok(v) => git_json(v, "branch"),
+        Err(_) => err("panic in git push"),
+    }
+}
+
+/// `base` may be null (gh picks the default branch).
+///
+/// # Safety
+/// Non-null pointers must be NUL-terminated strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_git_pr_json(
+    ws: *const c_char,
+    title: *const c_char,
+    body: *const c_char,
+    base: *const c_char,
+) -> *mut c_char {
+    let (Some(ws), Some(title), Some(body)) = (borrow(ws), borrow(title), borrow(body)) else {
+        return err("arguments must be valid UTF-8");
+    };
+    let base = borrow(base).filter(|b| !b.is_empty());
+    let r = catch_unwind(AssertUnwindSafe(|| chorus_core::gitflow::create_pr(Path::new(ws), title, body, base)));
+    match r {
+        Ok(v) => git_json(v, "url"),
+        Err(_) => err("panic in git pr"),
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4308,107 +4495,5 @@ mod tests {
             sub_after.status,
             chorus_core::agent_control::SubagentStatus::Cancelled
         );
-    }
-}
-
-// ── integrated terminal ────────────────────────────────────────────────────
-// Logic lives in `chorus_acp::pty`; this is only the C seam. Output arrives as
-// raw bytes through callbacks on a reader thread — the shell must hop to its
-// own queue before touching UI.
-
-struct TermCtx(*mut std::ffi::c_void);
-// SAFETY: the pointer is opaque to Rust and only handed back to the callbacks.
-unsafe impl Send for TermCtx {}
-unsafe impl Sync for TermCtx {}
-
-type TermDataCb = extern "C" fn(*mut std::ffi::c_void, u64, *const u8, usize);
-type TermExitCb = extern "C" fn(*mut std::ffi::c_void, u64, c_int);
-
-fn terminals(
-) -> &'static std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<chorus_acp::pty::Pty>>>
-{
-    static T: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<chorus_acp::pty::Pty>>>,
-    > = std::sync::OnceLock::new();
-    T.get_or_init(Default::default)
-}
-
-/// Open a login shell on a PTY in `cwd`. `sandbox` confines writes to the
-/// workspace like an agent turn. Returns `{"ok":true,"id":N,"sandbox_note":?}`.
-///
-/// # Safety
-/// `cwd` must be a NUL-terminated string. The callbacks may run on another
-/// thread until the exit callback has fired.
-#[no_mangle]
-pub unsafe extern "C" fn chorus_term_open(
-    cwd: *const c_char,
-    cols: u16,
-    rows: u16,
-    sandbox: bool,
-    ctx: *mut std::ffi::c_void,
-    on_data: TermDataCb,
-    on_exit: TermExitCb,
-) -> *mut c_char {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let Some(cwd) = borrow(cwd) else {
-        return err("cwd must be valid UTF-8");
-    };
-    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let (c1, c2) = (TermCtx(ctx), TermCtx(ctx));
-    let opts = chorus_acp::pty::PtyOptions {
-        cwd: PathBuf::from(cwd),
-        cols,
-        rows,
-        sandbox: sandbox.then_some(chorus_acp::sandbox::Profile::Workspace),
-        ..Default::default()
-    };
-    let spawned = catch_unwind(AssertUnwindSafe(|| {
-        chorus_acp::pty::Pty::spawn(
-            opts,
-            move |b| {
-                let c = &c1;
-                on_data(c.0, id, b.as_ptr(), b.len())
-            },
-            move |code| {
-                terminals().lock().unwrap().remove(&id);
-                let c = &c2;
-                on_exit(c.0, id, code)
-            },
-        )
-    }));
-    match spawned {
-        Ok(Ok(pty)) => {
-            let note = pty.sandbox_note.clone();
-            terminals().lock().unwrap().insert(id, pty);
-            out(serde_json::json!({"ok": true, "id": id, "sandbox_note": note}).to_string())
-        }
-        Ok(Err(e)) => err(e),
-        Err(_) => err("panic in term open"),
-    }
-}
-
-/// # Safety
-/// `data` must point to `len` readable bytes.
-#[no_mangle]
-pub unsafe extern "C" fn chorus_term_write(id: u64, data: *const u8, len: usize) -> bool {
-    let Some(bytes) = borrow_bytes(data, len) else {
-        return false;
-    };
-    let pty = terminals().lock().unwrap().get(&id).cloned();
-    pty.is_some_and(|p| p.write(bytes).is_ok())
-}
-
-#[no_mangle]
-pub extern "C" fn chorus_term_resize(id: u64, cols: u16, rows: u16) {
-    if let Some(p) = terminals().lock().unwrap().get(&id) {
-        p.resize(cols, rows);
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn chorus_term_close(id: u64) {
-    let pty = terminals().lock().unwrap().remove(&id);
-    if let Some(p) = pty {
-        p.close();
     }
 }
