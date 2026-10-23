@@ -29,6 +29,9 @@ pub struct Status {
     pub has_remote: bool,
     pub gh_ready: bool,
     pub files: Vec<FileChange>,
+    /// Changed files left out because the session did not touch them
+    /// (see [`status_scoped`]).
+    pub hidden: usize,
 }
 
 fn git(ws: &Path, args: &[&str]) -> Result<String, String> {
@@ -61,6 +64,15 @@ pub fn is_secret_path(path: &str) -> bool {
 }
 
 pub fn status(ws: &Path) -> Result<Status, String> {
+    status_scoped(ws, None)
+}
+
+/// Like [`status`], but with `scope` only files the session actually changed
+/// are listed. Files that were already modified or untracked when the session
+/// opened (a `.gitignore`, another tool's project file) stay out of the sheet,
+/// so a one-file turn is not offered as "49 files". Out-of-scope files are
+/// counted in `hidden`, never silently dropped.
+pub fn status_scoped(ws: &Path, scope: Option<&[String]>) -> Result<Status, String> {
     git(ws, &["rev-parse", "--is-inside-work-tree"]).map_err(|_| "โฟลเดอร์นี้ไม่ใช่ git repo".to_string())?;
     let branch = git(ws, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
     let default_branch = git(ws, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
@@ -92,7 +104,13 @@ pub fn status(ws: &Path) -> Result<Status, String> {
             let path = l[3..].rsplit(" -> ").next().unwrap_or(&l[3..]).trim_matches('"').to_string();
             FileChange { blocked: is_secret_path(&path), code: l[..2].to_string(), path }
         })
-        .collect();
+        .collect::<Vec<FileChange>>();
+    let total = files.len();
+    let files: Vec<FileChange> = match scope {
+        Some(keep) => files.into_iter().filter(|f| in_scope(&f.path, keep)).collect(),
+        None => files,
+    };
+    let hidden = total - files.len();
     Ok(Status {
         on_default: default_branch.as_deref() == Some(branch.as_str()),
         branch,
@@ -102,12 +120,29 @@ pub fn status(ws: &Path) -> Result<Status, String> {
         has_remote,
         gh_ready,
         files,
+        hidden,
+    })
+}
+
+/// `path` is one of `keep`, or lives under a directory entry of it.
+fn in_scope(path: &str, keep: &[String]) -> bool {
+    keep.iter().any(|k| {
+        let k = k.trim_end_matches('/');
+        path == k || path.strip_prefix(k).is_some_and(|rest| rest.starts_with('/'))
     })
 }
 
 /// A Conventional Commits draft from the changed paths. Deliberately plain —
 /// the user edits it in the sheet; it only saves typing the type and scope.
 pub fn suggest_message(files: &[FileChange]) -> String {
+    suggest_message_with_goal(files, "")
+}
+
+/// Same, but the subject comes from what the user asked for (`goal`, the first
+/// line of the session's opening request) when there is one — "update 3 files"
+/// says nothing a diff does not already. Without a goal the subject names the
+/// files, up to three.
+pub fn suggest_message_with_goal(files: &[FileChange], goal: &str) -> String {
     let paths: Vec<&str> = files.iter().filter(|f| !f.blocked).map(|f| f.path.as_str()).collect();
     if paths.is_empty() {
         return String::new();
@@ -137,15 +172,36 @@ pub fn suggest_message(files: &[FileChange]) -> String {
         let scopes: std::collections::BTreeSet<_> = paths.iter().map(|p| first(p)).collect();
         if scopes.len() == 1 { scopes.into_iter().next().flatten() } else { None }
     };
-    let what = if paths.len() == 1 {
-        Path::new(paths[0]).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-    } else {
-        format!("{} files", paths.len())
-    };
+    let subject = goal_subject(goal).unwrap_or_else(|| {
+        let names: Vec<String> = paths
+            .iter()
+            .map(|p| Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+            .collect();
+        if names.len() <= 3 {
+            format!("update {}", names.join(", "))
+        } else {
+            format!("update {}, {} and {} more", names[0], names[1], names.len() - 2)
+        }
+    });
     match scope {
-        Some(s) => format!("{kind}({s}): update {what}"),
-        None => format!("{kind}: update {what}"),
+        Some(s) => format!("{kind}({s}): {subject}"),
+        None => format!("{kind}: {subject}"),
     }
+}
+
+/// A commit subject from the user's request: first line, no trailing
+/// punctuation, at most 60 characters, first letter lower-cased (Conventional
+/// Commits). `None` when the request is empty.
+fn goal_subject(goal: &str) -> Option<String> {
+    let line = goal.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let line = line.trim_end_matches(|c: char| ".!?:;,".contains(c) || c.is_whitespace());
+    let mut chars = line.chars();
+    let first = chars.next()?;
+    let mut out: String = first.to_lowercase().chain(chars).collect();
+    if out.chars().count() > 60 {
+        out = out.chars().take(59).collect::<String>().trim_end().to_string() + "…";
+    }
+    Some(out)
 }
 
 /// Branch name from a commit subject: `feat(term): add tabs` → `feat/term-add-tabs`.
@@ -302,12 +358,34 @@ mod tests {
     }
 
     #[test]
+    fn scope_hides_files_the_session_did_not_touch() {
+        let d = repo();
+        std::fs::write(d.path().join("old.yml"), "x").unwrap();
+        std::fs::write(d.path().join("new.txt"), "y").unwrap();
+        let all = status(d.path()).unwrap();
+        assert_eq!((all.files.len(), all.hidden), (2, 0));
+        let scoped = status_scoped(d.path(), Some(&["new.txt".to_string()])).unwrap();
+        assert_eq!(scoped.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["new.txt"]);
+        assert_eq!(scoped.hidden, 1);
+    }
+
+    #[test]
+    fn message_names_the_goal_or_the_files() {
+        let f = |p: &str| FileChange { path: p.into(), code: "??".into(), blocked: false };
+        let one = [f("docs/a.md")];
+        assert_eq!(suggest_message_with_goal(&one, "Add the usage guide."), "docs(docs): add the usage guide");
+        assert_eq!(suggest_message_with_goal(&[f("src/a.rs"), f("src/b.rs")], ""), "feat(src): update a.rs, b.rs");
+        let many: Vec<_> = ["a", "b", "c", "d"].iter().map(|n| f(&format!("{n}.rs"))).collect();
+        assert_eq!(suggest_message_with_goal(&many, ""), "feat: update a.rs, b.rs and 2 more");
+    }
+
+    #[test]
     fn suggestion_uses_type_and_scope() {
         let f = |p: &str, c: &str| FileChange { path: p.into(), code: c.into(), blocked: false };
         assert_eq!(suggest_message(&[f("README.md", " M")]), "docs: update README.md");
         assert_eq!(
             suggest_message(&[f("crates/chorus-core/src/a.rs", " M"), f("crates/chorus-core/src/b.rs", " M")]),
-            "fix(core): update 2 files"
+            "fix(core): update a.rs, b.rs"
         );
     }
 }

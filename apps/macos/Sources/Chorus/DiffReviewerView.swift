@@ -230,7 +230,11 @@ struct DiffReviewerView: View {
                     .disabled(workspace.isEmpty)
                     .help("commit → push → เปิด PR ในที่เดียว")
                     .sheet(isPresented: $showShipSheet) {
-                        GitShipSheet(workspace: workspace) { showShipSheet = false }
+                        GitShipSheet(
+                            workspace: workspace,
+                            sessionFiles: engine.diffFiles,
+                            goal: engine.events.last(where: { $0.actor == "user" && $0.kind == "msg" })?.body ?? ""
+                        ) { showShipSheet = false }
                     }
                 }
 

@@ -6,18 +6,23 @@ import CChorus
 /// this only collects the choices and shows the result.
 struct GitShipSheet: View {
     let workspace: String
+    /// Files the session changed (Changes tab). Empty = unknown, show everything.
+    var sessionFiles: [String] = []
+    /// What the user asked for; seeds the commit message.
+    var goal: String = ""
     var onClose: () -> Void
 
     struct FileRow: Decodable, Identifiable { let path: String; let code: String; let blocked: Bool; var id: String { path } }
     struct GitStatus: Decodable {
         let branch: String; let default_branch: String?; let on_default: Bool
         let upstream: String?; let ahead: Int; let has_remote: Bool; let gh_ready: Bool
-        let files: [FileRow]
+        let files: [FileRow]; let hidden: Int?
     }
     struct GitInfo: Decodable { let status: GitStatus; let suggestion: String }
     private struct Reply<T: Decodable>: Decodable { let ok: Bool; let error: String?; let git: T? }
     private struct Generic: Decodable { let ok: Bool; let error: String?; let url: String?; let branch: String? }
 
+    @State private var showAll = false
     @State private var info: GitInfo?
     @State private var loadError: String?
     @State private var chosen: Set<String> = []
@@ -67,6 +72,12 @@ struct GitShipSheet: View {
         if s.files.isEmpty {
             Text("ไม่มีไฟล์ที่เปลี่ยน").foregroundStyle(.secondary)
         } else {
+            if let hidden = s.hidden, hidden > 0 {
+                HStack(spacing: 6) {
+                    Text("ซ่อน \(hidden) ไฟล์ที่ session นี้ไม่ได้แตะ").font(.caption).foregroundStyle(.secondary)
+                    Button("แสดงทั้งหมด") { showAll = true; load() }.buttonStyle(.link).font(.caption)
+                }
+            }
             if s.on_default {
                 Label("อยู่บน \(s.branch) — จะแตก branch ใหม่ให้ก่อน commit ไม่ลง \(s.branch) ตรง ๆ", systemImage: "info.circle")
                     .font(.caption).foregroundStyle(.secondary)
@@ -122,11 +133,15 @@ struct GitShipSheet: View {
     private func load() {
         let ws = workspace
         DispatchQueue.global().async {
-            let data = Self.call { ws.withCString { chorus_git_status_json($0) } }
+            let scopeJSON = (showAll || sessionFiles.isEmpty) ? "null"
+                : (String(data: (try? JSONEncoder().encode(sessionFiles)) ?? Data("null".utf8), encoding: .utf8) ?? "null")
+            let goalText = goal
+            let data = Self.call { ws.withCString { w in scopeJSON.withCString { sc in goalText.withCString { chorus_git_status_scoped_json(w, sc, $0) } } } }
             let r = try? JSONDecoder().decode(Reply<GitInfo>.self, from: data)
             DispatchQueue.main.async {
                 if let g = r?.git, r?.ok == true {
                     info = g
+                    if !g.status.has_remote { doPush = false; doPR = false }
                     chosen = Set(g.status.files.filter { !$0.blocked }.map(\.path))
                     message = g.suggestion
                 } else {
@@ -138,7 +153,8 @@ struct GitShipSheet: View {
 
     private func run() {
         busy = true; failure = nil; log = []
-        let (ws, msg, paths, push, pr, body) = (workspace, message, Array(chosen), doPush, doPR, prBody)
+        let canPush = info?.status.has_remote ?? false
+        let (ws, msg, paths, push, pr, body) = (workspace, message, Array(chosen), doPush && canPush, doPR && canPush, prBody)
         let base = info?.status.default_branch
         DispatchQueue.global().async {
             func step(_ f: () -> UnsafeMutablePointer<CChar>?) -> Generic? {
