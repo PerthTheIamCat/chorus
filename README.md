@@ -2,82 +2,68 @@
 
 > **Many agents. One score.**
 
-Desktop app ที่ให้ AI agent หลายเจ้า (Claude, Codex, Gemini, local) ทำงานใน **session เดียวกัน**
-ใช้ความจำก้อนเดียวกัน เห็น skill ชุดเดียวกัน และ **ส่งไม้ต่อกันได้กลางประโยค** เมื่อตัวใดตัวหนึ่งชนลิมิต
+Desktop app (macOS ก่อน) ที่ให้ AI agent หลายเจ้า — Claude, Codex, Antigravity (Gemini) และโมเดล local —
+ทำงานใน **session เดียวกัน** ใช้ความจำก้อนเดียวกัน เห็น skill ชุดเดียวกัน และ
+**ส่งไม้ต่อกันได้กลางประโยค** เมื่อตัวใดตัวหนึ่งชนลิมิต
 
-สถานะ: **Phase 0** — Rust core + measurement harness. macOS first.
+ปัญหาที่แก้: dev ที่ใช้ AI หลายตัวไม่ได้เจ็บเพราะโมเดลไม่เก่ง แต่เจ็บเพราะ **บริบทขาดทุกครั้งที่เปลี่ยนเครื่องมือ**
+
+สถานะ: **v0.2.x** — Rust core + SwiftUI shell บน macOS ใช้งานได้ ดูรายละเอียดรุ่นใน [CHANGELOG.md](CHANGELOG.md)
+(Windows/WinUI 3 ยังไม่เริ่ม — core ไม่มี logic ใน Swift เพื่อให้พอร์ตได้โดยไม่แก้ core)
 
 ---
 
-## กฎที่ทุกอย่างในนี้ตามมา
+## ทำอะไรได้ตอนนี้
 
-> ที่เก็บของ กับ สิ่งที่ส่งให้โมเดล เป็นคนละ format กัน
+- หลาย agent ใน session เดียว — **ledger** (SQLite) เป็นแหล่งความจริง ไม่ใช่ session ของ provider
+- ส่งไม้ต่อ (handoff) พร้อม brief + diff จาก checkpoint และ failover อัตโนมัติเมื่อชน 429 / quota
+- compare (fork ต่อ agent), plan mode, rewind ทั้งแชทและไฟล์
+- ความจำของโปรเจกต์ผ่าน approve queue · skill ชุดเดียวฉายให้ทุกเจ้า · MCP config ก้อนเดียว
+- review diff ทีละ hunk, verify loop, repo map ใน context
+- sandbox (Seatbelt) กัน agent เขียนนอก workspace · กัน secret หลุด 3 ชั้น
+- นำเข้า session จาก Claude Code / Codex / Gemini CLI
 
-- **Cold (ดิสก์)** ปรับให้ไบต์น้อยและ query เร็ว ไม่ต้องให้ AI อ่านรู้เรื่อง → `schema.rs` `store.rs` `blob.rs` `ledger.rs` `memory.rs`
-- **Hot (เข้าโมเดล)** ปรับให้ token น้อย ประกอบใหม่ทุกครั้ง ไม่เคยเขียนกลับลงดิสก์ → `tokens.rs` `render.rs` `context.rs`
-
-ถ้าเผลอเอา format ฝั่งหนึ่งไปใช้อีกฝั่ง จะได้ทั้งดิสก์บวมและ token เปลืองพร้อมกัน
+**ยังไม่มี:** semantic retrieval ของความจำ (ตอนนี้เรียงตาม pinned/hits/ความใหม่) · notarize/.app ที่แจกจ่ายได้ · Windows
 
 ## เริ่มยังไง
 
+ต้องมี Rust (1.85+) และสำหรับแอป macOS: Xcode toolchain (Swift 5.9+)
+
 ```bash
-cargo test          # 22 tests
-cargo run -p chorus-cli -- bench
+cargo test --workspace
+cargo run -p chorus-cli --bin chorus -- bench    # วัด invariant
+cargo run -p chorus-cli --bin chorus -- doctor   # agent ไหนพร้อมใช้
+apps/macos/build.sh                              # build + เปิดแอป
 ```
 
-`bench` คือตัววัดว่าโค้ดยังทำตามสเปกอยู่จริง รันได้ทุกครั้งที่แก้ core:
+ลอง agent จริง (ต้อง login claude/codex ไว้แล้ว):
 
-```
-── dedup ─────────────────────────────────────────────
-  events                78
-  reads of one file     8
-  blob rows             1   (naive would be 8)
-  stored                1.4 KB compressed / 49.0 KB raw
-  naive would store     392.2 KB   → saved 99.6%
-
-── context @ 6000 token window ─────────────────────
-  ledger raw            103553 token
-  assembled             2490 token   (2.4% ของดิบ)
-  demoted / dropped     40 / 10
+```bash
+scripts/smoke-real-agents.sh claude codex        # เขียนไฟล์ · จำข้าม agent · failover
 ```
 
-ตัวเลขสามอย่างที่ต้องไม่ถอยหลัง: **blob rows ต้องเป็น 1**, **assembled ต้องเป็นเศษเสี้ยวของ raw**,
-และ **demoted ต้องมาก่อน dropped เสมอ** (ย่อก่อนทิ้ง)
+`bench` คือตัวจับ regression ที่เทสต์จับไม่ได้ ตัวเลขที่ห้ามถอย: **blob rows = 1** (dedup),
+**assembled เป็นเศษเสี้ยวของ raw**, **demoted มาก่อน dropped เสมอ**, task state ไม่ว่าง,
+และ `assemble_context` ต้องไม่เรียก summariser
+
+## กฎที่ทุกอย่างตามมา
+
+1. **storage ≠ context** — ดิสก์ปรับให้ไบต์น้อย/query เร็ว; ที่ส่งเข้าโมเดลปรับให้ token น้อย ประกอบใหม่ทุกครั้ง ไม่เขียนกลับดิสก์
+2. **ledger เป็นแหล่งความจริงเดียว** — provider เป็นแค่ผู้ถูกเรียกมาตอบหนึ่งเทิร์น
+3. **ห้ามมี logic ใน Swift** — ทุกอย่างอยู่ใน Rust, UI คุยผ่าน FFI/event stream
 
 ## โครงสร้าง
 
 ```
-crates/chorus-core/
-  types.rs      Event/EventKind/BlobId — สัญญากลาง อย่าแก้เล่น
-  schema.rs     migration + FTS5 (มี fallback ถ้าไม่มี fts5)
-  store.rs      เปิด db, ตั้ง WAL/pragma
-  actor.rs      intern ชื่อ agent เป็น integer
-  blob.rs       content-addressed store: BLAKE3 + zstd + dedup + GC
-  ledger.rs     append/get/tail/fork/search — ledger เป็น DAG, fork ไม่ copy อะไรเลย
-  memory.rs     fact store (บังคับ ≤140 ตัวอักษร) + render แบบไม่มี metadata
-  tokens.rs     ตัวประมาณ token ที่รู้จักภาษาไทย + cache
-  render.rs     table/manifest/truncate/dedup_window — รูปแบบที่ส่งเข้าโมเดล
-  context.rs    budget allocator + rung ladder L0→L1→L2
-crates/chorus-cli/
-  main.rs       bench harness
-crates/chorus-acp/
-  lib.rs        ACP client เปล่า ๆ (ndjson JSON-RPC over stdio)
-  bin/acp_probe.rs        สไปก์ที่ 1 — ยิงจริงแล้วจดทุกเฟรม
-  bin/acp_mock_agent.rs   agent ปลอม ไว้เทสต์ probe โดยไม่ต้องมี API key
-evals/handoff/  spike ที่ 2 — วัดคุณภาพการส่งไม้ต่อ
+crates/chorus-core/    ledger, blob, memory, context assembler, handoff, checkpoint, compaction, …
+crates/chorus-acp/     ACP client, bridge ของแต่ละเจ้า, sandbox
+crates/chorus-cli/     คำสั่ง `chorus` + Session engine
+crates/chorus-ffi/     C ABI (chorus.h) ที่ SwiftUI shell ลิงก์
+crates/chorus-daemon/  chorusd headless engine
+crates/chorus-eval/    harness eval
+apps/macos/            SwiftUI shell
+evals/handoff/         eval คุณภาพการส่งไม้ต่อ
+docs/                  ref/ (design, storage spec), adr/, agents/
 ```
 
-## สิ่งที่ยังไม่มี (ตั้งใจ)
-
-- ไม่มี adapter จริงสักตัว — `chorus-acp` เป็นสไปก์สำหรับ *วัด* ไม่ใช่ adapter
-- ไม่มี sqlite-vec / embedding — Phase 1
-- ไม่มี UI — Phase 1 (SwiftUI, ห้ามมี logic ใน Swift)
-- `HeuristicCounter` เป็นแค่ตัวประมาณสำหรับจัดงบ **ก่อนยิงจริงต้องใช้ tokenizer จริงของแต่ละเจ้า**
-
-## ข้อควรระวังที่เขียนไว้กันลืม
-
-- อย่านับ token ด้วย `len/4` — ภาษาไทยกิน token ต่อไบต์สูงกว่าอังกฤษ มีเทสต์กันไว้แล้วใน `tests/context.rs`
-- อย่าให้ agent เขียน memory ตรง ๆ ต้องผ่าน approve queue (ยังไม่ได้ทำ — Phase 1)
-- repo เงาสำหรับ checkpoint ต้องยึด `.gitignore` ของผู้ใช้ ไม่งั้น `.chorus/` จะโตกว่าโปรเจกต์จริง
-
-เอกสารออกแบบเต็มอยู่ใน Claude project: `Chorus Design Blueprint` และ `Chorus Storage Spec`
+บริบทเต็มสำหรับคนและ agent ที่จะแก้โค้ด: [CLAUDE.md](CLAUDE.md) (ข้อตัดสินใจ กับดักที่เคยเหยียบ) และ [CONTEXT.md](CONTEXT.md)
