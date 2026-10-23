@@ -9,6 +9,10 @@ import SwiftTerm
 final class TerminalTab: NSObject, ObservableObject, Identifiable, TerminalViewDelegate {
     let id = UUID()
     let cwd: String
+    /// The project (workspace root) whose drawer this tab belongs to; `cwd`
+    /// may be a worktree of it. Switching project must not show — or keep
+    /// typing into — another project's shells.
+    let project: String
     let sandboxed: Bool
     @Published var title: String
     @Published var exitCode: Int32?
@@ -16,17 +20,34 @@ final class TerminalTab: NSObject, ObservableObject, Identifiable, TerminalViewD
     let view: TerminalView
     private var ptyId: UInt64 = 0
 
-    init(cwd: String, title: String, sandboxed: Bool) {
+    init(cwd: String, project: String, title: String, sandboxed: Bool) {
         self.cwd = cwd
+        self.project = project
         self.title = title
         self.sandboxed = sandboxed
         self.view = TerminalView(frame: NSRect(x: 0, y: 0, width: 640, height: 240))
         super.init()
         view.terminalDelegate = self
-        view.font = NSFont.monospacedSystemFont(ofSize: Self.savedFontSize, weight: .regular)
+        view.font = Self.font(Self.savedFontSize)
         applyTheme()
         start()
     }
+
+    /// A Nerd Font when one is installed — prompts like powerlevel10k draw
+    /// their icons from the private-use area, which the system mono font
+    /// lacks (they show as boxes). Otherwise the system monospaced font.
+    static func font(_ size: CGFloat) -> NSFont {
+        if let name = nerdFontName, let f = NSFont(name: name, size: size) { return f }
+        return NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
+    private static let nerdFontName: String? = {
+        let all = NSFontManager.shared.availableFonts
+        let mono = all.filter { $0.contains("NerdFontMono") || $0.contains("Nerd Font Mono") || $0.contains("NFM") }
+        let any = all.filter { $0.contains("NerdFont") || $0.contains("Nerd Font") || $0.hasPrefix("MesloLGS-NF") }
+        return (mono.first(where: { $0.lowercased().contains("regular") }) ?? mono.first
+            ?? any.first(where: { $0.lowercased().contains("regular") }) ?? any.first)
+    }()
 
     static var savedFontSize: CGFloat {
         let v = UserDefaults.standard.double(forKey: "terminalFontSize")
@@ -36,7 +57,7 @@ final class TerminalTab: NSObject, ObservableObject, Identifiable, TerminalViewD
     func setFontSize(_ size: CGFloat) {
         let clamped = min(24, max(9, size))
         UserDefaults.standard.set(Double(clamped), forKey: "terminalFontSize")
-        view.font = NSFont.monospacedSystemFont(ofSize: clamped, weight: .regular)
+        view.font = Self.font(clamped)
     }
 
     func zoom(_ delta: CGFloat) { setFontSize(view.font.pointSize + delta) }
@@ -128,10 +149,17 @@ final class TerminalStore: ObservableObject {
 
     var current: TerminalTab? { tabs.first { $0.id == selected } ?? tabs.first }
 
-    func open(cwd: String, title: String? = nil, sandboxed: Bool = false) {
+    func tabs(for project: String) -> [TerminalTab] { tabs.filter { $0.project == project } }
+
+    func current(for project: String) -> TerminalTab? {
+        let mine = tabs(for: project)
+        return mine.first { $0.id == selected } ?? mine.last
+    }
+
+    func open(cwd: String, project: String? = nil, title: String? = nil, sandboxed: Bool = false) {
         guard !cwd.isEmpty else { return }
         let name = title ?? (cwd as NSString).lastPathComponent
-        let tab = TerminalTab(cwd: cwd, title: name, sandboxed: sandboxed)
+        let tab = TerminalTab(cwd: cwd, project: project ?? cwd, title: name, sandboxed: sandboxed)
         tabs.append(tab)
         selected = tab.id
     }
@@ -139,7 +167,7 @@ final class TerminalStore: ObservableObject {
     func close(_ tab: TerminalTab) {
         tab.close()
         tabs.removeAll { $0.id == tab.id }
-        if selected == tab.id { selected = tabs.last?.id }
+        if selected == tab.id { selected = tabs(for: tab.project).last?.id }
     }
 }
 
@@ -171,6 +199,14 @@ struct TerminalDrawerView: View {
         self.onClose = onClose
     }
 
+    private var projectTabs: [TerminalTab] { store.tabs(for: workspace) }
+    private var currentTab: TerminalTab? { store.current(for: workspace) }
+
+    private func newTab(cwd: String? = nil, title: String? = nil) {
+        showAgentFeed = false
+        store.open(cwd: cwd ?? workspace, project: workspace, title: title, sandboxed: sandboxed)
+    }
+
     private var agentCommands: [LedgerEvent] {
         engine.events.filter { $0.kind == "tool_call" }.suffix(200).reversed()
     }
@@ -181,14 +217,14 @@ struct TerminalDrawerView: View {
             Divider()
             if showAgentFeed {
                 agentFeed
-            } else if let tab = store.current {
+            } else if let tab = currentTab {
                 TerminalHost(tab: tab).id(tab.id)
                     .padding(.horizontal, 6)
                     .background(Color(nsColor: tab.view.nativeBackgroundColor))
             } else {
                 VStack(spacing: 8) {
                     Text("ยังไม่มีเทอร์มินัล").foregroundStyle(.secondary)
-                    Button("เปิดเทอร์มินัลใหม่") { store.open(cwd: workspace, sandboxed: sandboxed) }
+                    Button("เปิดเทอร์มินัลใหม่") { newTab() }
                         .disabled(workspace.isEmpty)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -196,7 +232,13 @@ struct TerminalDrawerView: View {
         }
         .frame(minHeight: 180, idealHeight: 280, maxHeight: 520)
         .onAppear {
-            if store.tabs.isEmpty { store.open(cwd: workspace) }
+            if projectTabs.isEmpty { newTab() }
+            engine.fetchWorktrees(cwd: workspace) { worktrees = $0 }
+        }
+        .onChange(of: workspace) { _, _ in
+            // New project: its own shells, started in its own folder.
+            worktrees = []
+            if projectTabs.isEmpty { newTab() }
             engine.fetchWorktrees(cwd: workspace) { worktrees = $0 }
         }
     }
@@ -206,28 +248,29 @@ struct TerminalDrawerView: View {
             Image(systemName: "terminal.fill").font(.caption).foregroundStyle(.teal)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 4) {
-                    ForEach(store.tabs) { tab in
-                        TabChip(tab: tab, selected: !showAgentFeed && store.current?.id == tab.id,
+                    ForEach(projectTabs) { tab in
+                        TabChip(tab: tab, selected: !showAgentFeed && currentTab?.id == tab.id,
                                 onSelect: { showAgentFeed = false; store.selected = tab.id },
                                 onClose: { store.close(tab) })
                     }
                 }
             }
             Menu {
-                Button("โฟลเดอร์โปรเจกต์") { showAgentFeed = false; store.open(cwd: workspace, sandboxed: sandboxed) }
+                Button("โฟลเดอร์โปรเจกต์") { newTab() }
                 ForEach(worktrees) { wt in
-                    Button("worktree · \(wt.branch)") {
-                        showAgentFeed = false
-                        store.open(cwd: wt.path, title: wt.branch, sandboxed: sandboxed)
-                    }
+                    Button("worktree · \(wt.branch)") { newTab(cwd: wt.path, title: wt.branch) }
                 }
                 Divider()
                 Toggle("ครอบ sandbox (เขียนได้เฉพาะ workspace)", isOn: $sandboxed)
-            } label: { Image(systemName: "plus") }
-                .menuStyle(.borderlessButton).frame(width: 28)
-                .help("เทอร์มินัลใหม่")
+            } label: {
+                Image(systemName: "plus")
+            } primaryAction: {
+                newTab()   // "+" itself opens a tab; the chevron holds the options
+            }
+            .menuStyle(.borderlessButton).frame(width: 40)
+            .help("เทอร์มินัลใหม่ (กดลูกศรเพื่อเลือก worktree / sandbox)")
             Spacer()
-            if let tab = store.current, !showAgentFeed {
+            if let tab = currentTab, !showAgentFeed {
                 Button { tab.zoom(-1) } label: { Image(systemName: "textformat.size.smaller") }
                     .buttonStyle(.plain).keyboardShortcut("-", modifiers: .command).help("ลดขนาดตัวอักษร (⌘-)")
                 Button { tab.zoom(1) } label: { Image(systemName: "textformat.size.larger") }
@@ -242,7 +285,7 @@ struct TerminalDrawerView: View {
             }
             .buttonStyle(.plain)
             .help("ดูคำสั่งที่ agent รันใน session นี้ (อ่านอย่างเดียว)")
-            if let tab = store.current, tab.exitCode != nil, !showAgentFeed {
+            if let tab = currentTab, tab.exitCode != nil, !showAgentFeed {
                 Button("เปิดใหม่") { tab.start() }.font(.caption)
             }
             Button(action: onClose) { Image(systemName: "xmark").font(.caption2) }
