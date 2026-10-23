@@ -19,7 +19,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -109,6 +109,22 @@ fn base_env() -> Vec<(String, String)> {
     env
 }
 
+/// Where a sandboxed shell keeps what it would normally write under `$HOME`.
+/// Seatbelt only lets it write caches and temp, so zsh's history (and its lock
+/// file), `.zcompdump` and oh-my-zsh's cache would otherwise fail on every
+/// start with "operation not permitted". `~/.cache` is on the allow list
+/// (CLAUDE.md 7.20), so history still survives between terminals.
+fn sandbox_shell_env(home: &Path) -> Vec<(String, String)> {
+    let dir = home.join(".cache").join("chorus").join("term");
+    let _ = std::fs::create_dir_all(&dir);
+    let at = |name: &str| dir.join(name).to_string_lossy().into_owned();
+    vec![
+        ("HISTFILE".into(), at("zsh_history")),
+        ("ZSH_COMPDUMP".into(), at("zcompdump")),
+        ("ZSH_CACHE_DIR".into(), dir.to_string_lossy().into_owned()),
+    ]
+}
+
 impl Pty {
     /// Spawn the shell. Returns the PTY and a reader thread handle: it calls
     /// `on_data` for every chunk, then `on_exit(code)` once (code is -1 when the
@@ -147,7 +163,14 @@ impl Pty {
 
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..]).current_dir(&opts.cwd).env_remove("CLAUDECODE");
-        for (k, v) in base_env().into_iter().chain(opts.env) {
+        // Explicit options win, then the sandbox redirects, then the base env.
+        let mut env = base_env();
+        if opts.sandbox.is_some() && sandbox_note.is_none() {
+            if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+                env.extend(sandbox_shell_env(&home));
+            }
+        }
+        for (k, v) in env.into_iter().chain(opts.env) {
             cmd.env(k, v);
         }
         let slave_fd = slave.as_raw_fd();
@@ -256,6 +279,17 @@ mod tests {
             }
         }
         got
+    }
+
+    #[test]
+    fn sandboxed_shell_writes_go_under_the_allowed_cache_dir() {
+        let home = tempfile_dir().join("home-sbx");
+        let env = sandbox_shell_env(&home);
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap();
+        for k in ["HISTFILE", "ZSH_COMPDUMP", "ZSH_CACHE_DIR"] {
+            assert!(get(k).starts_with(home.join(".cache").to_str().unwrap()), "{k}");
+        }
+        assert!(home.join(".cache/chorus/term").is_dir());
     }
 
     fn tempfile_dir() -> PathBuf {
