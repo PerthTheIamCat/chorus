@@ -23,9 +23,28 @@ final class TerminalTab: NSObject, ObservableObject, Identifiable, TerminalViewD
         self.view = TerminalView(frame: NSRect(x: 0, y: 0, width: 640, height: 240))
         super.init()
         view.terminalDelegate = self
-        view.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        view.font = NSFont.monospacedSystemFont(ofSize: Self.savedFontSize, weight: .regular)
         applyTheme()
         start()
+    }
+
+    static var savedFontSize: CGFloat {
+        let v = UserDefaults.standard.double(forKey: "terminalFontSize")
+        return v >= 9 ? CGFloat(v) : 12
+    }
+
+    func setFontSize(_ size: CGFloat) {
+        let clamped = min(24, max(9, size))
+        UserDefaults.standard.set(Double(clamped), forKey: "terminalFontSize")
+        view.font = NSFont.monospacedSystemFont(ofSize: clamped, weight: .regular)
+    }
+
+    func zoom(_ delta: CGFloat) { setFontSize(view.font.pointSize + delta) }
+
+    /// Clear the screen and scrollback, then ask the shell to redraw its prompt.
+    func clear() {
+        view.feed(text: "\u{1B}[2J\u{1B}[3J\u{1B}[H")
+        send(source: view, data: [0x0c][...])
     }
 
     /// Follow the app's light/dark appearance instead of a fixed terminal skin.
@@ -208,6 +227,14 @@ struct TerminalDrawerView: View {
                 .menuStyle(.borderlessButton).frame(width: 28)
                 .help("เทอร์มินัลใหม่")
             Spacer()
+            if let tab = store.current, !showAgentFeed {
+                Button { tab.zoom(-1) } label: { Image(systemName: "textformat.size.smaller") }
+                    .buttonStyle(.plain).keyboardShortcut("-", modifiers: .command).help("ลดขนาดตัวอักษร (⌘-)")
+                Button { tab.zoom(1) } label: { Image(systemName: "textformat.size.larger") }
+                    .buttonStyle(.plain).keyboardShortcut("=", modifiers: .command).help("เพิ่มขนาดตัวอักษร (⌘+)")
+                Button { tab.clear() } label: { Image(systemName: "eraser") }
+                    .buttonStyle(.plain).keyboardShortcut("k", modifiers: .command).help("ล้างหน้าจอ (⌘K)")
+            }
             Button { showAgentFeed.toggle() } label: {
                 Label("คำสั่งของ agent", systemImage: "cpu")
                     .font(.caption)
