@@ -298,9 +298,13 @@ mod tests {
 
     #[test]
     fn shell_runs_commands_on_a_real_tty() {
-        // `tty` prints /dev/ttysNNN only when stdin is a terminal.
+        // `tty` prints a device only when stdin is a terminal: /dev/ttysNNN on
+        // macOS, /dev/pts/N on Linux.
         let out = run("tty; echo done-$((20+22))\n", "done-42");
-        assert!(out.contains("/dev/tty"), "not a tty: {out:?}");
+        assert!(
+            out.contains("/dev/tty") || out.contains("/dev/pts/"),
+            "not a tty: {out:?}"
+        );
         assert!(out.contains("done-42"), "{out:?}");
     }
 
