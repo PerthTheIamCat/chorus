@@ -1,243 +1,338 @@
 import SwiftUI
 import AppKit
+import CChorus
+import SwiftTerm
 
-/// Embedded Terminal Drawer & Live PTY Shell (Ticket 13 & 20).
-/// Provides an in-app interactive developer terminal (`⌘~`) for live command execution,
-/// instant git checks, and agent tool log inspection.
+/// One shell. The PTY, environment, resize and kill live in Rust
+/// (`chorus_term_*`, CLAUDE.md 2.3); this class only owns the SwiftTerm grid
+/// that draws the bytes and hands keystrokes back.
+final class TerminalTab: NSObject, ObservableObject, Identifiable, TerminalViewDelegate {
+    let id = UUID()
+    let cwd: String
+    /// The project (workspace root) whose drawer this tab belongs to; `cwd`
+    /// may be a worktree of it. Switching project must not show — or keep
+    /// typing into — another project's shells.
+    let project: String
+    let sandboxed: Bool
+    @Published var title: String
+    @Published var exitCode: Int32?
+    @Published var sandboxNote: String?
+    let view: TerminalView
+    private var ptyId: UInt64 = 0
+
+    init(cwd: String, project: String, title: String, sandboxed: Bool) {
+        self.cwd = cwd
+        self.project = project
+        self.title = title
+        self.sandboxed = sandboxed
+        self.view = TerminalView(frame: NSRect(x: 0, y: 0, width: 640, height: 240))
+        super.init()
+        view.terminalDelegate = self
+        view.font = Self.font(Self.savedFontSize)
+        applyTheme()
+        start()
+    }
+
+    /// A Nerd Font when one is installed — prompts like powerlevel10k draw
+    /// their icons from the private-use area, which the system mono font
+    /// lacks (they show as boxes). Otherwise the system monospaced font.
+    static func font(_ size: CGFloat) -> NSFont {
+        if let name = nerdFontName, let f = NSFont(name: name, size: size) { return f }
+        return NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
+    private static let nerdFontName: String? = {
+        let all = NSFontManager.shared.availableFonts
+        let mono = all.filter { $0.contains("NerdFontMono") || $0.contains("Nerd Font Mono") || $0.contains("NFM") }
+        let any = all.filter { $0.contains("NerdFont") || $0.contains("Nerd Font") || $0.hasPrefix("MesloLGS-NF") }
+        return (mono.first(where: { $0.lowercased().contains("regular") }) ?? mono.first
+            ?? any.first(where: { $0.lowercased().contains("regular") }) ?? any.first)
+    }()
+
+    static var savedFontSize: CGFloat {
+        let v = UserDefaults.standard.double(forKey: "terminalFontSize")
+        return v >= 9 ? CGFloat(v) : 12
+    }
+
+    func setFontSize(_ size: CGFloat) {
+        let clamped = min(24, max(9, size))
+        UserDefaults.standard.set(Double(clamped), forKey: "terminalFontSize")
+        view.font = Self.font(clamped)
+    }
+
+    func zoom(_ delta: CGFloat) { setFontSize(view.font.pointSize + delta) }
+
+    /// Clear the screen and scrollback, then ask the shell to redraw its prompt.
+    func clear() {
+        view.feed(text: "\u{1B}[2J\u{1B}[3J\u{1B}[H")
+        send(source: view, data: [0x0c][...])
+    }
+
+    /// Follow the app's light/dark appearance instead of a fixed terminal skin.
+    func applyTheme() {
+        let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        view.nativeBackgroundColor = dark ? NSColor(white: 0.10, alpha: 1) : NSColor(white: 0.98, alpha: 1)
+        view.nativeForegroundColor = dark ? NSColor(white: 0.90, alpha: 1) : NSColor(white: 0.12, alpha: 1)
+    }
+
+    func start() {
+        exitCode = nil
+        let me = Unmanaged.passRetained(self).toOpaque()
+        let json = cwd.withCString { c in
+            chorus_term_open(c, 80, 24, sandboxed, me, { ctx, _, data, len in
+                guard let ctx, let data else { return }
+                let bytes = Array(UnsafeBufferPointer(start: data, count: len))
+                let tab = Unmanaged<TerminalTab>.fromOpaque(ctx).takeUnretainedValue()
+                DispatchQueue.main.async { tab.view.feed(byteArray: bytes[...]) }
+            }, { ctx, _, code in
+                guard let ctx else { return }
+                let tab = Unmanaged<TerminalTab>.fromOpaque(ctx).takeRetainedValue()
+                DispatchQueue.main.async {
+                    tab.exitCode = code
+                    tab.ptyId = 0
+                    tab.view.feed(text: "\r\n\u{1B}[2m[เชลล์จบการทำงาน · รหัส \(code)]\u{1B}[0m\r\n")
+                }
+            })
+        }
+        struct Res: Decodable { let ok: Bool; let id: UInt64?; let error: String?; let sandbox_note: String? }
+        let text = json.map { String(cString: $0) } ?? ""
+        if let json { chorus_string_free(json) }
+        guard let res = try? JSONDecoder().decode(Res.self, from: Data(text.utf8)), res.ok, let id = res.id else {
+            Unmanaged<TerminalTab>.fromOpaque(me).release()
+            let msg = (try? JSONDecoder().decode(Res.self, from: Data(text.utf8)))?.error ?? "เปิดเทอร์มินัลไม่ได้"
+            exitCode = -1
+            view.feed(text: "\u{1B}[31m\(msg)\u{1B}[0m\r\n")
+            return
+        }
+        ptyId = id
+        sandboxNote = res.sandbox_note
+        if let note = res.sandbox_note {
+            view.feed(text: "\u{1B}[33m[ไม่ได้ครอบ sandbox: \(note)]\u{1B}[0m\r\n")
+        }
+    }
+
+    func close() {
+        if ptyId != 0 { chorus_term_close(ptyId); ptyId = 0 }
+    }
+
+    // MARK: TerminalViewDelegate
+    func send(source: TerminalView, data: ArraySlice<UInt8>) {
+        guard ptyId != 0 else { return }
+        let bytes = Array(data)
+        _ = bytes.withUnsafeBufferPointer { chorus_term_write(ptyId, $0.baseAddress, $0.count) }
+    }
+    func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+        guard ptyId != 0, newCols > 0, newRows > 0 else { return }
+        chorus_term_resize(ptyId, UInt16(clamping: newCols), UInt16(clamping: newRows))
+    }
+    func setTerminalTitle(source: TerminalView, title: String) {
+        DispatchQueue.main.async { if !title.isEmpty { self.title = title } }
+    }
+    func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
+    func scrolled(source: TerminalView, position: Double) {}
+    func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
+        if let url = URL(string: link), ["http", "https"].contains(url.scheme) { NSWorkspace.shared.open(url) }
+    }
+    func clipboardCopy(source: TerminalView, content: Data) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setData(content, forType: .string)
+    }
+    func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
+}
+
+/// Tabs outlive the drawer: closing the drawer must not kill a running build.
+@MainActor
+final class TerminalStore: ObservableObject {
+    static let shared = TerminalStore()
+    @Published var tabs: [TerminalTab] = []
+    @Published var selected: UUID?
+
+    var current: TerminalTab? { tabs.first { $0.id == selected } ?? tabs.first }
+
+    func tabs(for project: String) -> [TerminalTab] { tabs.filter { $0.project == project } }
+
+    func current(for project: String) -> TerminalTab? {
+        let mine = tabs(for: project)
+        return mine.first { $0.id == selected } ?? mine.last
+    }
+
+    func open(cwd: String, project: String? = nil, title: String? = nil, sandboxed: Bool = false) {
+        guard !cwd.isEmpty else { return }
+        let name = title ?? (cwd as NSString).lastPathComponent
+        let tab = TerminalTab(cwd: cwd, project: project ?? cwd, title: name, sandboxed: sandboxed)
+        tabs.append(tab)
+        selected = tab.id
+    }
+
+    func close(_ tab: TerminalTab) {
+        tab.close()
+        tabs.removeAll { $0.id == tab.id }
+        if selected == tab.id { selected = tabs(for: tab.project).last?.id }
+    }
+}
+
+private struct TerminalHost: NSViewRepresentable {
+    let tab: TerminalTab
+    func makeNSView(context: Context) -> TerminalView {
+        DispatchQueue.main.async { tab.view.window?.makeFirstResponder(tab.view) }
+        return tab.view
+    }
+    func updateNSView(_ v: TerminalView, context: Context) {
+        tab.applyTheme()
+    }
+}
+
+/// Integrated terminal drawer (⌃`): real PTY shells, one tab per folder or
+/// worktree, plus a read-only feed of the commands agents ran.
 struct TerminalDrawerView: View {
     let workspace: String
     var onClose: () -> Void
 
-    @State private var outputText: String = "Chorus Terminal Shell v\(Updater.appVersion) (zsh)\nWorkspace: "
-    @State private var commandInput: String = ""
-    @State private var commandHistory: [String] = []
-    @State private var historyIndex: Int = -1
-    @State private var isRunningCommand: Bool = false
-    @State private var activeProcess: Process? = nil
-
-    private let quickPresets: [String] = [
-        "git status",
-        "git diff --stat",
-        "git log -n 5 --oneline",
-        "cargo check",
-        "ls -la"
-    ]
+    @EnvironmentObject var engine: Engine
+    @ObservedObject private var store = TerminalStore.shared
+    @State private var worktrees: [Engine.WorktreeInfo] = []
+    @State private var showAgentFeed = false
+    @State private var sandboxed = false
 
     init(workspace: String, onClose: @escaping () -> Void) {
         self.workspace = workspace
         self.onClose = onClose
     }
 
-    public var body: some View {
+    private var projectTabs: [TerminalTab] { store.tabs(for: workspace) }
+    private var currentTab: TerminalTab? { store.current(for: workspace) }
+
+    private func newTab(cwd: String? = nil, title: String? = nil) {
+        showAgentFeed = false
+        store.open(cwd: cwd ?? workspace, project: workspace, title: title, sandboxed: sandboxed)
+    }
+
+    private var agentCommands: [LedgerEvent] {
+        engine.events.filter { $0.kind == "tool_call" }.suffix(200).reversed()
+    }
+
+    var body: some View {
         VStack(spacing: 0) {
-            // Header Bar
-            HStack(spacing: 8) {
-                Image(systemName: "terminal.fill")
-                    .font(.caption)
-                    .foregroundStyle(.teal)
-
-                Text("เทอร์มินัล")
-                    .font(.caption.weight(.semibold))
-
-                if !workspace.isEmpty {
-                    Text((workspace as NSString).lastPathComponent)
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.primary.opacity(0.06), in: Capsule())
-                }
-
-                Spacer()
-
-                // Quick presets
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 4) {
-                        ForEach(quickPresets, id: \.self) { cmd in
-                            Button {
-                                executeCommand(cmd)
-                            } label: {
-                                Text(cmd)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                            }
-                            .buttonStyle(.plain)
-                            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
-                            .disabled(isRunningCommand || workspace.isEmpty)
-                        }
-                    }
-                }
-                .frame(maxWidth: 380)
-
-                Button {
-                    outputText = "Chorus Terminal Shell v\(Updater.appVersion) (zsh)\n"
-                } label: {
-                    Image(systemName: "trash")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("ล้างหน้าจอ")
-
-                Button {
-                    if let proc = activeProcess, proc.isRunning {
-                        proc.terminate()
-                    }
-                    onClose()
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("ปิดเทอร์มินัล (⌘~)")
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color(NSColor.windowBackgroundColor).opacity(0.95))
-            .overlay(Divider(), alignment: .bottom)
-
-            // Terminal Screen Output
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(outputText)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(Color.primary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-
-                        Color.clear.frame(height: 1).id("terminalBottom")
-                    }
-                    .padding(10)
-                }
-                .background(Color(NSColor.textBackgroundColor).opacity(0.4))
-                .onChange(of: outputText) { _, _ in
-                    proxy.scrollTo("terminalBottom", anchor: .bottom)
-                }
-            }
-
+            header
             Divider()
-
-            // Command Input Field
-            HStack(spacing: 6) {
-                Text("$")
-                    .font(.caption.weight(.bold).monospaced())
-                    .foregroundStyle(.teal)
-
-                TextField("พิมพ์คำสั่ง shell (เช่น cargo check, git status)...", text: $commandInput)
-                    .textFieldStyle(.plain)
-                    .font(.system(.caption, design: .monospaced))
-                    .onSubmit {
-                        let trimmed = commandInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !trimmed.isEmpty {
-                            executeCommand(trimmed)
-                            commandInput = ""
-                        }
-                    }
-
-                if isRunningCommand {
-                    ProgressView()
-                        .controlSize(.mini)
-
-                    Button("หยุด (Ctrl+C)") {
-                        activeProcess?.terminate()
-                    }
-                    .font(.caption2)
-                    .buttonStyle(.bordered)
-                    .controlSize(.mini)
-                } else {
-                    Button {
-                        let trimmed = commandInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !trimmed.isEmpty {
-                            executeCommand(trimmed)
-                            commandInput = ""
-                        }
-                    } label: {
-                        Image(systemName: "return")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(commandInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || workspace.isEmpty)
+            if showAgentFeed {
+                agentFeed
+            } else if let tab = currentTab {
+                TerminalHost(tab: tab).id(tab.id)
+                    .padding(.horizontal, 6)
+                    .background(Color(nsColor: tab.view.nativeBackgroundColor))
+            } else {
+                VStack(spacing: 8) {
+                    Text("ยังไม่มีเทอร์มินัล").foregroundStyle(.secondary)
+                    Button("เปิดเทอร์มินัลใหม่") { newTab() }
+                        .disabled(workspace.isEmpty)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(Color(NSColor.controlBackgroundColor))
         }
-        .frame(minHeight: 180, maxHeight: 320)
+        .frame(minHeight: 180, idealHeight: 280, maxHeight: 520)
         .onAppear {
-            if !workspace.isEmpty {
-                outputText += "\(workspace)\n"
-            }
+            if projectTabs.isEmpty { newTab() }
+            engine.fetchWorktrees(cwd: workspace) { worktrees = $0 }
+        }
+        .onChange(of: workspace) { _, _ in
+            // New project: its own shells, started in its own folder.
+            worktrees = []
+            if projectTabs.isEmpty { newTab() }
+            engine.fetchWorktrees(cwd: workspace) { worktrees = $0 }
         }
     }
 
-    private func executeCommand(_ command: String) {
-        guard !workspace.isEmpty else {
-            outputText += "\n[ข้อผิดพลาด] ยังไม่ได้เปิดโปรเจกต์ใด\n"
-            return
-        }
-
-        commandHistory.append(command)
-        historyIndex = commandHistory.count
-
-        outputText += "\n$ \(command)\n"
-        isRunningCommand = true
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            let process = Process()
-            let pipe = Pipe()
-
-            process.currentDirectoryURL = URL(fileURLWithPath: workspace)
-            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            process.arguments = ["-l", "-c", command]
-            process.standardOutput = pipe
-            process.standardError = pipe
-
-            // Inherit user environment PATH
-            var env = ProcessInfo.processInfo.environment
-            let userPaths = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:~/.cargo/bin"
-            let existingPath = env["PATH"] ?? ""
-            env["PATH"] = "\(userPaths):\(existingPath)"
-            process.environment = env
-
-            DispatchQueue.main.async {
-                self.activeProcess = process
-            }
-
-            let fileHandle = pipe.fileHandleForReading
-            fileHandle.readabilityHandler = { handle in
-                let data = handle.availableData
-                if !data.isEmpty, let chunk = String(data: data, encoding: .utf8) {
-                    DispatchQueue.main.async {
-                        self.outputText += self.stripANSI(chunk)
+    private var header: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "terminal.fill").font(.caption).foregroundStyle(.teal)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(projectTabs) { tab in
+                        TabChip(tab: tab, selected: !showAgentFeed && currentTab?.id == tab.id,
+                                onSelect: { showAgentFeed = false; store.selected = tab.id },
+                                onClose: { store.close(tab) })
                     }
                 }
             }
-
-            do {
-                try process.run()
-                process.waitUntilExit()
-            } catch {
-                DispatchQueue.main.async {
-                    self.outputText += "\nเกิดข้อผิดพลาดในการรัน: \(error.localizedDescription)\n"
+            Menu {
+                Button("โฟลเดอร์โปรเจกต์") { newTab() }
+                ForEach(worktrees) { wt in
+                    Button("worktree · \(wt.branch)") { newTab(cwd: wt.path, title: wt.branch) }
                 }
+                Divider()
+                Toggle("ครอบ sandbox (เขียนได้เฉพาะ workspace)", isOn: $sandboxed)
+            } label: {
+                Image(systemName: "plus")
+            } primaryAction: {
+                newTab()   // "+" itself opens a tab; the chevron holds the options
             }
-
-            fileHandle.readabilityHandler = nil
-
-            DispatchQueue.main.async {
-                self.isRunningCommand = false
-                self.activeProcess = nil
-                self.outputText += "\n[คำสั่งเสร็จสิ้น - Exit code \(process.terminationStatus)]\n"
+            .menuStyle(.borderlessButton).frame(width: 40)
+            .help("เทอร์มินัลใหม่ (กดลูกศรเพื่อเลือก worktree / sandbox)")
+            Spacer()
+            if let tab = currentTab, !showAgentFeed {
+                Button { tab.zoom(-1) } label: { Image(systemName: "textformat.size.smaller") }
+                    .buttonStyle(.plain).keyboardShortcut("-", modifiers: .command).help("ลดขนาดตัวอักษร (⌘-)")
+                Button { tab.zoom(1) } label: { Image(systemName: "textformat.size.larger") }
+                    .buttonStyle(.plain).keyboardShortcut("=", modifiers: .command).help("เพิ่มขนาดตัวอักษร (⌘+)")
+                Button { tab.clear() } label: { Image(systemName: "eraser") }
+                    .buttonStyle(.plain).keyboardShortcut("k", modifiers: .command).help("ล้างหน้าจอ (⌘K)")
             }
+            Button { showAgentFeed.toggle() } label: {
+                Label("คำสั่งของ agent", systemImage: "cpu")
+                    .font(.caption)
+                    .foregroundStyle(showAgentFeed ? Color.accentColor : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help("ดูคำสั่งที่ agent รันใน session นี้ (อ่านอย่างเดียว)")
+            if let tab = currentTab, tab.exitCode != nil, !showAgentFeed {
+                Button("เปิดใหม่") { tab.start() }.font(.caption)
+            }
+            Button(action: onClose) { Image(systemName: "xmark").font(.caption2) }
+                .buttonStyle(.plain)
         }
+        .padding(.horizontal, 10).padding(.vertical, 5)
+        .background(Color(NSColor.windowBackgroundColor).opacity(0.95))
     }
 
-    private func stripANSI(_ text: String) -> String {
-        // Strip ANSI escape codes (e.g. \u{001B}[32m) for clean legible display
-        text.replacingOccurrences(of: #"\x1b\[[0-9;]*[a-zA-Z]"#, with: "", options: .regularExpression)
+    private var agentFeed: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 6) {
+                if agentCommands.isEmpty {
+                    Text("agent ยังไม่ได้รันคำสั่งใน session นี้").foregroundStyle(.secondary).font(.caption)
+                }
+                ForEach(agentCommands) { ev in
+                    HStack(alignment: .top, spacing: 8) {
+                        Text(ev.actor).font(.caption2.weight(.semibold)).foregroundStyle(.teal)
+                            .frame(width: 70, alignment: .leading)
+                        Text(ev.body.prefix(600)).font(.system(size: 11, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Color(NSColor.textBackgroundColor).opacity(0.4))
+    }
+}
+
+private struct TabChip: View {
+    @ObservedObject var tab: TerminalTab
+    let selected: Bool
+    let onSelect: () -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle().fill(tab.exitCode == nil ? Color.green : Color.secondary).frame(width: 6, height: 6)
+            Text(tab.title).font(.caption).lineLimit(1)
+            if tab.sandboxed { Image(systemName: "lock.shield").font(.system(size: 9)) }
+            Button(action: onClose) { Image(systemName: "xmark").font(.system(size: 8)) }.buttonStyle(.plain)
+        }
+        .padding(.horizontal, 8).padding(.vertical, 3)
+        .background(selected ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.05), in: Capsule())
+        .contentShape(Capsule())
+        .onTapGesture(perform: onSelect)
     }
 }

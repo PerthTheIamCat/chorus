@@ -11,6 +11,7 @@ name = "chorus_ffi"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+chorus-acp = { path = "../chorus-acp" }
 chorus-cli = { path = "../chorus-cli" }
 chorus-core = { path = "../chorus-core" }
 chorus-daemon = { path = "../chorus-daemon" }
