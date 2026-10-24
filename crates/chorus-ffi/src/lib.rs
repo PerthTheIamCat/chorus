@@ -3914,6 +3914,35 @@ pub unsafe extern "C" fn chorus_git_status_json(ws: *const c_char) -> *mut c_cha
     }
 }
 
+/// Like `chorus_git_status_json`, but only files in `scope_json` (a JSON array
+/// of repo-relative paths the session changed; `null`/empty = no filtering) are
+/// listed, and the commit message draft uses `goal` (the user's request) when
+/// it is non-empty.
+///
+/// # Safety
+/// All pointers must be NUL-terminated strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_git_status_scoped_json(
+    ws: *const c_char,
+    scope_json: *const c_char,
+    goal: *const c_char,
+) -> *mut c_char {
+    let (Some(ws), Some(scope), Some(goal)) = (borrow(ws), borrow(scope_json), borrow(goal)) else {
+        return err("arguments must be valid UTF-8");
+    };
+    let scope: Option<Vec<String>> = serde_json::from_str(scope).ok().flatten();
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        chorus_core::gitflow::status_scoped(Path::new(ws), scope.as_deref()).map(|s| {
+            let suggestion = chorus_core::gitflow::suggest_message_with_goal(&s.files, goal);
+            serde_json::json!({"status": s, "suggestion": suggestion})
+        })
+    }));
+    match r {
+        Ok(v) => git_json(v, "git"),
+        Err(_) => err("panic in git status"),
+    }
+}
+
 /// `paths_json` is a JSON array of repo-relative paths to commit.
 ///
 /// # Safety
