@@ -164,6 +164,12 @@ impl HandoffReason {
             // `Agent::spawn` wraps a failed launch as `spawn ["cmd", …]`
             "spawn [",
             "command not found",
+            // The bridge's own JavaScript crashed mid-turn. Observed verbatim
+            // from claude-opus on 20 Oct 2026:
+            //   agent returned error: {"code":-32010,"message":"TypeError: cannot read property of undefined"}
+            // It is the bridge's bug, not the user's request — another agent
+            // in the chain can still answer.
+            "typeerror: cannot read propert",
             // hang (see `Agent::wait_for` idle watchdog)
             "agent stalled",
             "timed out",
