@@ -1,0 +1,309 @@
+[
+ {
+  "id": "01-func-name",
+  "direction": "claude->codex",
+  "passed": true,
+  "checks": [
+   true,
+   true,
+   true,
+   true
+  ],
+  "rc": [
+   0,
+   0
+  ],
+  "secs": [
+   15,
+   19
+  ],
+  "tail": ""
+ },
+ {
+  "id": "02-banned-lib",
+  "direction": "codex->claude",
+  "passed": true,
+  "checks": [
+   true,
+   true,
+   true
+  ],
+  "rc": [
+   0,
+   0
+  ],
+  "secs": [
+   19,
+   21
+  ],
+  "tail": ""
+ },
+ {
+  "id": "03-indent-style",
+  "direction": "claude->codex",
+  "passed": true,
+  "checks": [
+   true,
+   true,
+   true
+  ],
+  "rc": [
+   0,
+   0
+  ],
+  "secs": [
+   17,
+   19
+  ],
+  "tail": ""
+ },
+ {
+  "id": "04-config-key",
+  "direction": "codex->claude",
+  "passed": true,
+  "checks": [
+   true,
+   true
+  ],
+  "rc": [
+   0,
+   0
+  ],
+  "secs": [
+   20,
+   15
+  ],
+  "tail": ""
+ },
+ {
+  "id": "05-todo-list",
+  "direction": "claude->codex",
+  "passed": false,
+  "checks": [
+   true,
+   true,
+   true,
+   false
+  ],
+  "rc": [
+   0,
+   0
+  ],
+  "secs": [
+   23,
+   19
+  ],
+  "tail": " adding and listing multiple items, saved JSON contents, and `done` remaining unavailable. Checks ran in a temporary directory, leaving no `todo.json` in the workspace.\n\n\ud83c\udf31 graft saved ~0 tokens this turn, 1 call.\n\nstop: end_turn\ncontext: 27850 / 258400 (11%)\nledger: user seq 13 + 9 agent events\ncontinuing session 1 \u00b7 store /var/folders/h_/fz424_ws0fd_n432yb8m93dh0000gn/T/chorus-live-ou769gh3/s.db\n"
+ },
+ {
+  "id": "06-file-layout",
+  "direction": "codex->claude",
+  "passed": true,
+  "checks": [
+   true,
+   true,
+   true
+  ],
+  "rc": [
+   0,
+   0
+  ],
+  "secs": [
+   23,
+   21
+  ],
+  "tail": ""
+ },
+ {
+  "id": "07-error-type",
+  "direction": "claude->codex",
+  "passed": true,
+  "checks": [
+   true,
+   true,
+   true
+  ],
+  "rc": [
+   0,
+   0
+  ],
+  "secs": [
+   21,
+   26
+  ],
+  "tail": ""
+ },
+ {
+  "id": "08-seed-file",
+  "direction": "codex->claude",
+  "passed": true,
+  "checks": [
+   true,
+   true,
+   true
+  ],
+  "rc": [
+   0,
+   0
+  ],
+  "secs": [
+   21,
+   19
+  ],
+  "tail": ""
+ },
+ {
+  "id": "09-shell-script",
+  "direction": "claude->codex",
+  "passed": true,
+  "checks": [
+   true,
+   true,
+   true,
+   true
+  ],
+  "rc": [
+   0,
+   0
+  ],
+  "secs": [
+   22,
+   22
+  ],
+  "tail": ""
+ },
+ {
+  "id": "10-constant",
+  "direction": "codex->claude",
+  "passed": true,
+  "checks": [
+   true,
+   true,
+   true,
+   true
+  ],
+  "rc": [
+   0,
+   0
+  ],
+  "secs": [
+   23,
+   19
+  ],
+  "tail": ""
+ },
+ {
+  "id": "11-doc-language",
+  "direction": "claude->codex",
+  "passed": true,
+  "checks": [
+   true,
+   true
+  ],
+  "rc": [
+   0,
+   0
+  ],
+  "secs": [
+   22,
+   33
+  ],
+  "tail": ""
+ },
+ {
+  "id": "12-rename-plan",
+  "direction": "codex->claude",
+  "passed": true,
+  "checks": [
+   true,
+   true,
+   true,
+   true
+  ],
+  "rc": [
+   0,
+   0
+  ],
+  "secs": [
+   20,
+   18
+  ],
+  "tail": ""
+ },
+ {
+  "id": "13-test-framework",
+  "direction": "claude->codex",
+  "passed": true,
+  "checks": [
+   true,
+   true,
+   true,
+   true,
+   true
+  ],
+  "rc": [
+   0,
+   0
+  ],
+  "secs": [
+   20,
+   20
+  ],
+  "tail": ""
+ },
+ {
+  "id": "14-secret-handling",
+  "direction": "codex->claude",
+  "passed": true,
+  "checks": [
+   true,
+   true,
+   true,
+   true
+  ],
+  "rc": [
+   0,
+   0
+  ],
+  "secs": [
+   31,
+   20
+  ],
+  "tail": "",
+  "note": "re-run after fixing a check that matched \"os.environ\" as \".env\""
+ },
+ {
+  "id": "15-state-machine",
+  "direction": "claude->codex",
+  "passed": true,
+  "checks": [
+   true
+  ],
+  "rc": [
+   0,
+   0
+  ],
+  "secs": [
+   20,
+   15
+  ],
+  "tail": ""
+ },
+ {
+  "id": "16-csv-format",
+  "direction": "codex->claude",
+  "passed": true,
+  "checks": [
+   true
+  ],
+  "rc": [
+   0,
+   0
+  ],
+  "secs": [
+   24,
+   28
+  ],
+  "tail": ""
+ }
+]
