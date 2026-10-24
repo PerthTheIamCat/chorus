@@ -518,6 +518,7 @@ void chorus_term_close(uint64_t id);
 
 /* Commit -> push -> PR. {"ok":true,"git"|"commit"|"branch"|"url":...} */
 char *chorus_git_status_json(const char *ws);
+char *chorus_git_status_scoped_json(const char *ws, const char *scope_json, const char *goal);
 char *chorus_git_commit_json(const char *ws, const char *message, const char *paths_json);
 char *chorus_git_push_json(const char *ws);
 char *chorus_git_pr_json(const char *ws, const char *title, const char *body, const char *base);
