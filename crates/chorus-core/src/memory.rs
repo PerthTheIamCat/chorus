@@ -93,6 +93,87 @@ pub fn top(c: &Connection, scope: i64, k: usize) -> Result<Vec<Fact>> {
     Ok(facts)
 }
 
+/// Dimension of the hashed n-gram embedding below.
+const EMBED_DIM: usize = 256;
+
+/// A dependency-free text embedding: hashed character 2- and 3-grams, counted
+/// and L2-normalised. It needs no model, runs in microseconds, and — because
+/// it works on characters, not words — handles Thai (no spaces) and mixed
+/// Thai/English the same way. It is *lexical* similarity, not meaning: "login"
+/// finds "logging in" but not "authentication". A real embedding model can
+/// replace this behind the same [`relevant`] call.
+pub fn embed(text: &str) -> Vec<f32> {
+    let chars: Vec<char> = text.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+    let mut v = vec![0f32; EMBED_DIM];
+    for n in [2usize, 3] {
+        for w in chars.windows(n) {
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            for c in w {
+                h = (h ^ *c as u64).wrapping_mul(0x100_0000_01b3);
+            }
+            v[(h % EMBED_DIM as u64) as usize] += 1.0;
+        }
+    }
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        v.iter_mut().for_each(|x| *x /= norm);
+    }
+    v
+}
+
+/// Facts for `scope` ranked by relevance to `query`: pinned facts always
+/// come first, then the best matches above a similarity floor, then — if
+/// there is still room — the usual most-used order. An empty query is the
+/// same as [`top`].
+pub fn relevant(c: &Connection, scope: i64, query: &str, k: usize) -> Result<Vec<Fact>> {
+    if query.trim().is_empty() || k == 0 {
+        return top(c, scope, k);
+    }
+    const FLOOR: f32 = 0.18;
+    let mut stmt = c.prepare(
+        "SELECT id, scope, text, pinned, hits FROM fact WHERE scope = ?1
+         ORDER BY pinned DESC, hits DESC, created_ms DESC",
+    )?;
+    let all: Vec<Fact> = stmt
+        .query_map([scope], |r| {
+            Ok(Fact {
+                id: r.get(0)?,
+                scope: r.get(1)?,
+                text: r.get(2)?,
+                pinned: r.get::<_, i64>(3)? != 0,
+                hits: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let q = embed(query);
+    let mut scored: Vec<(f32, Fact)> = all
+        .into_iter()
+        .map(|f| (crate::VectorOps::cosine_similarity(&q, &embed(&f.text)), f))
+        .collect();
+    let mut picked: Vec<Fact> = Vec::new();
+    // Pinned first (already in hits order), then relevance, then the old order.
+    for (_, f) in scored.iter().filter(|(_, f)| f.pinned) {
+        picked.push(f.clone());
+    }
+    let mut hits: Vec<&(f32, Fact)> = scored.iter().filter(|(s, f)| !f.pinned && *s >= FLOOR).collect();
+    hits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    for (_, f) in hits {
+        picked.push(f.clone());
+    }
+    for (_, f) in scored.drain(..) {
+        if !picked.iter().any(|p| p.id == f.id) {
+            picked.push(f);
+        }
+    }
+    picked.truncate(k);
+    let now = now_ms();
+    for f in &mut picked {
+        c.execute("UPDATE fact SET hits = hits + 1, last_used_ms = ?1 WHERE id = ?2", (now, f.id))?;
+        f.hits += 1;
+    }
+    Ok(picked)
+}
+
 /// Render facts as the format sent to the model: plain markdown bullets and
 /// nothing else. No ids, confidence, or timestamps — that metadata is never
 /// used by the model and stripping it is the whole point.

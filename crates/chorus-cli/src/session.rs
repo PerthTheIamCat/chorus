@@ -1903,7 +1903,15 @@ impl Session {
             );
         }
 
-        let facts = memory::top(self.mem_store().conn(), 1, 12)?;
+        // Facts relevant to what the user last said come first; with no user
+        // message yet this is the plain most-used order.
+        let query = bodies
+            .iter()
+            .rev()
+            .find(|(e, _)| e.kind == EventKind::Msg && e.actor == self.user)
+            .map(|(_, b)| b.as_str())
+            .unwrap_or("");
+        let facts = memory::relevant(self.mem_store().conn(), 1, query, 12)?;
         let memory_items: Vec<ContextItem> = memory::render(&facts)
             .lines()
             .filter(|l| !l.trim().is_empty())
