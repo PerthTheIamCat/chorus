@@ -501,7 +501,10 @@ fn a_real_error_is_not_routed_around() {
         AgentSpec {
             name: "claude-opus".into(),
             provider: "anthropic".into(),
-            bridge: failing_bridge("TypeError: cannot read property of undefined"),
+            // A request every agent would reject the same way. (A bridge's own
+            // `TypeError` crash used to stand here; it fails over since #23 —
+            // that is one bridge's bug, and the next agent can still answer.)
+            bridge: failing_bridge("Invalid params: prompt[0].type must be one of text, image, resource"),
         },
         AgentSpec {
             name: "codex".into(),
@@ -1361,5 +1364,28 @@ fn a_model_refusal_dressed_as_an_answer_relays_to_the_next_agent() {
         .expect("relay runs");
     assert_eq!(r.answered_by, "claude", "the refusal was taken as the answer");
     assert_eq!(r.handoffs.len(), 1);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The other half of `a_real_error_is_not_routed_around`: a bridge's own
+/// JavaScript crash (verbatim from claude-opus, 20 Oct 2026) is that one
+/// bridge's bug, so the next agent in the chain answers.
+#[test]
+fn a_bridge_crash_relays_to_the_next_agent() {
+    let tmp = std::env::temp_dir().join(format!("chorus-relay-crash-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let db = tmp.join("store.db");
+    let _ = std::fs::remove_file(&db);
+    let mut s = Session::create(&db, &tmp, "relay crash").unwrap();
+    let chain = vec![
+        AgentSpec {
+            name: "claude-opus".into(),
+            provider: "anthropic".into(),
+            bridge: failing_bridge("TypeError: cannot read property of undefined"),
+        },
+        AgentSpec { name: "codex".into(), provider: "openai".into(), bridge: mock_bridge() },
+    ];
+    let r = s.run_relay(&chain, "do the work", Policy::AllowAll).expect("relays");
+    assert_eq!(r.answered_by, "codex");
     let _ = std::fs::remove_dir_all(&tmp);
 }
