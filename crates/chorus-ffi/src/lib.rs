@@ -4242,7 +4242,11 @@ mod tests {
         assert!(!ws.join("ran").exists() && !ws.join("target").exists());
 
         store.set_trusted(&ws, true).unwrap();
-        if cfg!(target_os = "macos") && chorus_core::trust::which("rust-analyzer").is_some() {
+        // `which` is not enough: rustup installs a `rust-analyzer` shim even
+        // when the component is missing (CI), and the shim exits at once.
+        let works = chorus_core::trust::which("rust-analyzer")
+            .is_some_and(|b| std::process::Command::new(b).arg("--version").output().is_ok_and(|o| o.status.success()));
+        if cfg!(target_os = "macos") && works {
             let r = lsp_diagnostics_with(&store, &ws, &files).expect("diagnostics");
             assert_eq!(r["checker_used"], "lsp:rust-analyzer", "{r}");
             let msgs = r["diagnostics"].to_string();

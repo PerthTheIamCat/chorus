@@ -306,10 +306,13 @@ impl LspSession {
         let deadline = Instant::now() + timeout;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
-            let msg = self
-                .rx
-                .recv_timeout(left)
-                .map_err(|_| ChorusError::Invalid("language server did not answer in time".into()))?;
+            let msg = self.rx.recv_timeout(left).map_err(|e| {
+                ChorusError::Invalid(match e {
+                    // A rustup shim without the component, a crash on start…
+                    mpsc::RecvTimeoutError::Disconnected => "language server exited before answering".into(),
+                    mpsc::RecvTimeoutError::Timeout => "language server did not answer in time".into(),
+                })
+            })?;
             if msg.get("method").is_some() {
                 self.answer_server_request(&msg);
             } else if msg["id"] == json!(id) {
