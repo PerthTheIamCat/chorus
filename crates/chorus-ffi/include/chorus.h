@@ -165,6 +165,10 @@ char *chorus_list_skills(const char *cwd);
 char *chorus_usage_report(void);
 char *chorus_add_account(const char *agent, const char *name);
 char *chorus_remove_account(const char *agent, const char *name);
+/* spec = {"label","icon","color","slug"?} -> {"ok":true,"name","dir","login"} */
+char *chorus_create_account(const char *agent, const char *spec);
+/* name "" = the CLI's own login; look = {"label","icon","color"} (missing = cleared) */
+char *chorus_set_account_look(const char *agent, const char *name, const char *look);
 
 /* Rename / delete a session by store path (no open engine needed). {"ok":true} */
 char *chorus_rename_session(const char *db_path, int64_t id, const char *title);

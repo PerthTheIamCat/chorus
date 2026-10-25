@@ -108,6 +108,111 @@ pub fn session_roots() -> Vec<chorus_core::external_sessions::Root> {
     out
 }
 
+/// How an account looks in the UI: a name the user chose (any language),
+/// an icon key and an accent colour. Purely cosmetic — the account's
+/// identity stays the directory name, so renaming never touches a login or
+/// a relay chain that already says `claude@work`. Stored next to the login
+/// so removing the account removes it too.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Meta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// `provider`, or `sf:<symbol>` — the shell decides what each means.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// `#RRGGBB`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+const META_FILE: &str = "chorus-account.json";
+
+fn meta_path(agent: &str, account: Option<&str>) -> Option<PathBuf> {
+    match account {
+        Some(a) => dir(agent, Some(a)).map(|d| d.join(META_FILE)),
+        // The CLI's own login lives outside our tree; keep its look beside
+        // the extra accounts, where `list` ignores plain files.
+        None => root(agent).map(|r| r.join(".default.json")),
+    }
+}
+
+impl Meta {
+    /// Trim, drop empties and anything that is not what the UI can draw.
+    pub fn cleaned(mut self) -> Meta {
+        self.label = self
+            .label
+            .map(|l| l.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(40).collect::<String>())
+            .filter(|l| !l.is_empty());
+        self.icon = self
+            .icon
+            .map(|i| i.trim().to_string())
+            .filter(|i| {
+                !i.is_empty()
+                    && i.len() <= 40
+                    && i.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':'))
+            });
+        self.color = self.color.map(|c| c.trim().to_string()).filter(|c| {
+            c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|x| x.is_ascii_hexdigit())
+        });
+        self
+    }
+}
+
+/// The saved look of an account; default when none was set.
+pub fn meta(agent: &str, account: Option<&str>) -> Meta {
+    meta_path(agent, account)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<Meta>(&s).ok())
+        .map(Meta::cleaned)
+        .unwrap_or_default()
+}
+
+/// Save an account's look (an all-empty `Meta` clears it).
+pub fn set_meta(agent: &str, account: Option<&str>, m: Meta) -> anyhow::Result<()> {
+    if let Some(a) = account {
+        anyhow::ensure!(valid_name(a), "invalid account name");
+    }
+    let p = meta_path(agent, account).ok_or_else(|| anyhow::anyhow!("no HOME"))?;
+    let m = m.cleaned();
+    if m == Meta::default() {
+        let _ = std::fs::remove_file(&p);
+        return Ok(());
+    }
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(p, serde_json::to_string(&m)?)?;
+    Ok(())
+}
+
+/// A directory name for a new account: `wanted` (or the label's ASCII
+/// letters/digits) made valid and not already taken.
+pub fn free_name(agent: &str, wanted: Option<&str>, label: Option<&str>) -> String {
+    let slug = |s: &str| {
+        let mut out = String::new();
+        for c in s.chars() {
+            if c.is_ascii_alphanumeric() {
+                out.push(c.to_ascii_lowercase());
+            } else if !out.is_empty() && !out.ends_with('-') {
+                out.push('-');
+            }
+        }
+        out.trim_end_matches('-').chars().take(30).collect::<String>()
+    };
+    let mut base = wanted.map(slug).filter(|s| !s.is_empty()).or_else(|| label.map(slug).filter(|s| !s.is_empty())).unwrap_or_default();
+    if base.is_empty() {
+        base = "account".to_string();
+    }
+    let taken = list(agent);
+    if !taken.contains(&base) {
+        return base;
+    }
+    (2..)
+        .map(|n| format!("{base}-{n}"))
+        .find(|c| !taken.contains(c))
+        .expect("unbounded range")
+}
+
 /// Create an account's (empty) config dir. Logging in fills it.
 pub fn add(agent: &str, account: &str) -> anyhow::Result<PathBuf> {
     anyhow::ensure!(valid_name(account), "ชื่อบัญชีใช้ได้แค่ a-z 0-9 - _ (ไม่เกิน 40 ตัว)");
