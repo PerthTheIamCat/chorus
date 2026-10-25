@@ -122,6 +122,7 @@ struct ContentView: View {
     @State private var compareOutput: String?
     @State private var inspected: (text: String, tokens: Int64)?
     @State private var lastPrompt = ""
+    @State private var comparing = false
 
     @State private var rightTab = RightTab.context
     @State private var showPalette = false
@@ -2173,6 +2174,17 @@ struct ContentView: View {
                 } else {
                     ModelPicker(model: $model, onNeedsLogin: { settingsSection = .agents; showSettings = true })
                 }
+                if engine.agents.filter(\.ready).count > 1 {
+                    Button { runCompare() } label: {
+                        CompactLabel(text: comparing ? "กำลังเทียบ…" : "เทียบ agent", spacing: 3) {
+                            if comparing { ProgressView().controlSize(.mini) } else { Image(systemName: "square.split.2x1") }
+                        }
+                        .font(.caption.weight(.medium))
+                    }
+                    .buttonStyle(InteractiveStyle(cornerRadius: 7, padding: .init(top: 4, leading: 8, bottom: 4, trailing: 8)))
+                    .disabled(engine.sessionID < 0 || engine.busy || comparing)
+                    .help("ถามทุก agent ที่พร้อมด้วยคำถามล่าสุด แล้วเทียบคำตอบ ไฟล์ที่แก้ เวลา และค่าใช้จ่าย (⇧⌘K)")
+                }
             }
         }
         .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 10)
@@ -2702,12 +2714,13 @@ struct ContentView: View {
 
     private func runCompare() {
         let others = engine.agents.filter(\.ready).map(\.id)
-        guard others.count > 1, engine.sessionID >= 0 else { return }
+        guard others.count > 1, engine.sessionID >= 0, !comparing else { return }
+        comparing = true
         engine.compare(
             lastPrompt.isEmpty ? "ทบทวนงานที่ค้างอยู่แล้วเสนอขั้นต่อไป" : lastPrompt,
             agents: others.joined(separator: ","),
             level: max(permission.rawValue, 0)
-        ) { compareOutput = $0 }
+        ) { comparing = false; compareOutput = $0 }
     }
 
     // MARK: command palette (⌘K)
@@ -4120,6 +4133,13 @@ struct CompareResultsSheet: View {
         let message: String
         let stop_reason: String
         let error: String?
+        // Absent in payloads from an older engine.
+        var diff: String? = nil
+        var elapsed_ms: Int64? = nil
+        var context_used: Int64? = nil
+        var worktree: String? = nil
+        var worktree_branch: String? = nil
+        var cost_usd: Double? = nil
         var id: Int64 { session_id }
     }
     struct Payload: Codable { let ok: Bool?; let branches: [Branch]? ; let error: String? }
@@ -4129,37 +4149,101 @@ struct CompareResultsSheet: View {
         return try? JSONDecoder().decode(Payload.self, from: d)
     }
 
+    /// "1m 05s" / "12.3s".
+    static func duration(_ ms: Int64) -> String {
+        let s = Double(ms) / 1000
+        return s < 60 ? String(format: "%.1fs", s) : String(format: "%dm %02ds", Int(s) / 60, Int(s) % 60)
+    }
+
+    static func compactCount(_ n: Int64) -> String {
+        n >= 1000 ? String(format: "%.1fk", Double(n) / 1000) : "\(n)"
+    }
+
+    /// Agents answer in Markdown (file links included), so render it; fall
+    /// back to the raw text if it does not parse.
+    static func markdown(_ text: String) -> AttributedString {
+        let opts = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: text, options: opts)) ?? AttributedString(text)
+    }
+
+    /// Stats line for one column: time · context tokens · cost.
+    static func stats(_ b: Branch) -> String {
+        var parts: [String] = []
+        if let ms = b.elapsed_ms, ms > 0 { parts.append(duration(ms)) }
+        if let ctx = b.context_used, ctx > 0 { parts.append("\(compactCount(ctx)) tokens") }
+        if let c = b.cost_usd { parts.append(String(format: "$%.4f", c)) }
+        return parts.joined(separator: " · ")
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Compare").font(.title3.bold())
             if let err = payload?.error {
                 Text(err).foregroundStyle(.red)
             }
-            ScrollView {
+            ScrollView([.horizontal, .vertical]) {
                 HStack(alignment: .top, spacing: 12) {
-                    ForEach(payload?.branches ?? []) { b in
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(b.agent).font(.headline)
-                            Text("resume: --session \(b.session_id)")
-                                .font(.caption2).foregroundStyle(.secondary)
-                            Divider()
-                            if let e = b.error {
-                                Text(e).font(.caption).foregroundStyle(.red)
-                            } else {
-                                Text(b.message).font(.callout).textSelection(.enabled)
-                                Text("[\(b.stop_reason)]").font(.caption2).foregroundStyle(.tertiary)
-                            }
-                        }
-                        .frame(width: 260, alignment: .leading)
-                        .padding(10)
-                        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
-                    }
+                    ForEach(payload?.branches ?? []) { b in column(b) }
                 }
             }
             HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
         }
         .padding(20)
-        .frame(minWidth: 560, minHeight: 320)
+        .frame(minWidth: 620, minHeight: 360)
+    }
+
+    @ViewBuilder private func column(_ b: Branch) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(b.agent).font(.headline)
+            let stats = Self.stats(b)
+            if !stats.isEmpty {
+                Text(stats).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            Text("resume: --session \(b.session_id)")
+                .font(.caption2).foregroundStyle(.secondary)
+            if let wt = b.worktree {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: wt)])
+                } label: {
+                    Label("สำเนาแยกของ agent นี้ — เปิดใน Finder", systemImage: "folder").font(.caption2)
+                }
+                .buttonStyle(.link)
+                .help("\(wt)\nbranch \(b.worktree_branch ?? "")")
+            }
+            Divider()
+            if let e = b.error {
+                Text(e).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+            } else {
+                Text(Self.markdown(b.message)).font(.callout).textSelection(.enabled)
+                Text("[\(b.stop_reason)]").font(.caption2).foregroundStyle(.tertiary)
+            }
+            if let diff = b.diff, !diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let hunks = parseHunks(diff)
+                let files = Set(hunks.map(\.file)).count
+                let adds = hunks.reduce(0) { $0 + $1.addCount }, dels = hunks.reduce(0) { $0 + $1.delCount }
+                DisclosureGroup {
+                    ScrollView(.horizontal) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(diff.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
+                                Text(line.isEmpty ? " " : line)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(line.hasPrefix("+") && !line.hasPrefix("+++") ? Color.green
+                                        : line.hasPrefix("-") && !line.hasPrefix("---") ? Color.red : .secondary)
+                            }
+                        }
+                        .textSelection(.enabled)
+                    }
+                    .frame(maxHeight: 220)
+                } label: {
+                    Label("\(files) ไฟล์ · +\(adds) −\(dels)", systemImage: "doc.badge.gearshape").font(.caption.weight(.medium))
+                }
+            } else if b.error == nil, b.diff != nil {
+                Text("ไม่ได้แก้ไฟล์").font(.caption2).foregroundStyle(.tertiary)
+            }
+        }
+        .frame(width: 280, alignment: .leading)
+        .padding(10)
+        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

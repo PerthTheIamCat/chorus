@@ -218,9 +218,18 @@ fn compare_cmd(args: &[String]) -> Result<()> {
             "\n── {} · resume with --session {} ──────────────",
             b.agent, b.session_id
         );
+        let cost = b.cost_usd.map(|c| format!(" · ${c:.4}")).unwrap_or_default();
+        let ctx = b.context_used.map(|c| format!(" · {c} tokens in context")).unwrap_or_default();
+        println!("{:.1}s{ctx}{cost}", b.elapsed_ms as f64 / 1000.0);
         match b.result {
             Ok((msg, stop)) => println!("{}\n[{stop}]", msg.trim()),
             Err(e) => println!("failed: {e:#}"),
+        }
+        if let Some(w) = &b.worktree {
+            println!("worktree: {w}");
+        }
+        if !b.diff.trim().is_empty() {
+            println!("\n{}", b.diff.trim_end());
         }
     }
     Ok(())

@@ -1679,6 +1679,12 @@ struct CompareBranchJson {
     message: String,
     stop_reason: String,
     error: Option<String>,
+    diff: String,
+    elapsed_ms: u64,
+    context_used: Option<i64>,
+    cost_usd: Option<f64>,
+    worktree: Option<String>,
+    worktree_branch: Option<String>,
 }
 
 /// Compare mode: fork per agent, run `prompt` on each, return each branch.
@@ -1712,21 +1718,24 @@ pub unsafe extern "C" fn chorus_compare(
             ok: true,
             branches: branches
                 .into_iter()
-                .map(|b| match b.result {
-                    Ok((message, stop_reason)) => CompareBranchJson {
+                .map(|b| {
+                    let (message, stop_reason, error) = match b.result {
+                        Ok((m, r)) => (m, r, None),
+                        Err(e) => (String::new(), String::new(), Some(format!("{e:#}"))),
+                    };
+                    CompareBranchJson {
                         agent: b.agent,
                         session_id: b.session_id,
                         message,
                         stop_reason,
-                        error: None,
-                    },
-                    Err(e) => CompareBranchJson {
-                        agent: b.agent,
-                        session_id: b.session_id,
-                        message: String::new(),
-                        stop_reason: String::new(),
-                        error: Some(format!("{e:#}")),
-                    },
+                        error,
+                        diff: b.diff,
+                        elapsed_ms: b.elapsed_ms,
+                        context_used: b.context_used,
+                        cost_usd: b.cost_usd,
+                        worktree: b.worktree,
+                        worktree_branch: b.worktree_branch,
+                    }
                 })
                 .collect(),
         })
