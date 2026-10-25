@@ -472,6 +472,7 @@ char *chorus_checkpoint_list_json(const char *db, int64_t session_id);
 char *chorus_checkpoint_rewind_json(const char *db, const char *ws, int64_t session_id, int64_t target_seq, const char *mode);
 char *chorus_repo_map_generate_json(const char *ws, uint32_t max_tokens);
 char *chorus_verify_workspace_json(const char *ws);
+char *chorus_lsp_diagnostics_json(const char *ws, const char *files_json);
 /* "Trust this project": checks and hooks run only when true. {"ok","trusted"} */
 char *chorus_project_trusted_json(const char *ws);
 char *chorus_set_project_trusted(const char *ws, bool trusted);

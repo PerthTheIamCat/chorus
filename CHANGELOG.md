@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **ตรวจไฟล์ที่แก้ด้วย language server:** ปุ่ม "LSP" ในหน้ารีวิวการเปลี่ยนแปลง ตรวจเฉพาะไฟล์ที่ session นี้แก้ด้วย rust-analyzer, typescript-language-server, pyright, sourcekit-lsp หรือ gopls (ตัวที่ติดตั้งไว้ในเครื่อง ตัวที่ไม่มีข้ามไปและบอกให้) · ต้อง "trust โปรเจกต์" และรันใต้ sandbox เหมือนปุ่ม Verify เพราะ language server รัน build script ของโปรเจกต์ · ตั้งเวลารอได้ด้วย `CHORUS_LSP_WAIT_SECS` (ค่าเริ่มต้น 25 วินาที)
+
 ## [0.2.2] - 2026-10-25
 
 ### Added

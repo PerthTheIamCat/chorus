@@ -3042,6 +3042,21 @@ final class Engine: ObservableObject {
         }
     }
 
+    /// Language-server diagnostics for `files` (relative to `ws`), computed by
+    /// the Rust core under the same trust and sandbox as `verifyWorkspace`.
+    func lspDiagnostics(ws: String, files: [String], completion: @escaping (VerificationData?, String?) -> Void) {
+        guard !ws.isEmpty, !files.isEmpty else { completion(nil, "ไม่มีไฟล์ที่เปลี่ยนให้ตรวจ"); return }
+        let filesJSON = Self.jsonArray(files)
+        ioQueue.async {
+            let json = ws.withCString { cWs in filesJSON.withCString { Self.string(from: chorus_lsp_diagnostics_json(cWs, $0)) } }
+            let res = Self.decode(VerifyWorkspaceResponse.self, json)
+            DispatchQueue.main.async {
+                if res?.ok == true { completion(res?.verification, nil) }
+                else { completion(nil, res?.error ?? "ตรวจด้วย language server ไม่สำเร็จ") }
+            }
+        }
+    }
+
     /// "Trust this project": the Rust core runs checks and hooks only when on.
     @Published public var projectTrusted: Bool = false
 
