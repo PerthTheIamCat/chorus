@@ -117,6 +117,7 @@ struct ContentView: View {
     /// Cleared when they scroll up on purpose; set again by scrolling back
     /// down, sending, or opening a session.
     @State private var chatPinned = true
+    @State private var chatSnapshots = ChatSnapshotCache()
     @State private var chatLastMinY: CGFloat = 0
     @State private var settingsSection = SettingsSheet.Section.accounts
     @State private var compareOutput: String?
@@ -1766,6 +1767,16 @@ struct ContentView: View {
     // MARK: thread — the ledger, plus the compose box
 
     @ViewBuilder
+    private func rowForItem(_ item: ChatItem, snap: ChatSnapshot) -> some View {
+        switch item {
+        case .event(let ev):
+            rowForEvent(ev, atts: snap.attachments[ev.seq] ?? [], lastAgentMsg: snap.lastAgentMsg)
+        case .tools(let evs):
+            ToolGroupRow(events: evs).id(item.id)
+        }
+    }
+
+    @ViewBuilder
     private func rowForEvent(_ ev: LedgerEvent, atts: [SessionAttachment], lastAgentMsg: Int64?) -> some View {
         let isUser = ev.actor == "user"
         let isLastAgentMsg = !engine.busy
@@ -1781,6 +1792,7 @@ struct ContentView: View {
                  // Echoed rows (negative seq) aren't in the ledger yet.
                  onRewind: isUser && ev.kind == "msg" && ev.seq > 0
                      ? { code in rewindChat(before: ev.seq, code: code) } : nil)
+            .equatable()
             .id(ev.seq)
     }
 
@@ -1797,13 +1809,15 @@ struct ContentView: View {
                 GeometryReader { viewport in
                     ScrollViewReader { proxy in
                         ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 14) {
-                                // Looked up once per render, not once per row.
-                                let attsBySeq = Dictionary(grouping: engine.attachments.filter { $0.event_seq != nil },
-                                                           by: { $0.event_seq! })
-                                let lastAgentMsg = engine.events.last(where: { $0.actor != "user" && $0.kind == "msg" })?.id
-                                ForEach(engine.events) { ev in
-                                    rowForEvent(ev, atts: attsBySeq[ev.seq] ?? [], lastAgentMsg: lastAgentMsg)
+                            LazyVStack(alignment: .leading, spacing: 16) {
+                                // Grouped and indexed once per change of the ledger,
+                                // not once per render.
+                                let snap = chatSnapshots.snapshot(events: engine.events, attachments: engine.attachments)
+                                ForEach(snap.items) { item in
+                                    rowForItem(item, snap: snap)
+                                        .transition(.asymmetric(
+                                            insertion: .opacity.combined(with: .offset(y: 8)),
+                                            removal: .opacity))
                                 }
                                 if engine.busy {
                                     WorkingRow(stream: engine.liveStream,
@@ -1817,10 +1831,16 @@ struct ContentView: View {
                                                    }
                                                })
                                         .id("working")
+                                        .transition(.opacity.combined(with: .offset(y: 8)))
                                 }
                                 orchestraStatusSection
                                 Color.clear.frame(height: 1).id("chatBottom")
                             }
+                            .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.88),
+                                       value: engine.busy)
+                            .animation(!reduceMotion && chatSnapshots.snapshot(events: engine.events, attachments: engine.attachments).animate
+                                        ? .spring(response: 0.35, dampingFraction: 0.88) : nil,
+                                       value: engine.events.count)
                             .frame(maxWidth: 820)
                             .frame(maxWidth: .infinity)
                             .padding(.horizontal, 20).padding(.vertical, 16)
@@ -1865,6 +1885,29 @@ struct ContentView: View {
                             }
                         }
                         .chorusScrollIndicators()
+                        .overlay(alignment: .bottom) {
+                            Group {
+                                if !chatPinned {
+                                    Button {
+                                        chatPinned = true
+                                        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                                            proxy.scrollTo("chatBottom", anchor: .bottom)
+                                        }
+                                    } label: {
+                                        Image(systemName: "arrow.down")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .padding(9)
+                                            .background(.regularMaterial, in: Circle())
+                                            .overlay(Circle().stroke(Color.primary.opacity(0.1), lineWidth: 1))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("ไปที่ข้อความล่าสุด")
+                                    .padding(.bottom, 10)
+                                    .transition(.scale(scale: 0.8).combined(with: .opacity))
+                                }
+                            }
+                            .animation(.spring(response: 0.3, dampingFraction: 0.8), value: chatPinned)
+                        }
                     }
                 }
             }
@@ -3883,7 +3926,7 @@ private struct RewindMenu: ViewModifier {
     }
 }
 
-struct EventRow: View {
+struct EventRow: View, Equatable {
     let event: LedgerEvent
     var attachments: [SessionAttachment] = []
     var agents: [Engine.AgentInfo] = []
@@ -3892,6 +3935,13 @@ struct EventRow: View {
     /// Set on the user's own messages: rewind to just before it
     /// (`true` = files too). Rust does the work; this only asks.
     var onRewind: ((Bool) -> Void)? = nil
+
+    /// Rows re-render far more often than their content changes (every engine
+    /// publish); closures are rebuilt each time and not compared.
+    static func == (l: EventRow, r: EventRow) -> Bool {
+        l.event == r.event && l.attachments == r.attachments
+            && l.thoughts == r.thoughts && l.agents == r.agents
+    }
 
     @State private var isHovered = false
     @State private var confirmFileRewind = false
@@ -3932,21 +3982,37 @@ struct EventRow: View {
         }
     }
 
-    // Keep role and provider identity visible for every turn, even when an
-    // agent changes during a handoff.
+    // Chat layout: the user's words sit on the right in an accent bubble; an
+    // agent turn sits on the left behind its avatar, with who answered (and
+    // after a handoff, who took over) in the header above the bubble.
     private var message: some View {
-        VStack(alignment: isUser ? .trailing : .leading, spacing: 5) {
-            HStack(spacing: 6) {
-                if isUser {
-                    if isHovered {
-                        copyButton
-                            .transition(.opacity)
-                    }
-                    Text("คุณ").foregroundStyle(.secondary)
-                    Image(systemName: "person.crop.circle.fill")
-                        .foregroundStyle(Color.accentColor)
-                } else {
-                    ProviderIcon(provider: providerID, size: 16)
+        Group {
+            if isUser { userMessage } else { agentMessage }
+        }
+        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+        .onHover { h in withAnimation(.easeOut(duration: 0.15)) { isHovered = h } }
+    }
+
+    private var userMessage: some View {
+        HStack(alignment: .bottom, spacing: 6) {
+            Spacer(minLength: 56)
+            copyButton
+                .opacity(isHovered ? 1 : 0)
+                .allowsHitTesting(isHovered)
+            VStack(alignment: .trailing, spacing: 4) {
+                bubble
+                attachmentChips
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("คุณ")
+    }
+
+    private var agentMessage: some View {
+        HStack(alignment: .top, spacing: 10) {
+            AgentAvatar(provider: providerID)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
                     Text(agent?.label ?? event.actor).foregroundStyle(.primary.opacity(0.88))
                     if let modelLabel {
                         Text(modelLabel)
@@ -3964,57 +4030,57 @@ struct EventRow: View {
                             .help("มูลค่าเทียบ API ของเทิร์นนี้: $\(String(format: "%.4f", cost)) USD")
                     }
                     Spacer(minLength: 0)
-                    if isHovered {
-                        copyButton
-                            .transition(.opacity)
-                    }
+                    copyButton
+                        .opacity(isHovered ? 1 : 0)
+                        .allowsHitTesting(isHovered)
                 }
-            }
-            .font(.caption.weight(.semibold))
-            .frame(maxWidth: isUser ? 680 : .infinity, alignment: isUser ? .trailing : .leading)
+                .font(.caption.weight(.semibold))
 
-            if !isUser, let thoughts, !thoughts.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                ThinkingBlock(text: thoughts, running: false)
-            }
-
-            MarkdownText(text: event.body)
-                .padding(.horizontal, 14).padding(.vertical, 10)
-                .background(
-                    isUser
-                        ? AnyShapeStyle(LinearGradient(colors: [Color.accentColor.opacity(0.18), Color.accentColor.opacity(0.12)],
-                                                      startPoint: .topLeading, endPoint: .bottomTrailing))
-                        : AnyShapeStyle(Color(nsColor: .controlBackgroundColor).opacity(0.55)),
-                    in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .stroke(isUser ? Color.accentColor.opacity(0.24) : Color.primary.opacity(0.07), lineWidth: 1)
-                )
-                .shadow(color: .black.opacity(isUser ? 0.04 : 0.03), radius: 6, y: 2)
-                .frame(maxWidth: isUser ? 680 : .infinity, alignment: isUser ? .trailing : .leading)
-                .modifier(RewindMenu(onRewind: onRewind, confirmFiles: $confirmFileRewind))
-
-            if !attachments.isEmpty {
-                ForEach(attachments) { file in
-                    HStack(spacing: 6) {
-                        Image(systemName: file.status == "deleted" ? "doc.badge.xmark" : "paperclip")
-                        Text(file.name).lineLimit(1)
-                        if file.status == "deleted" {
-                            Text("ลบแล้ว").foregroundStyle(.secondary)
-                        } else {
-                            Button("ลบ", role: .destructive) { onDeleteAttachment(file.id) }
-                                .buttonStyle(.link)
-                                .accessibilityLabel("ลบไฟล์ \(file.name) จาก session")
-                        }
-                    }
-                    .font(.caption)
-                    .padding(.horizontal, 8).padding(.vertical, 4)
-                    .background(Color.primary.opacity(0.06), in: Capsule())
+                if let thoughts, !thoughts.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    ThinkingBlock(text: thoughts, running: false)
                 }
+
+                bubble
+                attachmentChips
             }
+            Spacer(minLength: 24)
         }
-        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
-        .onHover { h in withAnimation(.spring(response: 0.2, dampingFraction: 0.8)) { isHovered = h } }
+    }
+
+    private var bubble: some View {
+        let shape = chatBubbleShape(isUser: isUser)
+        return MarkdownText(text: event.body, hug: true)
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .background(
+                isUser
+                    ? AnyShapeStyle(LinearGradient(colors: [Color.accentColor.opacity(0.20), Color.accentColor.opacity(0.13)],
+                                                  startPoint: .topLeading, endPoint: .bottomTrailing))
+                    : AnyShapeStyle(Color(nsColor: .controlBackgroundColor).opacity(0.55)),
+                in: shape
+            )
+            .overlay(shape.stroke(isUser ? Color.accentColor.opacity(0.24) : Color.primary.opacity(0.07), lineWidth: 1))
+            .frame(maxWidth: isUser ? 560 : 720, alignment: isUser ? .trailing : .leading)
+            .modifier(RewindMenu(onRewind: onRewind, confirmFiles: $confirmFileRewind))
+    }
+
+    @ViewBuilder
+    private var attachmentChips: some View {
+        ForEach(attachments) { file in
+            HStack(spacing: 6) {
+                Image(systemName: file.status == "deleted" ? "doc.badge.xmark" : "paperclip")
+                Text(file.name).lineLimit(1)
+                if file.status == "deleted" {
+                    Text("ลบแล้ว").foregroundStyle(.secondary)
+                } else {
+                    Button("ลบ", role: .destructive) { onDeleteAttachment(file.id) }
+                        .buttonStyle(.link)
+                        .accessibilityLabel("ลบไฟล์ \(file.name) จาก session")
+                }
+            }
+            .font(.caption)
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(Color.primary.opacity(0.06), in: Capsule())
+        }
     }
 
     private var copyButton: some View {
@@ -4588,66 +4654,63 @@ struct WorkingRow: View {
 
     var body: some View {
         let live = stream.turn
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 7) {
-                ProviderIcon(provider: agentID, size: 16)
-                Text(agentLabel)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                ProgressView().controlSize(.mini)
-                Spacer()
-                if let t = startedAt {
-                    TurnTimerView(startedAt: t, isEmpty: live.isEmpty)
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.tertiary)
-                }
-                Button(action: onStop) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "stop.fill").font(.system(size: 8))
-                        Text("หยุด")
-                    }
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.red)
-                    .padding(.horizontal, 8).padding(.vertical, 3.5)
-                    .background(Color.red.opacity(0.08), in: Capsule())
-                }
-                .buttonStyle(.plain)
-                .help("หยุดเทิร์นนี้ (⌘.) — ล้างคิวด้วย")
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            if !live.thoughts.isEmpty {
-                ThinkingBlock(text: live.thoughts, running: live.message.isEmpty)
-            }
-
-            ForEach(live.tools) { t in
+        let shape = chatBubbleShape(isUser: false)
+        return HStack(alignment: .top, spacing: 10) {
+            AgentAvatar(provider: agentID)
+            VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 7) {
-                    switch t.state {
-                    case "running": ProgressView().controlSize(.mini)
-                    case "failed": Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
-                    default: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    Text(agentLabel)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.primary.opacity(0.88))
+                    Spacer(minLength: 0)
+                    if let t = startedAt {
+                        TurnTimerView(startedAt: t, isEmpty: live.isEmpty)
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.tertiary)
                     }
-                    Text(t.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Button(action: onStop) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "stop.fill").font(.system(size: 8))
+                            Text("หยุด")
+                        }
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.red)
+                        .padding(.horizontal, 8).padding(.vertical, 3.5)
+                        .background(Color.red.opacity(0.08), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help("หยุดเทิร์นนี้ (⌘.) — ล้างคิวด้วย")
                 }
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-            }
 
-            if !live.message.isEmpty {
-                MarkdownText(text: live.message)
-            } else if live.tools.isEmpty && live.thoughts.isEmpty {
-                HStack(spacing: 6) {
-                    Circle().frame(width: 6, height: 6).foregroundStyle(Color.accentColor).opacity(0.8)
-                    Text("กำลังเตรียมการประมวลผล…")
-                        .font(.caption).foregroundStyle(.secondary)
+                if !live.thoughts.isEmpty {
+                    ThinkingBlock(text: live.thoughts, running: live.message.isEmpty)
+                        .transition(.opacity.combined(with: .offset(y: 6)))
                 }
-                .padding(.vertical, 4)
+
+                if !live.tools.isEmpty {
+                    LiveToolsView(tools: live.tools)
+                        .transition(.opacity.combined(with: .offset(y: 6)))
+                }
+
+                if !live.message.isEmpty {
+                    StreamingMarkdown(text: live.message)
+                        .padding(.horizontal, 14).padding(.vertical, 10)
+                        .background(Color(nsColor: .controlBackgroundColor).opacity(0.55), in: shape)
+                        .overlay(shape.stroke(Color.primary.opacity(0.07), lineWidth: 1))
+                        .frame(maxWidth: 720, alignment: .leading)
+                        .transition(.opacity)
+                } else if live.tools.isEmpty && live.thoughts.isEmpty {
+                    TypingDots()
+                        .padding(.horizontal, 14).padding(.vertical, 12)
+                        .background(Color(nsColor: .controlBackgroundColor).opacity(0.55), in: shape)
+                        .overlay(shape.stroke(Color.primary.opacity(0.07), lineWidth: 1))
+                        .transition(.opacity)
+                }
             }
+            .animation(.spring(response: 0.35, dampingFraction: 0.88),
+                       value: (live.thoughts.isEmpty ? 0 : 1) + (live.tools.isEmpty ? 0 : 2) + (live.message.isEmpty ? 0 : 4))
+            Spacer(minLength: 24)
         }
-        .padding(14)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.55), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Color.primary.opacity(0.07), lineWidth: 1))
-        .shadow(color: .black.opacity(0.03), radius: 6, y: 2)
         .onChange(of: growth) { _, _ in onGrow() }
     }
 }
@@ -4657,6 +4720,8 @@ struct WorkingRow: View {
 /// whitespace preserved so lists and paragraphs keep their shape.
 struct MarkdownText: View {
     let text: String
+    /// Size to the text instead of filling the width (chat bubbles).
+    var hug = false
 
     enum Part {
         case code(language: String, body: String)
@@ -4711,26 +4776,37 @@ struct MarkdownText: View {
                 case let .code(language, body):
                     CodeBlockView(language: language, code: body)
                 case let .prose(a):
-                    Text(a).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                    Text(a).textSelection(.enabled).frame(maxWidth: hug ? nil : .infinity, alignment: .leading)
                 }
             }
         }
     }
 }
 
-/// Collapsible reasoning with smooth spring chevron and pulsing indicator.
+/// Reasoning, folded by default into one quiet line (like the thinking
+/// row in Claude/ChatGPT): a shimmering "กำลังคิด…" with the newest line of
+/// thought while it runs, and a click opens the full text.
 struct ThinkingBlock: View {
     let text: String
     let running: Bool
     @State private var open: Bool?
-    @AppStorage("chorus.thinkingOpen") private var thinkingOpen = true
+    @AppStorage("chorus.thinkingOpen") private var thinkingOpen = false
+
+    /// The last non-empty line, read from the tail only — the text grows by a
+    /// token at a time and scanning all of it each time would be O(n²).
+    private var latestLine: String {
+        let tail = text.suffix(400)
+        let line = tail.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .last(where: { !$0.isEmpty }) ?? ""
+        return line.replacingOccurrences(of: "**", with: "")
+    }
 
     var body: some View {
-        let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let isOpen = open ?? (running && thinkingOpen)
         VStack(alignment: .leading, spacing: 6) {
             Button {
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                     open = !isOpen
                 }
             } label: {
@@ -4738,18 +4814,18 @@ struct ThinkingBlock: View {
                     Image(systemName: "brain.head.profile")
                         .foregroundStyle(.purple)
                         .symbolEffect(.pulse, isActive: running)
-                    Text(running ? "กำลังคิด…" : "กระบวนการคิด").font(.caption.weight(.semibold))
-                    if !cleanText.isEmpty {
-                        Text("\(cleanText.count) ตัวอักษร")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 5).padding(.vertical, 1.5)
-                            .background(Color.purple.opacity(0.08), in: Capsule())
+                    Text(running ? "กำลังคิด…" : "กระบวนการคิด")
+                        .font(.caption.weight(.semibold))
+                        .shimmer(running && !isOpen)
+                    if running, !isOpen, !latestLine.isEmpty {
+                        Text(latestLine)
+                            .font(.caption2).foregroundStyle(.tertiary)
+                            .lineLimit(1).truncationMode(.head)
                     }
-                    Spacer()
+                    Spacer(minLength: 0)
                     Image(systemName: "chevron.right")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tertiary)
                         .rotationEffect(.degrees(isOpen ? 90 : 0))
                 }
                 .contentShape(Rectangle())
@@ -4757,36 +4833,35 @@ struct ThinkingBlock: View {
             .buttonStyle(.plain)
 
             if isOpen {
-                if !cleanText.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        if cleanText.count > 300 {
-                            ScrollViewReader { proxy in
-                                ScrollView {
-                                    MarkdownText(text: cleanText)
-                                        .font(.caption).foregroundStyle(.secondary)
-                                        .textSelection(.enabled)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                    Color.clear.frame(height: 1).id("end")
-                                }
-                                .frame(maxHeight: 180)
-                                .onChange(of: cleanText.count) { _, _ in if running { proxy.scrollTo("end") } }
+                let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                Group {
+                    if cleanText.count > 300 {
+                        ScrollViewReader { proxy in
+                            ScrollView {
+                                MarkdownText(text: cleanText)
+                                    .font(.caption).foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                Color.clear.frame(height: 1).id("end")
                             }
-                        } else {
-                            MarkdownText(text: cleanText)
-                                .font(.caption).foregroundStyle(.secondary)
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            .frame(maxHeight: 220)
+                            .onChange(of: cleanText.count) { _, _ in if running { proxy.scrollTo("end") } }
                         }
+                    } else if !cleanText.isEmpty {
+                        MarkdownText(text: cleanText)
+                            .font(.caption).foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else if running {
+                        Text("กำลังใคร่ครวญและวิเคราะห์ข้อมูล…")
+                            .font(.caption).foregroundStyle(.tertiary)
                     }
-                    .padding(.top, 4)
-                } else if running {
-                    Text("กำลังใคร่ครวญและวิเคราะห์ข้อมูล…")
-                        .font(.caption).foregroundStyle(.tertiary)
-                        .padding(.top, 2)
                 }
+                .padding(.top, 2)
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .padding(9)
+        .padding(.horizontal, 10).padding(.vertical, 7)
         .background(Color.purple.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.purple.opacity(0.12), lineWidth: 1))
     }
