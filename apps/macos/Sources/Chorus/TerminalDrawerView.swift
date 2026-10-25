@@ -19,6 +19,7 @@ final class TerminalTab: NSObject, ObservableObject, Identifiable, TerminalViewD
     @Published var sandboxNote: String?
     let view: TerminalView
     private var ptyId: UInt64 = 0
+    private var appliedDark: Bool?
 
     init(cwd: String, project: String, title: String, sandboxed: Bool) {
         self.cwd = cwd
@@ -69,9 +70,15 @@ final class TerminalTab: NSObject, ObservableObject, Identifiable, TerminalViewD
     }
 
     /// Follow the app's light/dark appearance instead of a fixed terminal skin.
+    /// The background is transparent so the drawer shows the same panel
+    /// material as every other panel.
     func applyTheme() {
         let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        view.nativeBackgroundColor = dark ? NSColor(white: 0.10, alpha: 1) : NSColor(white: 0.98, alpha: 1)
+        // Runs on every SwiftUI update of the host; each colour set repaints
+        // the whole grid, so only touch the view when something changed.
+        guard appliedDark != dark else { return }
+        appliedDark = dark
+        view.nativeBackgroundColor = .clear
         view.nativeForegroundColor = dark ? NSColor(white: 0.90, alpha: 1) : NSColor(white: 0.12, alpha: 1)
     }
 
@@ -214,13 +221,11 @@ struct TerminalDrawerView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
             if showAgentFeed {
                 agentFeed
             } else if let tab = currentTab {
                 TerminalHost(tab: tab).id(tab.id)
-                    .padding(.horizontal, 6)
-                    .background(Color(nsColor: tab.view.nativeBackgroundColor))
+                    .padding(.horizontal, 8).padding(.vertical, 4)
             } else {
                 VStack(spacing: 8) {
                     Text("ยังไม่มีเทอร์มินัล").foregroundStyle(.secondary)
@@ -292,7 +297,7 @@ struct TerminalDrawerView: View {
                 .buttonStyle(.plain)
         }
         .padding(.horizontal, 10).padding(.vertical, 5)
-        .background(Color(NSColor.windowBackgroundColor).opacity(0.95))
+        .overlay(alignment: .bottom) { Divider().opacity(0.5) }
     }
 
     private var agentFeed: some View {
@@ -313,7 +318,6 @@ struct TerminalDrawerView: View {
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Color(NSColor.textBackgroundColor).opacity(0.4))
     }
 }
 

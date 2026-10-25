@@ -77,8 +77,11 @@ enum WorkbenchLayout {
     static let defaultViewerShare = 1.2 / 2.2
     static let chatMinWidth: CGFloat = 380
     static let viewerMinWidth: CGFloat = 360
-    static let gripWidth: CGFloat = 8
-    static let columnSpacing: CGFloat = 4
+    /// The gutter between two panels *is* the resize grip: the hit area, the
+    /// highlight and the visible gap are the same strip, so the handle sits
+    /// exactly on the panel edges instead of floating in dead space.
+    static let gripWidth: CGFloat = 10
+    static let columnSpacing: CGFloat = 0
 }
 
 public struct PanelResizeGrip: View {
@@ -118,7 +121,7 @@ public struct PanelResizeGrip: View {
                     .frame(width: 2, height: 28)
             } else {
                 Color.clear
-                    .frame(width: 8)
+                    .frame(width: WorkbenchLayout.gripWidth)
             }
 
             NativeSplitterRepresentable(
@@ -131,7 +134,7 @@ public struct PanelResizeGrip: View {
                 onReset: onReset
             )
         }
-        .frame(width: 8)
+        .frame(width: WorkbenchLayout.gripWidth)
         .contentShape(Rectangle())
         .help("ลากเพื่อปรับขนาดแผง (ดับเบิลคลิกเพื่อคืนค่าเริ่มต้น)")
     }
@@ -224,7 +227,11 @@ private struct NativeSplitterRepresentable: NSViewRepresentable {
             guard isDraggingInternal else { return }
             let currentX = NSEvent.mouseLocation.x
             let delta = direction == .forward ? (currentX - startMouseX) : (startMouseX - currentX)
-            let newWidth = min(max(initialWidth + Double(delta), minWidth), maxWidth)
+            // Widths live in @AppStorage on ContentView: every write persists to
+            // UserDefaults and re-evaluates the whole view. Whole points only,
+            // and nothing when the clamped width did not change.
+            let newWidth = min(max((initialWidth + Double(delta)).rounded(), minWidth), maxWidth)
+            guard newWidth != widthBinding?() else { return }
             onWidthChanged?(newWidth)
         }
 
