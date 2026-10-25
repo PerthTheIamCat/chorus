@@ -1683,6 +1683,8 @@ struct CompareBranchJson {
     elapsed_ms: u64,
     context_used: Option<i64>,
     cost_usd: Option<f64>,
+    worktree: Option<String>,
+    worktree_branch: Option<String>,
 }
 
 /// Compare mode: fork per agent, run `prompt` on each, return each branch.
@@ -1731,6 +1733,8 @@ pub unsafe extern "C" fn chorus_compare(
                         elapsed_ms: b.elapsed_ms,
                         context_used: b.context_used,
                         cost_usd: b.cost_usd,
+                        worktree: b.worktree,
+                        worktree_branch: b.worktree_branch,
                     }
                 })
                 .collect(),

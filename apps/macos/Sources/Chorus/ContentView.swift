@@ -4146,6 +4146,8 @@ struct CompareResultsSheet: View {
         var diff: String? = nil
         var elapsed_ms: Int64? = nil
         var context_used: Int64? = nil
+        var worktree: String? = nil
+        var worktree_branch: String? = nil
         var cost_usd: Double? = nil
         var id: Int64 { session_id }
     }
@@ -4208,6 +4210,15 @@ struct CompareResultsSheet: View {
             }
             Text("resume: --session \(b.session_id)")
                 .font(.caption2).foregroundStyle(.secondary)
+            if let wt = b.worktree {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: wt)])
+                } label: {
+                    Label("สำเนาแยกของ agent นี้ — เปิดใน Finder", systemImage: "folder").font(.caption2)
+                }
+                .buttonStyle(.link)
+                .help("\(wt)\nbranch \(b.worktree_branch ?? "")")
+            }
             Divider()
             if let e = b.error {
                 Text(e).font(.caption).foregroundStyle(.red).textSelection(.enabled)
