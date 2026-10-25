@@ -855,14 +855,20 @@ pub fn real_git_head(cwd: &Path) -> Option<String> {
 /// from. On a brand-new repo we snapshot the current tree; on an existing
 /// one we take `HEAD` and leave the tree alone, so the diff covers whatever
 /// agents have changed since — not since this process started.
-fn open_checkpoint(cwd: &Path) -> (Option<Checkpoint>, String) {
+///
+/// `new_session` is the exception to "leave the tree alone": a session that
+/// just started must be measured from *now*. Otherwise the base is the last
+/// snapshot some earlier session left in the shadow repo, and every file made
+/// since then — by another session, the user, another tool — shows up as this
+/// session's work (and in the Git sheet as "49 files").
+fn open_checkpoint(cwd: &Path, new_session: bool) -> (Option<Checkpoint>, String) {
     match Checkpoint::open_reporting(cwd) {
         Ok((ck, fresh)) => {
             // A shadow repo can exist without a single commit (opened earlier
             // by something other than a session); treat that like a fresh one,
             // otherwise the session has no base to diff against or restore to.
             let head = ck.head().unwrap_or_default();
-            let base = if fresh || head.is_empty() {
+            let base = if fresh || head.is_empty() || new_session {
                 ck.snapshot("session base").unwrap_or_default()
             } else {
                 head
@@ -882,7 +888,7 @@ impl Session {
         let user = actor::intern(store.conn(), "user", "human")?;
         let title = mask_secrets(title);
         let sess = ledger::new_session(store.conn(), &title, &cwd.to_string_lossy())?;
-        let (checkpoint, default_base) = open_checkpoint(&cwd);
+        let (checkpoint, default_base) = open_checkpoint(&cwd, true);
         let _ = usage::set_review_base(store.conn(), sess, Some(&default_base));
         let base_ckpt = default_base;
         let turn_end_git_head = real_git_head(&cwd);
@@ -931,7 +937,7 @@ impl Session {
         anyhow::ensure!(exists, "no session {session_id} in {}", db.display());
         let user = actor::intern(store.conn(), "user", "human")?;
         let cwd = PathBuf::from(cwd);
-        let (checkpoint, default_base) = open_checkpoint(&cwd);
+        let (checkpoint, default_base) = open_checkpoint(&cwd, false);
         let stored_base = usage::review_base(store.conn(), session_id).ok().flatten();
         let base_ckpt = if let Some(stored) = stored_base {
             stored
