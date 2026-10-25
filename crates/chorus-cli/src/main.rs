@@ -10,6 +10,7 @@
 
 use anyhow::{Context, Result};
 use chorus_cli::session::{AgentSpec, Policy, Session};
+use chorus_core::embedding;
 use chorus_core::context::{AssembleInput, Assembler, Budget, Tier, TurnItem};
 use chorus_core::handoff::HandoffReason;
 use chorus_core::render::{self, ContextItem, FileChange};
@@ -148,8 +149,12 @@ fn memory_cmd(args: &[String]) -> Result<()> {
                 .get(1)
                 .and_then(|v| v.parse().ok())
                 .context("approve <id>")?;
-            let fact = memory::approve(c, id)?;
-            println!("approved → fact {fact}");
+            let added = memory::approve_with(c, id, embedding::from_env().as_deref())?;
+            if added.merged {
+                println!("approved → merged into fact {} (same meaning)", added.id);
+            } else {
+                println!("approved → fact {}", added.id);
+            }
         }
         "reject" => {
             let id: i64 = rest
@@ -161,8 +166,19 @@ fn memory_cmd(args: &[String]) -> Result<()> {
         }
         "add" => {
             let text = rest.get(1).context("add <text>")?;
-            let id = memory::add(c, scope, text)?;
-            println!("added → fact {id} (scope {scope})");
+            let added = memory::add_with(c, scope, text, embedding::from_env().as_deref())?;
+            if added.merged {
+                println!("already remembered → fact {} (same meaning)", added.id);
+            } else {
+                println!("added → fact {} (scope {scope})", added.id);
+            }
+        }
+        "embed" => {
+            let Some(e) = embedding::from_env() else {
+                anyhow::bail!("set CHORUS_EMBED_MODEL (an Ollama embedding model, e.g. nomic-embed-text) first");
+            };
+            let n = memory::backfill(c, e.as_ref(), 10_000)?;
+            println!("embedded {n} fact(s) with {}", e.id());
         }
         other => anyhow::bail!("memory: unknown subcommand {other:?}"),
     }

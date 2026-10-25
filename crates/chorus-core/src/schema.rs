@@ -14,7 +14,7 @@
 use crate::Result;
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// Create (or upgrade) the schema. Safe to call on every open.
 pub fn migrate(conn: &Connection) -> Result<()> {
@@ -100,6 +100,17 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_proposal_scope ON fact_proposal(scope, id);
+
+        -- v8: optional embedding of a fact, from a local model
+        -- (`embedding::Embedder`). Derived data — safe to drop; the n-gram
+        -- retrieval needs none of it. `model` keeps vectors of different
+        -- models from ever being compared.
+        CREATE TABLE IF NOT EXISTS fact_embedding (
+            fact  INTEGER PRIMARY KEY REFERENCES fact(id) ON DELETE CASCADE,
+            model TEXT NOT NULL,
+            dim   INTEGER NOT NULL,
+            vec   BLOB NOT NULL
+        );
 
         -- v3: the warm tier of the compaction ladder (storage spec, rungs).
         -- L1/L2 are *stored*, not recomputed: assembling a context must never

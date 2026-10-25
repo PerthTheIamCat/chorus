@@ -47,11 +47,11 @@ Swift ทำแค่วาดกับรับ input เพื่อให้�
 **Phase 0–2 ครบ + macOS shell ครบ + warm tier + UX v2 (workbench / orchestra / sub sessions / live updates) ครบ**
 — บน Linux: เทสต์ผ่าน 382 · ล้ม 6 ตัวที่ต้องมี Seatbelt (ดู 7.22) · clippy `-D warnings` สะอาด · build 0 warning · bench invariant ครบ
 — CI (`.github/workflows/ci.yml`, macOS) รัน test/clippy/bench/swift ทุก push+PR — **ยังไม่เคยเห็นมันรันจริง** ดูผลรอบแรกก่อนเชื่อ
-(ตัวเลขนี้ verify บน container Linux 19 ต.ค. — ยังไม่ได้รันซ้ำบน macOS · `SCHEMA_VERSION` = 7)
+(ตัวเลขนี้ verify บน container Linux 19 ต.ค. — ยังไม่ได้รันซ้ำบน macOS · `SCHEMA_VERSION` = 8)
 
 | crate | ทำอะไร |
 |---|---|
-| `chorus-core` | ledger (+ fork-chain `history()`), blob store, memory + approve queue (v2), token counter, render, context assembler, handoff brief, projector, checkpoint (shadow git + `apply_reverse`), compaction (Extractive + **Ollama**) — **รังส์ L1/L2 เก็บลงตาราง `summary` (เพิ่มใน schema v3 · ตอนนี้ `SCHEMA_VERSION` = 7) ไม่ generate ตอน assemble**, **mcp (Streamable-HTTP: `memory_propose` — ทำงานกับ Codex)** |
+| `chorus-core` | ledger (+ fork-chain `history()`), blob store, memory + approve queue (v2), token counter, render, context assembler, handoff brief, projector, checkpoint (shadow git + `apply_reverse`), compaction (Extractive + **Ollama**) — **รังส์ L1/L2 เก็บลงตาราง `summary` (เพิ่มใน schema v3 · ตอนนี้ `SCHEMA_VERSION` = 8) ไม่ generate ตอน assemble**, **mcp (Streamable-HTTP: `memory_propose` — ทำงานกับ Codex)** |
 | `chorus-acp` | ACP client + `acp-probe` + mock (`--fail`) + `CodexAgent` + `bridge_for` (codex/claude/antigravity) · strip `CLAUDECODE` |
 | `chorus-cli` | lib+bin · `bench`/`run`(+`--chain`/`--read-only`)/`handoff`/`memory`/`compare` · `Session` engine |
 | `chorus-ffi` | C ABI (`chorus.h`) — engine/run_turn(+interactive callback)/run_relay/compare/handoff/events_since/working_diff/snapshot/restore/reject_hunks/memory_state+review/**compact/uncompacted/task_state** · JSON ล้วน · panic-guarded |
@@ -205,6 +205,7 @@ evals/handoff/                          สไปก์ที่ 2 (README + เ
 | computer use | MCP tool `computer` ของ Chorus เอง (`chorus-core/src/computer.rs`) ไม่ใช้ community server · CoreGraphics + `screencapture`/`sips` ไม่มี dep ใหม่ | สิทธิ์ TCC อยู่กับ Chorus.app เท่านั้น · ทุก action ผ่าน gate: ปิดเป็นดีฟอลต์ · read-only/plan/orchestrator = ดูได้อย่างเดียว · ถามก่อน = ถามทุก action ผ่าน callback เดียวกับ permission · cap 300/เทิร์น · `TurnGuard` ปิด gate เมื่อเทิร์นจบ |
 | secrets | 3 ชั้นใน `chorus-core/src/secrets.rs`: **mask** ทุกข้อความที่ผ่าน Chorus (user/agent/แนบไฟล์/memory/import/ชื่อ session) เป็น `$CHORUS_SECRET_<KIND>_<N>` · **inject** ค่าจริงเป็น env ของ bridge เฉพาะชื่อที่ prompt อ้าง · **block** Seatbelt `deny file-read-data` บน `.env*`/`*.pem|key|p12|pfx|jks|keystore` ใน workspace แล้ว Chorus อ่าน `.env` เองส่งเป็น env | ค่าอยู่ใน login Keychain (`security -i` ทาง stdin, hex) · ดิสก์มีแค่ชื่อ+BLAKE3 (`~/.chorus/secrets.json`) · ไม่มี regex dep — scanner เขียนมือ |
 | โปรเจกต์หลายโฟลเดอร์ | Swift ส่ง `p.folders` ทั้งหมด (`chorus_set_project_folders`) → `Session::project_folders` (ตัด cwd/ซ้ำ/หายไป) · ทุกเทิร์นต่อท้าย prompt ด้วยรายชื่อ+absolute path (`project_folders_guidance`, ไม่ลง ledger) · Seatbelt ให้แต่ละโฟลเดอร์เหมือน cwd: Workspace เขียนได้พร้อม carve-out `.git/hooks`/`.git/config`/`.chorus`/`.env` · ReadOnly deny | เพื่อนเลือก "อ่านและแก้ได้" 20 ต.ค. 2026 · **ห้ามให้ `/`, `$HOME` หรือบรรพบุรุษของมันเป็นโฟลเดอร์ที่เขียนได้** (`too_broad`) · rewind/Changes/shadow repo ยังครอบแค่ cwd |
+| embedding ของความจำ | **เปิดเองด้วย `CHORUS_EMBED_MODEL`** (โมเดล embedding ของ Ollama เช่น `nomic-embed-text`) · ไม่ตั้ง/Ollama ล่ม = n-gram เดิมทุกอย่าง · vector เก็บตาราง `fact_embedding` (v8, ข้อมูลที่สร้างใหม่ได้ ลบทิ้งได้) แยกตาม `model` ห้ามเทียบข้ามโมเดล · fact ใหม่ที่ cosine ≥ 0.92 กับของเดิมถูก merge · `chorus memory embed` เติม vector ให้ fact เก่า | spec §6 · query ต้องถูก embed บน path ของเทิร์น (ข้อ 7.2b ห้าม network) จึงเปิดแบบ opt-in + timeout 600 ms + พัก 60 วิหลังล้มเหลว ไม่ให้ Ollama ที่ดับมาหน่วงทุกเทิร์น |
 | bridge ของแต่ละเจ้า | override ได้ด้วย env (`CHORUS_CLAUDE_BRIDGE` ฯลฯ) | package ถูก rename มาแล้วครั้งหนึ่ง ไม่ควรต้อง rebuild เพื่อตามชื่อ |
 
 ---
