@@ -170,6 +170,11 @@ impl HandoffReason {
             // It is the bridge's bug, not the user's request — another agent
             // in the chain can still answer.
             "typeerror: cannot read propert",
+            // The bridge rejected the prompt's shape (observed from claude-opus
+            // on 25 Oct 2026, with Chorus sending a plain text block):
+            //   {"code":-32010,"message":"Invalid params: prompt[0].type must be one of text, image, resource"}
+            // A bridge/protocol mismatch that another agent does not share.
+            "invalid params: prompt[",
             // hang (see `Agent::wait_for` idle watchdog)
             "agent stalled",
             "timed out",
