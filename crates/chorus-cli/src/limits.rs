@@ -355,6 +355,10 @@ pub struct AccountUsage {
     /// (Antigravity without a fresh statusline snapshot). `None` when
     /// `rate_limits` is the answer, or when "no limit hit" is honest.
     pub quota_note: Option<String>,
+    /// The user's own name / icon / colour for this account (all optional).
+    pub label: Option<String>,
+    pub icon: Option<String>,
+    pub color: Option<String>,
 }
 
 /// `Current session: 18% used · resets Oct 5 at 9:30pm (Asia/Bangkok)` and
@@ -518,64 +522,98 @@ fn parse_iso_to_unix(s: &str) -> Option<i64> {
     }
 }
 
+fn json_f64(v: Option<&serde_json::Value>) -> Option<f64> {
+    v.and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
+}
+
+fn unix_secs(v: Option<&serde_json::Value>) -> Option<i64> {
+    json_f64(v).map(|f| f as i64)
+}
+
+/// One model group in either of the shapes described in
+/// [`parse_antigravity_usage`]. `None` for an entry that is not an object.
+fn parse_antigravity_group(g: &serde_json::Value) -> Option<ModelQuotaGroup> {
+    g.as_object()?;
+    let name = g
+        .get("displayName")
+        .or_else(|| g.get("name"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("Model Group")
+        .to_string();
+    let description = g.get("description").and_then(|x| x.as_str()).map(str::to_string);
+    let mut weekly = None;
+    let mut five_hour = None;
+
+    // Flat form written by AIUsageBar.
+    for (used_key, reset_key, desc_key, minutes, slot) in [
+        ("weekly_used", "weekly_reset", "weekly_desc", 10080, &mut weekly),
+        ("five_hour_used", "five_hour_reset", "five_hour_desc", 300, &mut five_hour),
+    ] {
+        if let Some(used) = json_f64(g.get(used_key)) {
+            *slot = Some(Window {
+                used_percent: used.clamp(0.0, 100.0),
+                window_minutes: Some(minutes),
+                resets_at: unix_secs(g.get(reset_key)),
+                resets_label: g.get(desc_key).and_then(|x| x.as_str()).map(str::to_string),
+            });
+        }
+    }
+
+    // Server form: one bucket per window.
+    if let Some(buckets) = g.get("buckets").and_then(|b| b.as_array()) {
+        for b in buckets {
+            let Some(rem) = json_f64(b.get("remainingFraction").or_else(|| b.get("remaining_fraction"))) else {
+                continue;
+            };
+            let kind = b.get("window").and_then(|w| w.as_str()).unwrap_or("").to_lowercase();
+            let id = b.get("bucketId").and_then(|w| w.as_str()).unwrap_or("").to_lowercase();
+            let is_weekly = kind == "weekly" || id.contains("weekly") || id.contains("7d");
+            let is_short = kind == "5h" || kind == "five_hour" || id.contains("5h");
+            if !is_weekly && !is_short {
+                continue;
+            }
+            let resets_at = b
+                .get("resetTime")
+                .or_else(|| b.get("reset_time"))
+                .and_then(|x| x.as_str())
+                .and_then(parse_iso_to_unix)
+                .or_else(|| json_f64(b.get("reset_in_seconds")).map(|s| now_ms() / 1000 + s as i64));
+            let win = Window {
+                used_percent: (1.0 - rem).clamp(0.0, 1.0) * 100.0,
+                window_minutes: Some(if is_weekly { 10080 } else { 300 }),
+                resets_at,
+                resets_label: b.get("description").and_then(|x| x.as_str()).map(str::to_string),
+            };
+            if is_weekly {
+                weekly = Some(win);
+            } else {
+                five_hour = Some(win);
+            }
+        }
+    }
+
+    Some(ModelQuotaGroup { name, description, weekly, five_hour })
+}
+
 /// Parse Antigravity quota snapshots from statusline bridges (AIUsageBar, Chorus cache, or raw status JSON).
 pub fn parse_antigravity_usage(text: &str) -> Option<RateLimits> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
 
-    // 1. Antigravity RetrieveUserQuotaSummary groups (Gemini Models, Claude and GPT models)
+    // 1. Model groups. Two shapes carry them: the language server's
+    // RetrieveUserQuotaSummary (`displayName` + `buckets`), and the record
+    // AIUsageBar persists from it (`name` + flat `five_hour_used`/`weekly_used`
+    // per group). The second used to fall through the first reader and come
+    // out as nameless "Model Group" rows with no numbers.
     let groups_val = v.get("response").and_then(|r| r.get("groups")).or_else(|| v.get("groups"));
     if let Some(groups_arr) = groups_val.and_then(|g| g.as_array()) {
-        let mut model_groups = Vec::new();
-        let mut primary_win = None;
-        let mut secondary_win = None;
-
-        for g in groups_arr {
-            let name = g.get("displayName").and_then(|x| x.as_str()).unwrap_or("Model Group").to_string();
-            let desc = g.get("description").and_then(|x| x.as_str()).map(|x| x.to_string());
-            let mut weekly_win = None;
-            let mut five_hour_win = None;
-
-            if let Some(buckets) = g.get("buckets").and_then(|b| b.as_array()) {
-                for b in buckets {
-                    let window_kind = b.get("window").and_then(|w| w.as_str()).unwrap_or("");
-                    let rem_frac = b.get("remainingFraction").and_then(|x| x.as_f64()).unwrap_or(1.0);
-                    let used_pct = (1.0 - rem_frac).clamp(0.0, 1.0) * 100.0;
-                    let desc_str = b.get("description").and_then(|x| x.as_str()).map(|x| x.to_string());
-                    let reset_iso = b.get("resetTime").and_then(|x| x.as_str());
-                    let resets_at = reset_iso.and_then(parse_iso_to_unix);
-
-                    let win = Window {
-                        used_percent: used_pct,
-                        window_minutes: if window_kind == "weekly" { Some(10080) } else { Some(300) },
-                        resets_at,
-                        resets_label: desc_str,
-                    };
-
-                    if window_kind == "weekly" {
-                        weekly_win = Some(win);
-                    } else if window_kind == "5h" || window_kind == "five_hour" {
-                        five_hour_win = Some(win);
-                    }
-                }
-            }
-
-            if name.contains("Gemini") {
-                if primary_win.is_none() { primary_win = five_hour_win.clone(); }
-                if secondary_win.is_none() { secondary_win = weekly_win.clone(); }
-            }
-
-            model_groups.push(ModelQuotaGroup {
-                name,
-                description: desc,
-                weekly: weekly_win,
-                five_hour: five_hour_win,
-            });
-        }
-
-        if !model_groups.is_empty() {
+        let model_groups: Vec<ModelQuotaGroup> = groups_arr.iter().filter_map(parse_antigravity_group).collect();
+        let with_data = |g: &ModelQuotaGroup| g.five_hour.is_some() || g.weekly.is_some();
+        if model_groups.iter().any(with_data) {
+            let gemini = model_groups.iter().find(|g| g.name.contains("Gemini") && with_data(g));
+            let lead = gemini.or_else(|| model_groups.iter().find(|g| with_data(g)));
             return Some(RateLimits {
-                primary: primary_win.or_else(|| model_groups.first().and_then(|g| g.five_hour.clone())),
-                secondary: secondary_win.or_else(|| model_groups.first().and_then(|g| g.weekly.clone())),
+                primary: lead.and_then(|g| g.five_hour.clone()),
+                secondary: lead.and_then(|g| g.weekly.clone()),
                 groups: Some(model_groups),
             });
         }
@@ -715,6 +753,7 @@ pub fn antigravity_rate_limits(dir: &Path) -> Option<RateLimits> {
     let mut candidates = vec![dir.join("antigravity-statusline.json")];
     if let Some(h) = std::env::var_os("HOME").map(PathBuf::from) {
         candidates.push(h.join("Library/Application Support/AIUsageBar/antigravity-statusline.json"));
+        candidates.push(h.join("Library/Application Support/AIUsageBar/antigravity-quota-summary.json"));
         candidates.push(h.join(".chorus/cache/antigravity-statusline.json"));
         candidates.push(h.join(".chorus/cache/antigravity-usage.json"));
         candidates.push(h.join(".chorus/cache/antigravity-statusline-raw.json"));
@@ -770,7 +809,11 @@ pub fn usage_report() -> Vec<AccountUsage> {
             } else {
                 None
             };
+            let look = crate::accounts::meta(agent, a);
             out.push(AccountUsage {
+                label: look.label,
+                icon: look.icon,
+                color: look.color,
                 ready,
                 login: crate::accounts::login_command(agent, a),
                 quota_note: (antigravity && ready && rate_limits.is_none())
@@ -881,6 +924,33 @@ mod tests {
 
         assert!(fresh_antigravity_snapshot(&temp.join("missing.json"), now).is_none());
         let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// The record AIUsageBar writes: per-group `name` + flat `*_used` fields.
+    /// Chorus showed this as two empty "Model Group" rows.
+    #[test]
+    fn parses_the_stored_record_with_flat_groups() {
+        let t = r#"{"five_hour_reset":1791564080,"five_hour_used":38,"groups":[{"description":"Models within this group: Gemini Flash","five_hour_reset":1791564080,"five_hour_used":38,"name":"Gemini Models","weekly_reset":1791949101,"weekly_used":49},{"five_hour_used":0,"name":"Claude and GPT models","weekly_used":52.5}],"observed_at":1791546086.3,"weekly_reset":1791949101,"weekly_used":49}"#;
+        let rl = parse_antigravity_usage(t).unwrap();
+        let groups = rl.groups.unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].name, "Gemini Models");
+        assert_eq!(groups[0].five_hour.as_ref().unwrap().used_percent, 38.0);
+        assert_eq!(groups[0].weekly.as_ref().unwrap().resets_at, Some(1791949101));
+        assert_eq!(groups[1].name, "Claude and GPT models");
+        assert_eq!(groups[1].weekly.as_ref().unwrap().used_percent, 52.5);
+        assert_eq!(rl.primary.unwrap().used_percent, 38.0);
+        assert_eq!(rl.secondary.unwrap().used_percent, 49.0);
+    }
+
+    #[test]
+    fn groups_without_any_numbers_fall_back_to_the_flat_fields() {
+        let t = r#"{"five_hour_used":10,"weekly_used":20,"groups":[{"name":"Gemini Models"}]}"#;
+        let rl = parse_antigravity_usage(t).unwrap();
+        assert_eq!(rl.primary.unwrap().used_percent, 10.0);
+        let g = rl.groups.unwrap();
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].five_hour.as_ref().unwrap().used_percent, 10.0);
     }
 
     #[test]

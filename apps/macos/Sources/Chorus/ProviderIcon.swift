@@ -1,7 +1,10 @@
 import AppKit
 import SwiftUI
 
-/// Provider marks from Iconify's logos set and Simple Icons, bundled locally.
+/// Provider marks bundled locally: Claude and Gemini from Simple Icons (CC0),
+/// OpenAI from Iconify's logos set, Antigravity from LobeHub's lobe-icons (MIT) — see
+/// docs/provider-icons.md. The marks themselves remain their owners'
+/// trademarks and are used only to say which provider a row belongs to.
 /// Model names stay visible beside the mark, so the icon identifies the family
 /// while text identifies the selected model.
 struct ProviderIcon: View {
@@ -18,9 +21,26 @@ struct ProviderIcon: View {
         switch key {
         case "codex", "openai": "provider-openai"
         case "claude", "anthropic": "provider-claude"
-        case "antigravity", "agy": "provider-gemini"
+        case "antigravity", "agy": "provider-antigravity"
         case "gemini", "google": "provider-gemini"
         default: nil
+        }
+    }
+
+    /// Each mark is decoded once. `body` runs on every redraw, and reading
+    /// an SVG from disk there showed up in long lists of rows.
+    private static let cache = NSCache<NSString, NSImage>()
+
+    /// The brand's own accent, for tiles and tints.
+    static func brandColor(for provider: String) -> Color {
+        let raw = provider.lowercased()
+        let base = raw.split(separator: ":", maxSplits: 1).first.map(String.init) ?? raw
+        switch base.split(separator: "@", maxSplits: 1).first.map(String.init) ?? base {
+        case "claude", "anthropic": return Color(hex: "#D97757")
+        case "codex", "openai": return Color(hex: "#10A37F")
+        case "antigravity", "agy": return Color(hex: "#4285F4")
+        case "gemini", "google": return Color(hex: "#4285F4")
+        default: return .gray
         }
     }
 
@@ -35,9 +55,12 @@ struct ProviderIcon: View {
     }
 
     private var providerImage: NSImage? {
-        guard let asset, let path = Bundle.module.path(forResource: asset, ofType: "svg"),
+        guard let asset else { return nil }
+        if let hit = Self.cache.object(forKey: asset as NSString) { return hit }
+        guard let path = Bundle.module.path(forResource: asset, ofType: "svg"),
               let image = NSImage(contentsOfFile: path) else { return nil }
         image.isTemplate = true
+        Self.cache.setObject(image, forKey: asset as NSString)
         return image
     }
 

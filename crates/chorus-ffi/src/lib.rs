@@ -2450,7 +2450,7 @@ pub unsafe extern "C" fn chorus_list_skills(cwd: *const c_char) -> *mut c_char {
 
 /// Every account of every agent with what is known about its usage: Codex's
 /// own 5-hour/weekly percentages, and for Claude the last limit it hit.
-/// JSON: {"ok":true,"accounts":[{name,agent,account,dir,ready,login,rate_limits,hit,quota_note}]}
+/// JSON: {"ok":true,"accounts":[{name,agent,account,dir,ready,login,rate_limits,hit,quota_note,label?,icon?,color?}]}
 #[no_mangle]
 pub extern "C" fn chorus_usage_report() -> *mut c_char {
     match catch_unwind(chorus_cli::limits::usage_report) {
@@ -2482,6 +2482,74 @@ pub unsafe extern "C" fn chorus_add_account(
         .to_string()),
         Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in add_account"),
+    }
+}
+
+/// Create an account from a look: `spec` = {"label","icon","color","slug"?}.
+/// The directory name comes from `slug` (else the label's ASCII part) and is
+/// made unique; the label can be any language. JSON: {"ok":true,"name":"work",
+/// "dir":"…","login":"…"}
+///
+/// # Safety
+/// `agent` and `spec` must be valid NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_create_account(
+    agent: *const c_char,
+    spec: *const c_char,
+) -> *mut c_char {
+    let (Some(agent), Some(spec)) = (borrow(agent), borrow(spec)) else {
+        return err("agent/spec must be valid UTF-8");
+    };
+    #[derive(serde::Deserialize)]
+    struct Spec {
+        slug: Option<String>,
+        #[serde(flatten)]
+        look: chorus_cli::accounts::Meta,
+    }
+    let Ok(spec) = serde_json::from_str::<Spec>(spec) else {
+        return err("spec is not valid JSON");
+    };
+    match catch_unwind(AssertUnwindSafe(|| -> Result<(String, std::path::PathBuf), String> {
+        let name = chorus_cli::accounts::free_name(agent, spec.slug.as_deref(), spec.look.label.as_deref());
+        let dir = chorus_cli::accounts::add(agent, &name).map_err(|e| format!("{e:#}"))?;
+        chorus_cli::accounts::set_meta(agent, Some(&name), spec.look).map_err(|e| format!("{e:#}"))?;
+        Ok((name, dir))
+    })) {
+        Ok(Ok((name, dir))) => out(serde_json::json!({
+            "ok": true,
+            "name": name,
+            "dir": dir.to_string_lossy(),
+            "login": chorus_cli::accounts::login_command(agent, Some(&name)),
+        })
+        .to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in create_account"),
+    }
+}
+
+/// Change an account's name / icon / colour. `name` is the directory name
+/// (`work`), or empty for the CLI's own login. `look` = {"label","icon",
+/// "color"}; missing fields are cleared. JSON: {"ok":true}
+///
+/// # Safety
+/// `agent`, `name` and `look` must be valid NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_account_look(
+    agent: *const c_char,
+    name: *const c_char,
+    look: *const c_char,
+) -> *mut c_char {
+    let (Some(agent), Some(name), Some(look)) = (borrow(agent), borrow(name), borrow(look)) else {
+        return err("arguments must be valid UTF-8");
+    };
+    let Ok(look) = serde_json::from_str::<chorus_cli::accounts::Meta>(look) else {
+        return err("look is not valid JSON");
+    };
+    let account = (!name.is_empty()).then_some(name);
+    match catch_unwind(AssertUnwindSafe(|| chorus_cli::accounts::set_meta(agent, account, look))) {
+        Ok(Ok(())) => out(serde_json::json!({ "ok": true }).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in set_account_look"),
     }
 }
 

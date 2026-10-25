@@ -890,8 +890,7 @@ struct AboutSettings: View {
 
 struct AccountsSettings: View {
     @EnvironmentObject var engine: Engine
-    @State private var adding: String?
-    @State private var newName = ""
+    @State private var editor: AccountEditorTarget?
     @State private var removing: Engine.Account?
 
     var body: some View {
@@ -901,14 +900,14 @@ struct AccountsSettings: View {
                           footer: agent.id == "claude"
                               ? "Claude ไม่บอกเปอร์เซ็นต์การใช้งานออกมา Chorus รู้แค่ตอนที่ติดลิมิตและเวลารีเซ็ตที่มันแจ้ง"
                               : agent.id == "antigravity"
-                              ? "ดึงโควตาเรียลไทม์แยกตามกลุ่มโมเดลจาก Antigravity Language Server โดยตรง"
+                              ? "โควตาแยกตามกลุ่มโมเดล อ่านจากไฟล์ที่ AIUsageBar (หรือ statusline อื่น) บันทึกไว้ ถ้าเก่ากว่า 10 นาทีจะขึ้นว่าไม่ทราบ"
                               : "ตัวเลขมาจาก log ของ Codex เอง อัปเดตทุกครั้งที่บัญชีนั้นตอบ") {
                 ForEach(Array(rows.enumerated()), id: \.element.id) { i, acc in
                     if i > 0 { Divider().padding(.leading, 12) }
-                    AccountRow(account: acc, onRemove: { removing = acc })
+                    AccountRow(account: acc, onEdit: { editor = .edit(acc) }, onRemove: { removing = acc })
                 }
                 Divider().padding(.leading, 12)
-                Button { adding = agent.id; newName = "" } label: {
+                Button { editor = .create(agent: agent.id) } label: {
                     Label("เพิ่มบัญชี \(agent.label)", systemImage: "plus.circle")
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -919,15 +918,8 @@ struct AccountsSettings: View {
             Spacer()
             Button { engine.loadUsage(); engine.loadAgents() } label: { Label("ตรวจใหม่", systemImage: "arrow.clockwise") }
         }
-        .alert("เพิ่มบัญชี", isPresented: Binding(get: { adding != nil }, set: { if !$0 { adding = nil } })) {
-            TextField("ชื่อ เช่น work, personal", text: $newName)
-            Button("เพิ่มแล้ว login") {
-                if let a = adding { engine.addAccount(agent: a, name: newName.trimmingCharacters(in: .whitespaces).lowercased()) }
-                adding = nil
-            }
-            Button("ยกเลิก", role: .cancel) { adding = nil }
-        } message: {
-            Text("แต่ละบัญชีมีโฟลเดอร์ login ของตัวเอง Chorus จะเปิด Terminal ให้ login — ไม่เก็บรหัสหรือ token เอง")
+        .sheet(item: $editor) { target in
+            AccountEditorSheet(target: target)
         }
         .confirmationDialog("ลบบัญชี \(removing?.title ?? "")?",
                             isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
@@ -946,11 +938,13 @@ struct AccountsSettings: View {
 struct AccountRow: View {
     @EnvironmentObject var engine: Engine
     let account: Engine.Account
+    let onEdit: () -> Void
     let onRemove: () -> Void
     @AppStorage private var preferred: String
 
-    init(account: Engine.Account, onRemove: @escaping () -> Void) {
+    init(account: Engine.Account, onEdit: @escaping () -> Void, onRemove: @escaping () -> Void) {
         self.account = account
+        self.onEdit = onEdit
         self.onRemove = onRemove
         _preferred = AppStorage(wrappedValue: "", "chorus.preferred.\(account.agent)")
     }
@@ -958,9 +952,20 @@ struct AccountRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Circle().fill(!account.ready ? Color.orange : account.limited ? .red : .green)
-                    .frame(width: 8, height: 8)
-                Text(account.title).fontWeight(.medium)
+                AccountAvatar(agent: account.agent, icon: account.icon, color: account.color, size: 26)
+                    .overlay(alignment: .bottomTrailing) {
+                        Circle().fill(!account.ready ? Color.orange : account.limited ? .red : .green)
+                            .frame(width: 8, height: 8)
+                            .overlay(Circle().strokeBorder(Color(nsColor: .windowBackgroundColor), lineWidth: 1.5))
+                            .offset(x: 2, y: 2)
+                    }
+                    .help(!account.ready ? "ยังไม่ได้ login" : account.limited ? "ติดลิมิต" : "พร้อมใช้")
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(account.title).fontWeight(.medium)
+                    if account.label != nil, !account.account.isEmpty {
+                        Text(account.name).font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
                 if preferred == account.name || (preferred.isEmpty && account.account.isEmpty) {
                     Text("ใช้ก่อน").font(.caption2.weight(.semibold)).foregroundStyle(Color.accentColor)
                         .padding(.horizontal, 6).padding(.vertical, 1)
@@ -973,6 +978,10 @@ struct AccountRow: View {
                     Button("ใช้บัญชีนี้ก่อน") { preferred = account.name }
                         .buttonStyle(.link).font(.caption)
                 }
+                Button(action: onEdit) { Image(systemName: "pencil") }
+                    .buttonStyle(InteractiveStyle(cornerRadius: 6, padding: .init(top: 3, leading: 6, bottom: 3, trailing: 6)))
+                    .help("เปลี่ยนชื่อและไอคอน")
+                    .accessibilityLabel("แก้ไขบัญชี \(account.title)")
                 if !account.account.isEmpty {
                     Button(role: .destructive, action: onRemove) { Image(systemName: "trash") }
                         .buttonStyle(InteractiveStyle(cornerRadius: 6, padding: .init(top: 3, leading: 6, bottom: 3, trailing: 6)))

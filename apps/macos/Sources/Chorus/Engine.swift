@@ -1978,8 +1978,12 @@ final class Engine: ObservableObject {
         let hit: LimitHit?
         /// "ไม่ทราบ" text from Rust when the quota cannot be known right now.
         let quota_note: String?
+        /// The user's own name / icon (`sf:<symbol>`, nil = the provider's mark) / `#RRGGBB`.
+        let label: String?
+        let icon: String?
+        let color: String?
         var id: String { name }
-        var title: String { account.isEmpty ? "ค่าเริ่มต้น" : account }
+        var title: String { label ?? (account.isEmpty ? "ค่าเริ่มต้น" : account) }
         /// Limited right now, as far as we know.
         var limited: Bool {
             if let hit, Date().timeIntervalSince1970 * 1000 - Double(hit.at_ms) < 5 * 3600 * 1000 { return true }
@@ -2014,6 +2018,42 @@ final class Engine: ObservableObject {
                 else { self.lastError = "เพิ่มบัญชีไม่ได้: \(r?.error ?? "unknown")" }
                 self.loadUsage()
             }
+        }
+    }
+
+    /// New account from a look: Rust derives a unique folder name (from
+    /// `slug`, else the label), saves the look, then Terminal opens on login.
+    func createAccount(agent: String, label: String, slug: String?, icon: String?, color: String?) {
+        var spec: [String: String] = ["label": label]
+        if let slug { spec["slug"] = slug }
+        if let icon { spec["icon"] = icon }
+        if let color { spec["color"] = color }
+        guard let data = try? JSONSerialization.data(withJSONObject: spec),
+              let json = String(data: data, encoding: .utf8) else { return }
+        ioQueue.async { [weak self] in
+            let reply = agent.withCString { a in json.withCString { Self.string(from: chorus_create_account(a, $0)) } }
+            struct R: Codable { let ok: Bool?; let login: String?; let error: String? }
+            let r = Self.decode(R.self, reply)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let login = r?.login, r?.ok == true { self.runLoginCommand(login) }
+                else { self.lastError = "เพิ่มบัญชีไม่ได้: \(r?.error ?? "unknown")" }
+                self.loadUsage()
+            }
+        }
+    }
+
+    /// Rename / re-icon an account. `name` is the folder name, "" for the CLI's own login.
+    func setAccountLook(agent: String, name: String, label: String, icon: String?, color: String?) {
+        var look: [String: String] = [:]
+        if !label.isEmpty { look["label"] = label }
+        if let icon { look["icon"] = icon }
+        if let color { look["color"] = color }
+        guard let data = try? JSONSerialization.data(withJSONObject: look),
+              let json = String(data: data, encoding: .utf8) else { return }
+        ioQueue.async { [weak self] in
+            _ = agent.withCString { a in name.withCString { n in json.withCString { Self.string(from: chorus_set_account_look(a, n, $0)) } } }
+            DispatchQueue.main.async { self?.loadUsage() }
         }
     }
 
