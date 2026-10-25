@@ -23,6 +23,7 @@
 
 ### Fixed
 
+- **แอปที่ติดตั้งแล้วชนทันทีตอนวาดไอคอน provider/ไฟล์:** `Bundle.module` ของ SwiftPM หา resource bundle ในที่ที่ build.sh ไม่ได้วางไว้ จึง crash (`NSBundle.module` assertion) เมื่อโฟลเดอร์ `.build` ที่ build มาไม่อยู่แล้ว · ตอนนี้อ่านจาก `Contents/Resources` ก่อน
 - **Usage ของ Antigravity ขึ้นแถวว่าง "Model Group":** AIUsageBar บันทึกกลุ่มเป็น `{name, five_hour_used, weekly_used, …}` แต่เดิมอ่านได้แค่รูปแบบของเซิร์ฟเวอร์ · ตอนนี้อ่านได้ทั้งสองรูปแบบ
 - **เทสต์ LSP แดงบน CI** เมื่อเครื่องมี shim ของ rust-analyzer แต่ไม่มีตัวจริง
 
