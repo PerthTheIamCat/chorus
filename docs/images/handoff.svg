@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="300" viewBox="0 0 1100 300" role="img" aria-label="Claude hits a limit; Chorus hands the work to Codex using the shared ledger">
+  <rect width="1100" height="300" rx="20" fill="#14121f"/>
+  <g font-family="-apple-system,'Helvetica Neue',Arial,sans-serif" fill="#ffffff" text-anchor="middle">
+    <rect x="40" y="90" width="200" height="110" rx="16" fill="#d97757"/>
+    <text x="140" y="140" font-size="26" font-weight="700">Claude</text><text x="140" y="172" font-size="16" opacity="0.9">ชนลิมิตกลางงาน</text>
+    <rect x="450" y="60" width="200" height="170" rx="16" fill="#241a3d" stroke="#8b7cf6" stroke-width="2"/>
+    <text x="550" y="108" font-size="26" font-weight="700">Ledger</text>
+    <text x="550" y="140" font-size="15" fill="#c9c3e6">ความจำ + session เดียว</text>
+    <text x="550" y="166" font-size="15" fill="#c9c3e6">brief + diff + task state</text>
+    <text x="550" y="200" font-size="14" fill="#8b7cf6">แหล่งความจริงเดียว</text>
+    <rect x="860" y="90" width="200" height="110" rx="16" fill="#8b7cf6"/>
+    <text x="960" y="140" font-size="26" font-weight="700">Codex</text><text x="960" y="172" font-size="16" opacity="0.9">ทำต่อจากจุดเดิม</text>
+    <g stroke="#c9c3e6" stroke-width="3" fill="none"><path d="M240 145 H440"/><path d="M660 145 H850"/></g>
+    <path d="M440 145 l-14 -8 v16z M850 145 l-14 -8 v16z" fill="#c9c3e6"/>
+    <text x="340" y="130" font-size="14" fill="#c9c3e6">429 / quota</text>
+    <text x="755" y="130" font-size="14" fill="#c9c3e6">handoff อัตโนมัติ</text>
+  </g>
+</svg>
