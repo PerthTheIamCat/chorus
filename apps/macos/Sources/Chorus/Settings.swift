@@ -365,7 +365,7 @@ func resetText(_ unix: Int64?) -> String {
 
 struct GeneralSettings: View {
     @AppStorage("chorus.enterSends") private var enterSends = true
-    @AppStorage("chorus.thinkingOpen") private var thinkingOpen = true
+    @AppStorage("chorus.thinkingOpen") private var thinkingOpen = false
     @AppStorage("chorus.dismissedSetupCards") private var dismissedSetupCards = ""
     @AppStorage("chorus.scrollbarStyle") private var scrollbarStyle = "hidden"
     @AppStorage("chorus.inspectorPosition") private var inspectorPosition = "trailing"
