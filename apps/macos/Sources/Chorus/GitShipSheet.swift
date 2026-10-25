@@ -103,7 +103,7 @@ struct GitShipSheet: View {
             .frame(maxHeight: 130)
             TextEditor(text: $message)
                 .font(.system(size: 12, design: .monospaced))
-                .frame(height: 64)
+                .frame(height: 96)
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
             Toggle("Push ขึ้น remote", isOn: $doPush).disabled(!s.has_remote)
             Toggle("เปิด Pull Request (gh)", isOn: $doPR)

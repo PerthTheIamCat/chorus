@@ -172,36 +172,67 @@ pub fn suggest_message_with_goal(files: &[FileChange], goal: &str) -> String {
         let scopes: std::collections::BTreeSet<_> = paths.iter().map(|p| first(p)).collect();
         if scopes.len() == 1 { scopes.into_iter().next().flatten() } else { None }
     };
-    let subject = goal_subject(goal).unwrap_or_else(|| {
-        let names: Vec<String> = paths
-            .iter()
-            .map(|p| Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
-            .collect();
-        if names.len() <= 3 {
-            format!("update {}", names.join(", "))
-        } else {
-            format!("update {}, {} and {} more", names[0], names[1], names.len() - 2)
+    let prefix = match &scope {
+        Some(s) => format!("{kind}({s}): "),
+        None => format!("{kind}: "),
+    };
+    let (subject, body) = match goal_subject(goal, SUBJECT_MAX.saturating_sub(prefix.chars().count())) {
+        Some(g) => g,
+        None => {
+            let names: Vec<String> = paths
+                .iter()
+                .map(|p| Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+                .collect();
+            let s = if names.len() <= 3 {
+                format!("update {}", names.join(", "))
+            } else {
+                format!("update {}, {} and {} more", names[0], names[1], names.len() - 2)
+            };
+            (s, None)
         }
-    });
-    match scope {
-        Some(s) => format!("{kind}({s}): {subject}"),
-        None => format!("{kind}: {subject}"),
+    };
+    match body {
+        Some(b) => format!("{prefix}{subject}\n\n{b}"),
+        None => format!("{prefix}{subject}"),
     }
 }
 
-/// A commit subject from the user's request: first line, no trailing
-/// punctuation, at most 60 characters, first letter lower-cased (Conventional
-/// Commits). `None` when the request is empty.
-fn goal_subject(goal: &str) -> Option<String> {
+/// Longest commit header (`type(scope): subject`) the draft produces.
+const SUBJECT_MAX: usize = 72;
+
+/// A commit subject from the user's request, plus the full request as a body
+/// when the subject could not hold all of it.
+///
+/// The subject is the first line, first letter lower-cased (Conventional
+/// Commits), no trailing punctuation, at most `budget` characters, cut at a
+/// word boundary and never with an ellipsis — "…" in a subject reads as a
+/// bug. Text without spaces (Thai) is cut at the character limit. `None` when
+/// the request is empty.
+fn goal_subject(goal: &str, budget: usize) -> Option<(String, Option<String>)> {
+    let goal = goal.trim();
     let line = goal.lines().map(str::trim).find(|l| !l.is_empty())?;
-    let line = line.trim_end_matches(|c: char| ".!?:;,".contains(c) || c.is_whitespace());
+    let trim_end = |t: &str| t.trim_end_matches(|c: char| ".!?:;,—-".contains(c) || c.is_whitespace()).to_string();
+    let line = trim_end(line);
     let mut chars = line.chars();
     let first = chars.next()?;
-    let mut out: String = first.to_lowercase().chain(chars).collect();
-    if out.chars().count() > 60 {
-        out = out.chars().take(59).collect::<String>().trim_end().to_string() + "…";
-    }
-    Some(out)
+    let lowered: String = first.to_lowercase().chain(chars).collect();
+    let budget = budget.max(20);
+    let subject = if lowered.chars().count() <= budget {
+        lowered.clone()
+    } else {
+        let head: String = lowered.chars().take(budget).collect();
+        let next_is_space = lowered.chars().nth(budget).is_some_and(char::is_whitespace);
+        let cut = match head.rfind(char::is_whitespace) {
+            Some(i) if !next_is_space && i > 0 => head[..i].to_string(),
+            _ => head,
+        };
+        trim_end(&cut)
+    };
+    // Keep the whole request when the subject is only part of it.
+    let whole_request = goal.lines().map(str::trim).filter(|l| !l.is_empty()).count() == 1
+        && trim_end(goal).chars().count() <= subject.chars().count();
+    let body = (!whole_request).then(|| goal.chars().take(1500).collect::<String>());
+    Some((subject, body))
 }
 
 /// Branch name from a commit subject: `feat(term): add tabs` → `feat/term-add-tabs`.
@@ -377,6 +408,25 @@ mod tests {
         assert_eq!(suggest_message_with_goal(&[f("src/a.rs"), f("src/b.rs")], ""), "feat(src): update a.rs, b.rs");
         let many: Vec<_> = ["a", "b", "c", "d"].iter().map(|n| f(&format!("{n}.rs"))).collect();
         assert_eq!(suggest_message_with_goal(&many, ""), "feat: update a.rs, b.rs and 2 more");
+    }
+
+    #[test]
+    fn a_long_request_gets_a_short_subject_and_the_full_text_as_body() {
+        let f = |p: &str| FileChange { path: p.into(), code: "??".into(), blocked: false };
+        let goal = "Add a settings page where the user can pick the default agent, the default model and the \
+                    thinking level, and remember the choice per project";
+        let msg = suggest_message_with_goal(&[f("apps/macos/Settings.swift")], goal);
+        let (head, body) = msg.split_once("\n\n").expect("subject and body");
+        assert!(head.chars().count() <= 72, "{head}");
+        assert!(!head.contains('…'));
+        assert!(head.starts_with("feat(macos): add a settings page where"), "{head}");
+        assert_eq!(body, goal);
+        // Thai has no spaces: cut by characters, still no ellipsis.
+        let thai = "ทำหน้าตั้งค่าให้เลือก agent เริ่มต้นและโมเดลเริ่มต้นได้ และจำค่าไว้แยกตามโปรเจกต์ทุกครั้งที่เปิดแอป";
+        let msg = suggest_message_with_goal(&[f("a.swift")], thai);
+        assert!(msg.lines().next().unwrap().chars().count() <= 72);
+        assert!(!msg.contains('…'));
+        assert!(msg.ends_with(thai));
     }
 
     #[test]
