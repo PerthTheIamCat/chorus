@@ -124,6 +124,7 @@ struct ContentView: View {
     @State private var inspected: (text: String, tokens: Int64)?
     @State private var lastPrompt = ""
     @State private var comparing = false
+    @State private var confirmCompare = false
 
     @State private var rightTab = RightTab.context
     @State private var showPalette = false
@@ -515,6 +516,10 @@ struct ContentView: View {
         ))
     }
 
+    private var inspectorShownWidth: Double {
+        rightTab == .changes ? max(inspectorWidth, 420) : inspectorWidth
+    }
+
     @ViewBuilder
     private var inspectorPanel: some View {
         VStack(spacing: 0) {
@@ -549,7 +554,7 @@ struct ContentView: View {
                 )
             }
         }
-        .frame(width: maximizedPanel == .diffReviewer ? nil : (rightTab == .changes ? max(inspectorWidth, 420) : inspectorWidth))
+        .frame(width: maximizedPanel == .diffReviewer ? nil : inspectorShownWidth)
         .floatingPanel(cornerRadius: 20)
         .transition(.asymmetric(
             insertion: .move(edge: inspectorPosition == "leading" ? .leading : .trailing).combined(with: .opacity).combined(with: .scale(scale: 0.98)),
@@ -681,7 +686,6 @@ struct ContentView: View {
             }
 
             if showTerminalDrawer {
-                Divider()
                 TerminalDrawerView(
                     workspace: workspace,
                     onClose: {
@@ -690,6 +694,8 @@ struct ContentView: View {
                         }
                     }
                 )
+                .floatingPanel(cornerRadius: 20)
+                .padding(.top, WorkbenchLayout.gripWidth)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
@@ -744,6 +750,8 @@ struct ContentView: View {
                     PanelResizeGrip(width: $explorerWidth, minWidth: 200, maxWidth: 480, direction: .forward) {
                         explorerWidth = 240
                     }
+                } else {
+                    Color.clear.frame(width: WorkbenchLayout.gripWidth)   // rail has no grip, keep the gutter
                 }
             }
 
@@ -765,7 +773,12 @@ struct ContentView: View {
 
             // 5. Inspector (stays a toggled right panel ⌥⌘I)
             if showInspector {
-                PanelResizeGrip(width: $inspectorWidth, minWidth: 260, maxWidth: 700, direction: .reversed) {
+                // The Changes tab renders at least 420 pt wide; the grip must start
+                // from what is on screen or the first drag does nothing.
+                PanelResizeGrip(
+                    width: Binding(get: { inspectorShownWidth }, set: { inspectorWidth = $0 }),
+                    minWidth: rightTab == .changes ? 420 : 260, maxWidth: 700, direction: .reversed
+                ) {
                     inspectorWidth = 330
                 }
                 inspectorPanel
@@ -1237,6 +1250,9 @@ struct ContentView: View {
             }
             .padding(20)
             .frame(width: 390)
+        }
+        .sheet(isPresented: $confirmCompare) {
+            compareConfirmSheet
         }
         .sheet(isPresented: Binding(get: { compareOutput != nil }, set: { if !$0 { compareOutput = nil } })) {
             CompareResultsSheet(json: compareOutput ?? "")
@@ -2760,18 +2776,61 @@ struct ContentView: View {
     /// A session exists, or the first message would start one (a fresh draft).
     private var canCompare: Bool { engine.sessionID >= 0 || engine.draft != nil }
 
+    /// What a compare would ask: the text typed in the composer, otherwise
+    /// the last prompt.
+    private var comparePrompt: (text: String, fromComposer: Bool) {
+        let typed = draftBox.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !typed.isEmpty { return (typed, true) }
+        return (lastPrompt.isEmpty ? "ทบทวนงานที่ค้างอยู่แล้วเสนอขั้นต่อไป" : lastPrompt, false)
+    }
+
+    /// Entry point for the button, ⇧⌘K and /compare: it fans one prompt out to
+    /// every ready agent (each in its own fork, costing tokens), so ask first.
+    private func runCompare() {
+        guard engine.agents.filter(\.ready).count > 1, canCompare, !comparing else { return }
+        confirmCompare = true
+    }
+
+    private var compareConfirmSheet: some View {
+        let agents = engine.agents.filter(\.ready)
+        let source = comparePrompt
+        return VStack(alignment: .leading, spacing: 14) {
+            Label("เทียบ agent", systemImage: "square.split.2x1").font(.title3.bold())
+            Text("จะส่งคำถามเดียวกันให้ทุก agent ที่พร้อม แยกกันทำใน fork ของตัวเอง แล้วเทียบคำตอบ ไฟล์ที่แก้ เวลา และค่าใช้จ่าย")
+                .font(.callout).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(source.fromComposer ? "คำถาม (จากช่องพิมพ์ — จะถูกล้างหลังส่ง)" : "คำถาม (ข้อความล่าสุดที่ส่ง)")
+                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text(source.text).lineLimit(5).font(.callout)
+                    .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("agent ที่จะถูกเรียก (\(agents.count))").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text(agents.map(\.label).joined(separator: " · ")).font(.callout)
+            }
+            Text("แต่ละตัวใช้โควตา/โทเคนของตัวเองหนึ่งเทิร์น").font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Button("ยกเลิก") { confirmCompare = false }.keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("เทียบเลย") { confirmCompare = false; performCompare() }
+                    .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+    }
+
     /// Compares what is typed in the composer (clearing it, like send); with
     /// nothing typed, the last prompt. In a fresh session the draft becomes a
     /// real session first, the same path the first message takes.
-    private func runCompare() {
+    private func performCompare() {
         let others = engine.agents.filter(\.ready).map(\.id)
         guard others.count > 1, canCompare, !comparing else { return }
-        let typed = draftBox.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let prompt = typed.isEmpty
-            ? (lastPrompt.isEmpty ? "ทบทวนงานที่ค้างอยู่แล้วเสนอขั้นต่อไป" : lastPrompt)
-            : typed
-        if !typed.isEmpty {
-            lastPrompt = typed
+        let source = comparePrompt
+        let prompt = source.text
+        if source.fromComposer {
+            lastPrompt = prompt
             draftBox.text = ""
             composerFocus &+= 1
         }
