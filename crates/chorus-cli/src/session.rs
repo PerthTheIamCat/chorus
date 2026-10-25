@@ -137,6 +137,11 @@ pub struct CompareBranch {
     /// not an in/out split (see `persist_outcome`), so this is the token figure.
     pub context_used: Option<i64>,
     pub cost_usd: Option<f64>,
+    /// The agent's private copy of the project (a git worktree) and its
+    /// branch; `None` when the project is not a git repo and every branch
+    /// ran in the shared folder.
+    pub worktree: Option<String>,
+    pub worktree_branch: Option<String>,
 }
 
 /// The result of a relay run: who ended up answering, their turn, and every
@@ -1428,15 +1433,24 @@ impl Session {
                 head,
                 &format!("compare: {}", spec.name),
             )?;
+            // Each agent works in its own git worktree, started from the
+            // user's current tree, so none sees (or edits) another's files.
+            // Outside a git repo, or if the worktree cannot be made, the
+            // shared folder is used as before.
+            let isolated = self.compare_worktree(&spec.name);
+            if let Some((_, cwd)) = &isolated {
+                self.store.conn().execute(
+                    "UPDATE session SET cwd = ?1 WHERE id = ?2",
+                    (cwd.to_string_lossy().as_ref(), fork_id),
+                )?;
+            }
             let mut branch = Session::open(Path::new(&db_path), fork_id)?;
             branch.forced_bridge = Some(self.resolve_bridge(&spec.name, &spec.bridge));
-            // Branches share the workspace, so each run is measured from the
-            // tree as it was when that run began.
-            let before = self.checkpoint.as_ref().and_then(|ck| ck.snapshot("compare base").ok());
+            let before = branch.checkpoint.as_ref().and_then(|ck| ck.snapshot("compare base").ok());
             let started = std::time::Instant::now();
             let turn = branch.run_turn(&spec.name, &spec.provider, prompt, policy);
             let elapsed_ms = started.elapsed().as_millis() as u64;
-            let diff = match (&self.checkpoint, &before) {
+            let diff = match (&branch.checkpoint, &before) {
                 (Some(ck), Some(base)) => ck.diff_since_user(base).unwrap_or_default(),
                 _ => String::new(),
             };
@@ -1449,9 +1463,38 @@ impl Session {
                 elapsed_ms,
                 context_used: used.context_used,
                 cost_usd: used.cost_usd,
+                worktree: isolated.as_ref().map(|(w, _)| w.path.clone()),
+                worktree_branch: isolated.as_ref().map(|(w, _)| w.branch.clone()),
             });
         }
         Ok(out)
+    }
+
+    /// A private worktree for one compare branch and the directory inside it
+    /// that corresponds to this session's folder. `None` when the folder is
+    /// not in a git repo or the worktree could not be made.
+    fn compare_worktree(&self, agent: &str) -> Option<(chorus_core::worktrees::WorktreeInfo, PathBuf)> {
+        let git = |args: &[&str]| -> Option<String> {
+            let o = std::process::Command::new("git").args(args).current_dir(&self.cwd).output().ok()?;
+            o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        };
+        let top = PathBuf::from(git(&["rev-parse", "--show-toplevel"])?);
+        // `HEAD` must exist to branch from it.
+        git(&["rev-parse", "--verify", "--quiet", "HEAD"])?;
+        let prefix = git(&["rev-parse", "--show-prefix"]).unwrap_or_default();
+        let role: String = format!("compare-{}", agent.to_lowercase())
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .take(64)
+            .collect();
+        let wt = chorus_core::worktrees::create_compare_worktree(
+            &top,
+            &role,
+            &chorus_core::worktrees::default_worktrees_dir(),
+        )
+        .ok()?;
+        let cwd = PathBuf::from(&wt.path).join(prefix);
+        Some((wt, cwd))
     }
 
     /// Run a turn against a relay chain: try the first agent; on a transient,

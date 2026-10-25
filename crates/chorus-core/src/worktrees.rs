@@ -46,6 +46,16 @@ pub fn create_worktree(root: &Path, role: &str) -> Result<WorktreeInfo> {
 
 /// Provision an isolated worktree with opt-in `.env*` copying.
 pub fn create_worktree_ext(root: &Path, role: &str, copy_env: bool) -> Result<WorktreeInfo> {
+    create_worktree_in(root, role, copy_env, &default_worktrees_dir())
+}
+
+/// [`create_worktree_ext`] with the parent directory chosen by the caller.
+pub fn create_worktree_in(
+    root: &Path,
+    role: &str,
+    copy_env: bool,
+    worktrees_dir: &Path,
+) -> Result<WorktreeInfo> {
     if !crate::roles::is_valid_role_name(role) {
         return Err(crate::ChorusError::Invalid(format!(
             "invalid role name {role:?}: must match [a-z0-9-]{{1,64}}"
@@ -54,8 +64,7 @@ pub fn create_worktree_ext(root: &Path, role: &str, copy_env: bool) -> Result<Wo
 
     let short_id = secure_short_id(role);
     let branch = format!("chorus/{role}-{short_id}");
-    let worktrees_dir = default_worktrees_dir();
-    fs::create_dir_all(&worktrees_dir)?;
+    fs::create_dir_all(worktrees_dir)?;
 
     let wt_path = worktrees_dir.join(format!("{role}-{short_id}"));
     if wt_path.exists() {
@@ -96,6 +105,70 @@ pub fn create_worktree_ext(root: &Path, role: &str, copy_env: bool) -> Result<Wo
         allocated_port,
         status: "active".into(),
     })
+}
+
+/// A worktree of `root` that starts from what the user is looking at — HEAD
+/// plus their uncommitted edits and new files — so agents compared in
+/// separate worktrees all begin from the same tree, and none sees another's
+/// changes. Untracked files that look like secrets are not copied.
+///
+/// Gitignored files (`node_modules`, build output, `.env`) are not carried
+/// over; an agent that needs them has to build them in its worktree.
+pub fn create_compare_worktree(root: &Path, role: &str, worktrees_dir: &Path) -> Result<WorktreeInfo> {
+    let info = create_worktree_in(root, role, false, worktrees_dir)?;
+    let wt = Path::new(&info.path);
+    if let Err(e) = sync_dirty_state(root, wt) {
+        let _ = remove_worktree(root, wt, Some(&info.branch));
+        return Err(e);
+    }
+    Ok(info)
+}
+
+fn sync_dirty_state(root: &Path, wt: &Path) -> Result<()> {
+    use std::io::Write;
+    let bad = |what: &str, out: &std::process::Output| {
+        crate::ChorusError::Invalid(format!("{what}: {}", String::from_utf8_lossy(&out.stderr).trim()))
+    };
+    let diff = Command::new("git").args(["diff", "HEAD", "--binary"]).current_dir(root).output()?;
+    if !diff.status.success() {
+        return Err(bad("git diff", &diff));
+    }
+    if !diff.stdout.is_empty() {
+        let mut apply = Command::new("git")
+            .args(["apply", "--whitespace=nowarn", "-"])
+            .current_dir(wt)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        apply.stdin.take().expect("piped stdin").write_all(&diff.stdout)?;
+        let out = apply.wait_with_output()?;
+        if !out.status.success() {
+            return Err(bad("git apply", &out));
+        }
+    }
+    let others = Command::new("git")
+        .args(["ls-files", "-o", "--exclude-standard", "-z"])
+        .current_dir(root)
+        .output()?;
+    if !others.status.success() {
+        return Err(bad("git ls-files", &others));
+    }
+    for rel in others.stdout.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+        let rel = String::from_utf8_lossy(rel).into_owned();
+        if rel.starts_with(".chorus/") || crate::gitflow::is_secret_path(&rel) {
+            continue;
+        }
+        let (from, to) = (root.join(&rel), wt.join(&rel));
+        if let Some(dir) = to.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        // Symlinks and unreadable files are skipped, not fatal.
+        if from.is_file() {
+            let _ = fs::copy(&from, &to);
+        }
+    }
+    Ok(())
 }
 
 /// Remove worktree and delete branch
@@ -310,6 +383,40 @@ pub fn discard_worktree_by_branch(root: &Path, branch: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_compare_worktree_starts_from_the_dirty_tree() {
+        use std::process::Command;
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let o = Command::new("git").args(args).current_dir(dir).output().unwrap();
+            assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        };
+        let repo = tempfile::tempdir().unwrap();
+        let r = repo.path();
+        git(r, &["init", "-q", "-b", "main"]);
+        git(r, &["config", "user.email", "t@t"]);
+        git(r, &["config", "user.name", "t"]);
+        git(r, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(r.join("a.txt"), "one\n").unwrap();
+        git(r, &["add", "."]);
+        git(r, &["commit", "-qm", "init"]);
+        // The user's uncommitted work: an edit, a new file, a secret.
+        std::fs::write(r.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(r.join("new.txt"), "fresh\n").unwrap();
+        std::fs::write(r.join(".env"), "TOKEN=x\n").unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        let wt = super::create_compare_worktree(r, "compare-codex", out.path()).unwrap();
+        let w = std::path::Path::new(&wt.path);
+        assert_eq!(std::fs::read_to_string(w.join("a.txt")).unwrap(), "one\ntwo\n");
+        assert_eq!(std::fs::read_to_string(w.join("new.txt")).unwrap(), "fresh\n");
+        assert!(!w.join(".env").exists(), "secrets are not copied");
+
+        // Isolation: a change in the worktree never reaches the user's tree.
+        std::fs::write(w.join("a.txt"), "agent\n").unwrap();
+        assert_eq!(std::fs::read_to_string(r.join("a.txt")).unwrap(), "one\ntwo\n");
+        super::remove_worktree(r, w, Some(&wt.branch)).unwrap();
+    }
+
     use super::*;
 
     #[test]

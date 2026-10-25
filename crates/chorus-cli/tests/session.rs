@@ -600,6 +600,45 @@ fn compare_mode_forks_the_session_per_agent() {
 }
 
 
+#[test]
+fn compare_branches_in_a_git_repo_each_get_their_own_worktree() {
+    let tmp = std::env::temp_dir().join(format!("chorus-cmp-git-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let git = |args: &[&str]| {
+        let o = std::process::Command::new("git").args(args).current_dir(&tmp).output().unwrap();
+        assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "user.name", "t"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(tmp.join("a.txt"), "one\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "init"]);
+    std::fs::write(tmp.join("a.txt"), "one\ntwo\n").unwrap(); // uncommitted work
+
+    let db = tmp.join("store.db");
+    let mut s = Session::create(&db, &tmp, "compare").unwrap().with_bridge(mock_bridge());
+    s.run_turn("user", "human", "here is the task", Policy::AllowAll).unwrap();
+    let agents = vec![AgentSpec::new("codex", "openai"), AgentSpec::new("claude-opus", "anthropic")];
+    let branches = s.compare(&agents, "propose a fix", Policy::AllowAll).expect("compare runs");
+
+    let trees: Vec<_> = branches.iter().map(|b| b.worktree.clone().expect("worktree")).collect();
+    assert_ne!(trees[0], trees[1], "agents share a worktree");
+    for t in &trees {
+        let t = std::path::Path::new(t);
+        assert_eq!(std::fs::read_to_string(t.join("a.txt")).unwrap(), "one\ntwo\n", "starts from the dirty tree");
+        assert!(t.starts_with(chorus_core::worktrees::default_worktrees_dir()));
+    }
+    assert_eq!(std::fs::read_to_string(tmp.join("a.txt")).unwrap(), "one\ntwo\n");
+
+    for (b, t) in branches.iter().zip(&trees) {
+        let _ = chorus_core::worktrees::remove_worktree(&tmp, std::path::Path::new(t), b.worktree_branch.as_deref());
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 // ---- the warm tier and the task-state tier -------------------------------
 //
 // These three guard the regression that a hand-fed bench could not see: for

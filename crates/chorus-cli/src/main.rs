@@ -225,6 +225,9 @@ fn compare_cmd(args: &[String]) -> Result<()> {
             Ok((msg, stop)) => println!("{}\n[{stop}]", msg.trim()),
             Err(e) => println!("failed: {e:#}"),
         }
+        if let Some(w) = &b.worktree {
+            println!("worktree: {w}");
+        }
         if !b.diff.trim().is_empty() {
             println!("\n{}", b.diff.trim_end());
         }
