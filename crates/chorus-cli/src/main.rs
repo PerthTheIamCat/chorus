@@ -219,12 +219,8 @@ fn compare_cmd(args: &[String]) -> Result<()> {
             b.agent, b.session_id
         );
         let cost = b.cost_usd.map(|c| format!(" · ${c:.4}")).unwrap_or_default();
-        println!(
-            "{:.1}s · {} in / {} out tokens{cost}",
-            b.elapsed_ms as f64 / 1000.0,
-            b.tokens_in,
-            b.tokens_out
-        );
+        let ctx = b.context_used.map(|c| format!(" · {c} tokens in context")).unwrap_or_default();
+        println!("{:.1}s{ctx}{cost}", b.elapsed_ms as f64 / 1000.0);
         match b.result {
             Ok((msg, stop)) => println!("{}\n[{stop}]", msg.trim()),
             Err(e) => println!("failed: {e:#}"),

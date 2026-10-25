@@ -10,8 +10,8 @@ final class CompareResultsTests: XCTestCase {
     }
 
     func testStatsLineShowsTimeTokensAndCost() throws {
-        let b = try branch(#","elapsed_ms":65000,"tokens_in":12400,"tokens_out":830,"cost_usd":0.0421"#)
-        XCTAssertEqual(CompareResultsSheet.stats(b), "1m 05s · 12.4k in · 830 out · $0.0421")
+        let b = try branch(#","elapsed_ms":65000,"context_used":12400,"cost_usd":0.0421"#)
+        XCTAssertEqual(CompareResultsSheet.stats(b), "1m 05s · 12.4k tokens · $0.0421")
         XCTAssertEqual(CompareResultsSheet.duration(12_300), "12.3s")
     }
 

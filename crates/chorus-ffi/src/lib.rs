@@ -1681,8 +1681,7 @@ struct CompareBranchJson {
     error: Option<String>,
     diff: String,
     elapsed_ms: u64,
-    tokens_in: i64,
-    tokens_out: i64,
+    context_used: Option<i64>,
     cost_usd: Option<f64>,
 }
 
@@ -1730,8 +1729,7 @@ pub unsafe extern "C" fn chorus_compare(
                         error,
                         diff: b.diff,
                         elapsed_ms: b.elapsed_ms,
-                        tokens_in: b.tokens_in,
-                        tokens_out: b.tokens_out,
+                        context_used: b.context_used,
                         cost_usd: b.cost_usd,
                     }
                 })

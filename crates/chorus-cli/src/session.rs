@@ -133,8 +133,9 @@ pub struct CompareBranch {
     /// against the tree as the run began; empty when it changed nothing).
     pub diff: String,
     pub elapsed_ms: u64,
-    pub tokens_in: i64,
-    pub tokens_out: i64,
+    /// Context the agent held after its run. Bridges report context pressure,
+    /// not an in/out split (see `persist_outcome`), so this is the token figure.
+    pub context_used: Option<i64>,
     pub cost_usd: Option<f64>,
 }
 
@@ -1446,8 +1447,7 @@ impl Session {
                 result: turn.map(|t| (t.message, t.stop_reason)),
                 diff,
                 elapsed_ms,
-                tokens_in: used.tokens_in,
-                tokens_out: used.tokens_out,
+                context_used: used.context_used,
                 cost_usd: used.cost_usd,
             });
         }

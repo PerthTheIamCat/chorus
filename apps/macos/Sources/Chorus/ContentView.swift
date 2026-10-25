@@ -4145,8 +4145,7 @@ struct CompareResultsSheet: View {
         // Absent in payloads from an older engine.
         var diff: String? = nil
         var elapsed_ms: Int64? = nil
-        var tokens_in: Int64? = nil
-        var tokens_out: Int64? = nil
+        var context_used: Int64? = nil
         var cost_usd: Double? = nil
         var id: Int64 { session_id }
     }
@@ -4174,12 +4173,11 @@ struct CompareResultsSheet: View {
         return (try? AttributedString(markdown: text, options: opts)) ?? AttributedString(text)
     }
 
-    /// Stats line for one column: time · tokens · cost.
+    /// Stats line for one column: time · context tokens · cost.
     static func stats(_ b: Branch) -> String {
         var parts: [String] = []
         if let ms = b.elapsed_ms, ms > 0 { parts.append(duration(ms)) }
-        let tin = b.tokens_in ?? 0, tout = b.tokens_out ?? 0
-        if tin + tout > 0 { parts.append("\(compactCount(tin)) in · \(compactCount(tout)) out") }
+        if let ctx = b.context_used, ctx > 0 { parts.append("\(compactCount(ctx)) tokens") }
         if let c = b.cost_usd { parts.append(String(format: "$%.4f", c)) }
         return parts.joined(separator: " · ")
     }
