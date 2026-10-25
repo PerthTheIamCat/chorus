@@ -82,6 +82,7 @@ final class AppCommandCenter: ObservableObject {
     static let shared = AppCommandCenter()
 
     @Published var hasSession = false
+    @Published var canCompare = false
     @Published var busy = false
     @Published var fileOpen = false
     @Published var reviewVisible = false
@@ -160,7 +161,7 @@ struct ChorusCommands: Commands {
                 .keyboardShortcut(AppCommand.nextEffort.shortcut)
             Button("Compare Agents…") { center.send(.compareAgents) }
                 .keyboardShortcut(AppCommand.compareAgents.shortcut)
-                .disabled(!center.hasSession || center.busy)
+                .disabled(!center.canCompare || center.busy)
             Divider()
             Button("Send Review Comments to Agent") { center.send(.sendReview) }
                 .keyboardShortcut(AppCommand.sendReview.shortcut)

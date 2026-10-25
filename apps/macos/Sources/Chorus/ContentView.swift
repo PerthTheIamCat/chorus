@@ -1210,6 +1210,7 @@ struct ContentView: View {
         .onReceive(AppCommandCenter.shared.fire) { run($0) }
         .onAppear { syncCommandState() }
         .onChange(of: engine.sessionID) { _, _ in syncCommandState() }
+        .onChange(of: engine.draft != nil) { _, _ in syncCommandState() }
         .onChange(of: engine.busy) { _, _ in syncCommandState() }
         .onChange(of: selectedFile) { _, _ in syncCommandState() }
         .onChange(of: rightTab) { _, _ in syncCommandState() }
@@ -2182,7 +2183,7 @@ struct ContentView: View {
                         .font(.caption.weight(.medium))
                     }
                     .buttonStyle(InteractiveStyle(cornerRadius: 7, padding: .init(top: 4, leading: 8, bottom: 4, trailing: 8)))
-                    .disabled(engine.sessionID < 0 || engine.busy || comparing)
+                    .disabled(!canCompare || engine.busy || comparing)
                     .help("ถามทุก agent ที่พร้อมด้วยคำถามล่าสุด แล้วเทียบคำตอบ ไฟล์ที่แก้ เวลา และค่าใช้จ่าย (⇧⌘K)")
                 }
             }
@@ -2290,6 +2291,7 @@ struct ContentView: View {
     private func syncCommandState() {
         let c = AppCommandCenter.shared
         c.hasSession = engine.sessionID >= 0
+        c.canCompare = canCompare
         c.busy = engine.busy
         c.fileOpen = selectedFile != nil
         c.reviewVisible = (showInspector && rightTab == .changes) || maximizedPanel == .diffReviewer
@@ -2712,15 +2714,35 @@ struct ContentView: View {
         return Array(out.filter { hit($0.title) || hit($0.detail) }.prefix(9))
     }
 
+    /// A session exists, or the first message would start one (a fresh draft).
+    private var canCompare: Bool { engine.sessionID >= 0 || engine.draft != nil }
+
+    /// Compares what is typed in the composer (clearing it, like send); with
+    /// nothing typed, the last prompt. In a fresh session the draft becomes a
+    /// real session first, the same path the first message takes.
     private func runCompare() {
         let others = engine.agents.filter(\.ready).map(\.id)
-        guard others.count > 1, engine.sessionID >= 0, !comparing else { return }
-        comparing = true
-        engine.compare(
-            lastPrompt.isEmpty ? "ทบทวนงานที่ค้างอยู่แล้วเสนอขั้นต่อไป" : lastPrompt,
-            agents: others.joined(separator: ","),
-            level: max(permission.rawValue, 0)
-        ) { comparing = false; compareOutput = $0 }
+        guard others.count > 1, canCompare, !comparing else { return }
+        let typed = draftBox.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prompt = typed.isEmpty
+            ? (lastPrompt.isEmpty ? "ทบทวนงานที่ค้างอยู่แล้วเสนอขั้นต่อไป" : lastPrompt)
+            : typed
+        if !typed.isEmpty {
+            lastPrompt = typed
+            draftBox.text = ""
+            composerFocus &+= 1
+        }
+        let level = max(permission.rawValue, 0)
+        let agents = others.joined(separator: ",")
+        let start = {
+            comparing = true
+            engine.compare(prompt, agents: agents, level: level) { comparing = false; compareOutput = $0 }
+        }
+        if engine.sessionID < 0 && engine.draft != nil {
+            engine.commitDraft { applyModel(model); start() }
+        } else {
+            start()
+        }
     }
 
     // MARK: command palette (⌘K)
