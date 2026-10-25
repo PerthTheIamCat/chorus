@@ -1105,6 +1105,11 @@ struct ContentView: View {
         }
         .onChange(of: engine.busy) { _, busy in
             flushQueue()
+            if !busy && engine.sessionID >= 0 && !NSApp.isActive {
+                let reply = engine.events.last(where: { $0.actor != "user" && $0.kind == "msg" })
+                let n = TurnNotice.content(lastError: engine.lastError, lastReply: reply?.body, agent: reply?.actor)
+                TurnNotice.post(id: "turn-done-\(engine.sessionID)", title: n.title, body: n.body)
+            }
             if !busy && engine.sessionID >= 0 {
                 engine.updateSessionCost(db: dbPath, id: engine.sessionID)
                 // Runs the project's own code — only after "trust this project".
@@ -2917,22 +2922,8 @@ struct ContentView: View {
         }
     }
 
-    /// UNUserNotificationCenter raises an exception in a process with no
-    /// bundle identifier (a bare `swift run` binary), so only the .app posts.
     private func postNotification(id: String, title: String, body: String) {
-        guard Bundle.main.bundleIdentifier != nil else { return }
-        let center = UNUserNotificationCenter.current()
-        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
-            if let error { NSLog("chorus: notification permission failed: \(error)") }
-            guard granted else { return }
-            let content = UNMutableNotificationContent()
-            content.title = title
-            content.body = body
-            content.sound = .default
-            center.add(UNNotificationRequest(identifier: id, content: content, trigger: nil)) { error in
-                if let error { NSLog("chorus: notification not delivered: \(error)") }
-            }
-        }
+        TurnNotice.post(id: id, title: title, body: body)
     }
 
     private func loadSessions(of p: ChorusProject) {

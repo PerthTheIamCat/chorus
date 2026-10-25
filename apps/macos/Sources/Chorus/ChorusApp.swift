@@ -1,11 +1,17 @@
 import AppKit
 import CChorus
 import SwiftUI
+import UserNotifications
 
 /// Closing the last window quits the app, and quitting reaps the agent tree.
 /// Without this the app lingers windowless and the bridges it spawned
 /// (claude-agent-acp, serena, graft) outlive it.
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        if Bundle.main.bundleIdentifier != nil {
+            UNUserNotificationCenter.current().delegate = NotificationClickHandler.shared
+        }
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationWillTerminate(_ notification: Notification) { chorus_shutdown() }
 }
