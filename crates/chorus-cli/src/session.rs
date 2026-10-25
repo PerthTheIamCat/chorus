@@ -1225,7 +1225,7 @@ impl Session {
     pub fn review_proposal(&self, id: i64, approve: bool) -> Result<()> {
         let c = self.mem_store().conn();
         if approve {
-            memory::approve(c, id)?;
+            memory::approve_with(c, id, chorus_core::embedding::from_env().as_deref())?;
         } else {
             memory::reject(c, id)?;
         }
@@ -1982,7 +1982,8 @@ impl Session {
             .find(|(e, _)| e.kind == EventKind::Msg && e.actor == self.user)
             .map(|(_, b)| b.as_str())
             .unwrap_or("");
-        let facts = memory::relevant(self.mem_store().conn(), 1, query, 12)?;
+        let embedder = chorus_core::embedding::from_env();
+        let facts = memory::relevant_with(self.mem_store().conn(), 1, query, 12, embedder.as_deref())?;
         let memory_items: Vec<ContextItem> = memory::render(&facts)
             .lines()
             .filter(|l| !l.trim().is_empty())

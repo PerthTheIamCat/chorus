@@ -33,6 +33,7 @@ pub mod lsp_client;
 pub mod mcp;
 pub mod mcp_config;
 pub mod mcp_host;
+pub mod embedding;
 pub mod memory;
 pub mod merge_specialist;
 pub mod merkle;
