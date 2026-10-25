@@ -579,6 +579,8 @@ fn compare_mode_forks_the_session_per_agent() {
     assert_ne!(branches[0].session_id, s.session_id(), "forks are not the parent");
     for b in &branches {
         assert!(b.result.is_ok(), "{} failed: {:?}", b.agent, b.result.as_ref().err());
+        // Every column reports its own cost: wall time at least.
+        assert!(b.elapsed_ms > 0, "{} has no elapsed time", b.agent);
     }
 
     // The parent session is untouched by the comparison.

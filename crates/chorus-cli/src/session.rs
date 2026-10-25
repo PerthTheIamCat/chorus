@@ -129,6 +129,13 @@ pub struct CompareBranch {
     pub agent: String,
     pub session_id: i64,
     pub result: std::result::Result<(String, String), anyhow::Error>,
+    /// What this agent changed in the workspace during its run (unified diff
+    /// against the tree as the run began; empty when it changed nothing).
+    pub diff: String,
+    pub elapsed_ms: u64,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    pub cost_usd: Option<f64>,
 }
 
 /// The result of a relay run: who ended up answering, their turn, and every
@@ -1422,11 +1429,26 @@ impl Session {
             )?;
             let mut branch = Session::open(Path::new(&db_path), fork_id)?;
             branch.forced_bridge = Some(self.resolve_bridge(&spec.name, &spec.bridge));
+            // Branches share the workspace, so each run is measured from the
+            // tree as it was when that run began.
+            let before = self.checkpoint.as_ref().and_then(|ck| ck.snapshot("compare base").ok());
+            let started = std::time::Instant::now();
             let turn = branch.run_turn(&spec.name, &spec.provider, prompt, policy);
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            let diff = match (&self.checkpoint, &before) {
+                (Some(ck), Some(base)) => ck.diff_since_user(base).unwrap_or_default(),
+                _ => String::new(),
+            };
+            let used = usage::get(self.store.conn(), fork_id).ok().flatten().unwrap_or_default();
             out.push(CompareBranch {
                 agent: spec.name.clone(),
                 session_id: fork_id,
                 result: turn.map(|t| (t.message, t.stop_reason)),
+                diff,
+                elapsed_ms,
+                tokens_in: used.tokens_in,
+                tokens_out: used.tokens_out,
+                cost_usd: used.cost_usd,
             });
         }
         Ok(out)
