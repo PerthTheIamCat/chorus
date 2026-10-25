@@ -27,6 +27,7 @@ enum AppCommand: Equatable {
     case stop
     case chooseModel
     case nextEffort
+    case compareAgents
     case sendReview
     case openInEditor
     case systemMonitor
@@ -37,7 +38,7 @@ enum AppCommand: Equatable {
          .toggleSidebar, .toggleExplorer, .toggleInspector]
             + ContentView.RightTab.allCases.indices.map { .inspectorTab($0) }
             + [.toggleOrchestrator, .toggleLivePreview, .toggleTerminal, .toggleFocusMode,
-               .send, .stop, .chooseModel, .nextEffort, .sendReview, .openInEditor, .systemMonitor]
+               .send, .stop, .chooseModel, .nextEffort, .compareAgents, .sendReview, .openInEditor, .systemMonitor]
     }
 
     /// The one key combo for each command. The menu reads this table, so a
@@ -62,6 +63,7 @@ enum AppCommand: Equatable {
         case .stop: KeyboardShortcut(".", modifiers: .command)
         case .chooseModel: KeyboardShortcut("i", modifiers: [.command, .shift])
         case .nextEffort: KeyboardShortcut("e", modifiers: [.command, .shift])
+        case .compareAgents: KeyboardShortcut("k", modifiers: [.command, .shift])
         case .sendReview: KeyboardShortcut(.return, modifiers: [.command, .shift])
         case .openInEditor: KeyboardShortcut("e", modifiers: [.command, .option])
         // Placed above Minimize in the Window menu so it wins over the
@@ -156,6 +158,9 @@ struct ChorusCommands: Commands {
                 .keyboardShortcut(AppCommand.chooseModel.shortcut)
             Button("Next Thinking Level") { center.send(.nextEffort) }
                 .keyboardShortcut(AppCommand.nextEffort.shortcut)
+            Button("Compare Agents…") { center.send(.compareAgents) }
+                .keyboardShortcut(AppCommand.compareAgents.shortcut)
+                .disabled(!center.hasSession || center.busy)
             Divider()
             Button("Send Review Comments to Agent") { center.send(.sendReview) }
                 .keyboardShortcut(AppCommand.sendReview.shortcut)
