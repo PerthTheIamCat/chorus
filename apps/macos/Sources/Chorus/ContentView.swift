@@ -2243,6 +2243,8 @@ struct ContentView: View {
         case .stop:
             guard engine.busy else { return }
             engine.cancel(); queued.removeAll()
+        case .compareAgents:
+            runCompare()
         case .chooseModel, .nextEffort, .sendReview, .openInEditor:
             break // handled by ModelPicker / DiffReviewerView / CodeViewerView
         case .systemMonitor:
