@@ -57,7 +57,7 @@ struct ProviderIcon: View {
     private var providerImage: NSImage? {
         guard let asset else { return nil }
         if let hit = Self.cache.object(forKey: asset as NSString) { return hit }
-        guard let path = Bundle.module.path(forResource: asset, ofType: "svg"),
+        guard let path = ChorusResources.path(forResource: asset, ofType: "svg"),
               let image = NSImage(contentsOfFile: path) else { return nil }
         image.isTemplate = true
         Self.cache.setObject(image, forKey: asset as NSString)

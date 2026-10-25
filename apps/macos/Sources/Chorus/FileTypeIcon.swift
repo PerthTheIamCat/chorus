@@ -38,7 +38,7 @@ struct FileTypeIcon: View {
 
     private static func load(_ asset: String) -> NSImage? {
         if let hit = cache[asset] { return hit }
-        guard let path = Bundle.module.path(forResource: asset, ofType: "svg"),
+        guard let path = ChorusResources.path(forResource: asset, ofType: "svg"),
               let image = NSImage(contentsOfFile: path) else { return nil }
         cache[asset] = image
         return image
