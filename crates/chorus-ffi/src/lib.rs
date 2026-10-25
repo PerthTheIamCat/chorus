@@ -3659,6 +3659,44 @@ pub unsafe extern "C" fn chorus_verify_workspace_json(ws: *const c_char) -> *mut
     }
 }
 
+fn lsp_diagnostics_with(
+    store: &chorus_core::trust::TrustStore,
+    ws: &Path,
+    files: &[String],
+) -> Result<serde_json::Value, String> {
+    let consent = store
+        .consent(ws, &confine_like_turn)
+        .map_err(|e| e.to_string())?;
+    let res = chorus_core::lsp_client::diagnose_files(&consent, files, chorus_core::lsp_client::default_wait())
+        .map_err(|e| e.to_string())?;
+    serde_json::to_value(res).map_err(|e| e.to_string())
+}
+
+/// Language-server diagnostics for `files_json` (a JSON array of paths relative
+/// to `ws`, normally the files the session changed). Same trust and sandbox as
+/// `chorus_verify_workspace_json`; the reply has the same `verification` shape.
+/// Servers that are not installed are listed in `raw_output`.
+///
+/// # Safety
+/// `ws` and `files_json` must be null or NUL-terminated strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_lsp_diagnostics_json(ws: *const c_char, files_json: *const c_char) -> *mut c_char {
+    let (Some(ws_path), Some(files)) = (borrow(ws), borrow(files_json)) else {
+        return err("arguments must be valid UTF-8");
+    };
+    let Ok(files) = serde_json::from_str::<Vec<String>>(files) else {
+        return err("files must be a JSON array of strings");
+    };
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        lsp_diagnostics_with(&chorus_core::trust::TrustStore::default_location(), Path::new(ws_path), &files)
+    }));
+    match result {
+        Ok(Ok(val)) => out(serde_json::json!({"ok": true, "verification": val}).to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in lsp diagnostics"),
+    }
+}
+
 /// Structural AST diff analysis to evaluate semantic vs cosmetic line changes.
 ///
 /// # Safety
@@ -4168,6 +4206,48 @@ mod tests {
                 !escaped.exists(),
                 "write outside workspace must be denied by Seatbelt"
             );
+        }
+        let _ = std::fs::remove_file(&escaped);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The language-server path has the same gate as verify: untrusted means
+    /// nothing starts, and a trusted project's build script (rust-analyzer runs
+    /// it) is confined by Seatbelt.
+    #[test]
+    fn ffi_lsp_needs_trust_and_runs_build_rs_under_seatbelt() {
+        let base = std::env::temp_dir().join(format!("chorus-ffi-lsp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let ws = base.join("ws");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
+        let escaped = home.join(format!(".chorus-lsp-escape-{}", std::process::id()));
+        let _ = std::fs::remove_file(&escaped);
+        std::fs::write(
+            ws.join("Cargo.toml"),
+            "[package]\nname = \"hostile\"\nversion = \"0.0.0\"\nedition = \"2021\"\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join("src/lib.rs"), "pub fn f() -> i32 { \"nope\" }\n").unwrap();
+        std::fs::write(
+            ws.join("build.rs"),
+            format!("fn main() {{ let _ = std::fs::write({:?}, \"x\"); std::fs::write(\"ran\", \"x\").unwrap(); }}", escaped),
+        )
+        .unwrap();
+        let store = chorus_core::trust::TrustStore::at(base.join("trusted.json"));
+        let files = vec!["src/lib.rs".to_string()];
+
+        let refused = lsp_diagnostics_with(&store, &ws, &files);
+        assert!(refused.unwrap_err().contains("not trusted"));
+        assert!(!ws.join("ran").exists() && !ws.join("target").exists());
+
+        store.set_trusted(&ws, true).unwrap();
+        if cfg!(target_os = "macos") && chorus_core::trust::which("rust-analyzer").is_some() {
+            let r = lsp_diagnostics_with(&store, &ws, &files).expect("diagnostics");
+            assert_eq!(r["checker_used"], "lsp:rust-analyzer", "{r}");
+            let msgs = r["diagnostics"].to_string();
+            assert!(msgs.contains("mismatched types"), "type error should be reported: {msgs}");
+            assert!(!escaped.exists(), "build script write outside the workspace must be denied");
         }
         let _ = std::fs::remove_file(&escaped);
         let _ = std::fs::remove_dir_all(&base);

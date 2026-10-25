@@ -29,6 +29,10 @@ struct DiffReviewerView: View {
     @State private var verificationResult: Engine.VerificationResult? = nil
     @State private var isVerifying: Bool = false
     @State private var showVerificationSheet: Bool = false
+    @State private var lspResult: Engine.VerificationResult? = nil
+    @State private var lspError: String? = nil
+    @State private var isRunningLsp: Bool = false
+    @State private var showLspPopover: Bool = false
     @State private var showShipSheet: Bool = false
 
     enum ViewMode: String, CaseIterable {
@@ -218,6 +222,30 @@ struct DiffReviewerView: View {
                     .help("ตรวจความถูกต้องของ workspace ด้วย Fast Compiler/Linter Loop")
                     .popover(isPresented: $showVerificationSheet) {
                         VerificationFindingsPopover(result: verificationResult)
+                    }
+
+                    // Language-server diagnostics for the files this session changed.
+                    Button {
+                        runLspDiagnostics()
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "stethoscope").font(.system(size: 10))
+                            if isRunningLsp {
+                                ProgressView().controlSize(.mini)
+                            } else if let r = lspResult {
+                                Text(r.passed ? "LSP ✓" : "LSP \(r.findings.filter { $0.severity == "error" }.count)")
+                                    .font(.system(size: 9.5, weight: .semibold))
+                            } else {
+                                Text("LSP").font(.system(size: 9.5))
+                            }
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .disabled(workspace.isEmpty || filesWithDiffs.isEmpty || isRunningLsp)
+                    .help("ตรวจไฟล์ที่ session นี้แก้ด้วย language server (rust-analyzer, typescript-language-server, pyright, sourcekit-lsp, gopls — ตัวที่ติดตั้งไว้) ต้อง trust โปรเจกต์ก่อน")
+                    .popover(isPresented: $showLspPopover) {
+                        VerificationFindingsPopover(result: lspResult, error: lspError)
                     }
 
                     Button {
@@ -519,6 +547,17 @@ struct DiffReviewerView: View {
         }
     }
 
+    private func runLspDiagnostics() {
+        isRunningLsp = true
+        lspError = nil
+        engine.lspDiagnostics(ws: workspace, files: filesWithDiffs) { result, error in
+            lspResult = result
+            lspError = error
+            isRunningLsp = false
+            showLspPopover = true
+        }
+    }
+
     private func runVerification() {
         let ws = workspace.isEmpty ? NSHomeDirectory() : workspace
         isVerifying = true
@@ -532,6 +571,7 @@ struct DiffReviewerView: View {
 
 struct VerificationFindingsPopover: View {
     let result: Engine.VerificationResult?
+    var error: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -581,10 +621,15 @@ struct VerificationFindingsPopover: View {
                     }
                 }
                 .frame(maxHeight: 220)
+            } else if let error {
+                Text(error).font(.caption).foregroundColor(.red).textSelection(.enabled)
             } else {
                 Text("Zero lint or compiler diagnostics. Clean workspace.")
                     .font(.caption)
                     .foregroundColor(.secondary)
+            }
+            if let notes = result?.raw_output.trimmingCharacters(in: .whitespacesAndNewlines), !notes.isEmpty, result?.tool_used.hasPrefix("lsp") == true {
+                Text(notes).font(.caption2).foregroundColor(.secondary).textSelection(.enabled)
             }
         }
         .padding(12)
