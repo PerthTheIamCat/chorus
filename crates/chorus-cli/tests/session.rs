@@ -502,9 +502,10 @@ fn a_real_error_is_not_routed_around() {
             name: "claude-opus".into(),
             provider: "anthropic".into(),
             // A request every agent would reject the same way. (A bridge's own
-            // `TypeError` crash used to stand here; it fails over since #23 —
-            // that is one bridge's bug, and the next agent can still answer.)
-            bridge: failing_bridge("Invalid params: prompt[0].type must be one of text, image, resource"),
+            // `TypeError` crash used to stand here; it fails over since #23,
+            // and a bridge rejecting the prompt shape since #30 — those are
+            // one bridge's bugs, and the next agent can still answer.)
+            bridge: failing_bridge("Invalid params: model name must not be empty"),
         },
         AgentSpec {
             name: "codex".into(),
