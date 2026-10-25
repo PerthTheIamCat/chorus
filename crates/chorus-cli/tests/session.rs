@@ -504,7 +504,7 @@ fn a_real_error_is_not_routed_around() {
             // A request every agent would reject the same way. (A bridge's own
             // `TypeError` crash used to stand here; it fails over since #23 —
             // that is one bridge's bug, and the next agent can still answer.)
-            bridge: failing_bridge("Invalid params: prompt[0].type must be one of text, image, resource"),
+            bridge: failing_bridge("Invalid params: cwd must be an absolute path"),
         },
         AgentSpec {
             name: "codex".into(),
