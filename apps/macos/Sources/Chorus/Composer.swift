@@ -102,6 +102,9 @@ struct ComposerField<Leading: View, Trailing: View>: View {
     var onStop: () -> Void = {}
     /// Show the info line when attachments narrow the router's choice.
     var routeNoteEnabled = true
+    /// A guessed next message (Rust: `suggest`), shown greyed out while the
+    /// field is empty; Tab puts it in the field without sending.
+    var ghost: String? = nil
     var placeholder = "ขอให้ทำอะไร… ( / คำสั่ง · @ ไฟล์หรือเอเจนต์ · วางจากเว็บได้ จะแปลงเป็น Markdown )"
     @ViewBuilder var leading: () -> Leading
     @ViewBuilder var trailing: () -> Trailing
@@ -192,11 +195,25 @@ struct ComposerField<Leading: View, Trailing: View>: View {
     private func textArea(_ list: [Suggestion]) -> some View {
         ZStack(alignment: .topLeading) {
             if box.text.isEmpty {
-                Text(placeholder).foregroundStyle(.tertiary)
-                    .font(.system(size: 13))
-                    .lineLimit(1)
-                    .padding(.leading, 5).padding(.top, 4)
-                    .allowsHitTesting(false)
+                Group {
+                    if let ghost, !ghost.isEmpty {
+                        HStack(spacing: 6) {
+                            Text(ghost).foregroundStyle(.secondary)
+                            Text("⇥ Tab")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 4))
+                        }
+                        .help("กด Tab เพื่อใส่ข้อความนี้ลงช่องพิมพ์ (ยังไม่ส่ง)")
+                    } else {
+                        Text(placeholder).foregroundStyle(.tertiary)
+                    }
+                }
+                .font(.system(size: 13))
+                .lineLimit(1)
+                .padding(.leading, 5).padding(.top, 4)
+                .allowsHitTesting(false)
             }
             NativeComposerTextView(
                 text: $box.text,
@@ -208,6 +225,11 @@ struct ComposerField<Leading: View, Trailing: View>: View {
                 onSubmit: onSubmit,
                 focusToken: focusToken,
                 onKeyNav: { nav in
+                    // Tab on an empty field takes the hint; it never sends.
+                    if list.isEmpty, nav == .tab, box.text.isEmpty, let ghost, !ghost.isEmpty {
+                        box.text = ghost
+                        return true
+                    }
                     guard !list.isEmpty else { return false }
                     switch nav {
                     case .up:

@@ -71,6 +71,7 @@ struct ContentView: View {
     /// Plan mode: the next messages get a read-only plan first; the agent
     /// only changes anything after "ทำตามแผน".
     @AppStorage("chorus.planFirst") private var planFirst = false
+    @AppStorage("chorus.suggestNext") private var suggestNext = true
     @State private var model = ""
     @AppStorage("chorus.autoRoute") private var autoRoute = true
     @State private var sessionModes: [Int64: SessionMode] = [:]
@@ -1090,6 +1091,12 @@ struct ContentView: View {
         // The last choice is the next launch's default (Settings › สิทธิ์เริ่มต้น
         // reads the same key) — picking "ให้ทำเลย" once should not revert to
         // asking every time the app opens.
+        // A turn just ended: ask the local model what the user is likely to
+        // type next. Off by setting, or when no local model is configured.
+        .onChange(of: engine.busy) { _, busy in
+            if busy { engine.nextHint = nil }
+            else if suggestNext { engine.loadNextHint(model: routerModel) }
+        }
         .onChange(of: permission) { _, p in
             UserDefaults.standard.set(Int(p.rawValue), forKey: "chorus.defaultPermission")
         }
@@ -2206,7 +2213,8 @@ struct ContentView: View {
                           isBusy: engine.busy,
                           canSend: engine.sessionID >= 0 || engine.draft != nil,
                           onStop: { engine.cancel(); queued.removeAll() },
-                          routeNoteEnabled: currentSessionMode == .autoRoute) {
+                          routeNoteEnabled: currentSessionMode == .autoRoute,
+                          ghost: suggestNext ? engine.nextHint : nil) {
                 ComposerModeMenu(mode: Binding(
                     get: { currentSessionMode },
                     set: { currentSessionMode = $0 }

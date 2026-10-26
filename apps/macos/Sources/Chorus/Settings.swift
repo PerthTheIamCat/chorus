@@ -371,6 +371,7 @@ func resetText(_ unix: Int64?) -> String {
 struct GeneralSettings: View {
     @AppStorage("chorus.enterSends") private var enterSends = true
     @AppStorage("chorus.thinkingOpen") private var thinkingOpen = false
+    @AppStorage("chorus.suggestNext") private var suggestNext = true
     @AppStorage("chorus.dismissedSetupCards") private var dismissedSetupCards = ""
     @AppStorage("chorus.scrollbarStyle") private var scrollbarStyle = "hidden"
     @AppStorage("chorus.inspectorPosition") private var inspectorPosition = "trailing"
@@ -390,6 +391,11 @@ struct GeneralSettings: View {
             SettingsRow(title: "เปิดกล่องความคิดไว้",
                         info: "แสดงสิ่งที่ agent คิดระหว่างทำงาน ปิดไว้ก็กดเปิดดูทีหลังได้") {
                 Toggle("เปิดกล่องความคิดไว้", isOn: $thinkingOpen).labelsHidden().toggleStyle(.switch)
+            }
+            RowDivider()
+            SettingsRow(title: "เดาข้อความถัดไป (Tab)",
+                        info: "หลัง agent ตอบเสร็จ ช่องพิมพ์ขึ้นข้อความที่น่าจะพิมพ์ต่อแบบจาง ๆ กด Tab เพื่อใส่ลงช่อง (ยังไม่ส่ง) · ใช้โมเดลในเครื่องตัวเดียวกับ router ไม่เสียโทเคนของ provider · ไม่มีโมเดลในเครื่อง = ไม่ขึ้น") {
+                Toggle("เดาข้อความถัดไป", isOn: $suggestNext).labelsHidden().toggleStyle(.switch)
             }
         }
         SettingsGroup(title: "หน้าต่าง") {
