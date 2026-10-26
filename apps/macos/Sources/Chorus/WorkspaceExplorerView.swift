@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Workspace Explorer (Column 2, toggled via ⌘B).
@@ -183,8 +184,12 @@ struct WorkspaceExplorerView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             debouncedRefreshTree()
         }
-        .onReceive(Timer.publish(every: 15, on: .main, in: .common).autoconnect()) { _ in
-            if !workspace.isEmpty && !isLoading {
+        // A safety net only: turns (workingDiff) and coming back to the app
+        // already refresh. Each pass is `git status -uall` plus a stat of every
+        // file to depth 6, so a 15 s poll that also ran in the background kept
+        // a big monorepo's machine warm doing nothing.
+        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
+            if NSApp.isActive && !workspace.isEmpty && !isLoading {
                 refreshTree()
             }
         }

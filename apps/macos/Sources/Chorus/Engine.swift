@@ -330,10 +330,23 @@ final class Engine: ObservableObject {
         switching = true
         lastError = nil
         pendingPlanAgents = nil
+        let askCtx = CallbackContext(raw: Unmanaged.passUnretained(self).toOpaque())
         queue.async { [weak self] in
             let h = make()
             // Every session starts with the user's computer-use switch.
             if let h {
+                // Agents may ask the person a question in any mode, not only
+                // "ask first" — a question is not a permission.
+                let qcb: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, UnsafeMutablePointer<CChar>?, Int) -> Int32 = { ctx, json, answer, cap in
+                    guard let ctx, let json, let answer, cap > 0 else { return 0 }
+                    let engine = Unmanaged<Engine>.fromOpaque(ctx).takeUnretainedValue()
+                    guard let text = engine.askQuestionBlocking(String(cString: json)) else { return 0 }
+                    let bytes = Engine.answerBytes(text, cap: cap)
+                    for (i, b) in bytes.enumerated() { answer[i] = CChar(bitPattern: b) }
+                    answer[bytes.count] = 0
+                    return 1
+                }
+                chorus_set_question_callback(h, qcb, askCtx.raw)
                 chorus_set_computer_use(h, UserDefaults.standard.bool(forKey: Self.computerUseKey) ? 1 : 0)
                 chorus_set_claude_chrome(h, UserDefaults.standard.bool(forKey: Self.claudeChromeKey) ? 1 : 0)
                 chorus_set_hide_secret_files(h, Self.hideSecretFiles ? 1 : 0)
@@ -525,11 +538,14 @@ final class Engine: ObservableObject {
     }
     @Published var pendingAsk: PermissionAsk?
     private let permGate = DispatchSemaphore(value: 0)
-    private var permAnswer = false
+    /// What the callback returns to Rust: 0 deny, 1 once, 2 for this session.
+    private var permAnswer: Int32 = 0
+
+    enum PermissionAnswer: Int32 { case deny = 0, once = 1, session = 2 }
 
     /// Called from the C callback on the engine's background thread. Publishes
     /// the ask to the UI and blocks until `answerPermission` is called.
-    fileprivate func askPermissionBlocking(_ json: String) -> Bool {
+    fileprivate func askPermissionBlocking(_ json: String) -> Int32 {
         struct Raw: Codable { let agent: String?; let tool: String?; let kind: String?; let detail: String? }
         let raw = (try? JSONDecoder().decode(Raw.self, from: Data(json.utf8)))
         DispatchQueue.main.async {
@@ -541,10 +557,65 @@ final class Engine: ObservableObject {
         return permAnswer
     }
 
-    func answerPermission(_ allow: Bool) {
-        permAnswer = allow
+    func answerPermission(_ answer: PermissionAnswer) {
+        permAnswer = answer.rawValue
         pendingAsk = nil
         permGate.signal()
+    }
+
+    // MARK: agent questions (`chorus_ask_user`)
+
+    struct AgentQuestion: Identifiable {
+        let id = UUID()
+        let agent: String
+        let question: String
+        let options: [String]
+        let allowOther: Bool
+    }
+    @Published var pendingQuestion: AgentQuestion?
+    nonisolated private let questionGate = DispatchSemaphore(value: 0)
+    /// Serialises questions from parallel agents: one sheet at a time.
+    nonisolated private let questionLock = NSLock()
+    /// Written on the main actor, read by the waiting MCP thread after the
+    /// semaphore — the gate orders the two, so no actor protects it.
+    nonisolated(unsafe) private var questionAnswer: String?
+
+    /// UTF-8 of `text` that fits `cap - 1` bytes, cut on a character
+    /// boundary so Rust never sees half a code point.
+    fileprivate nonisolated static func answerBytes(_ text: String, cap: Int) -> [UInt8] {
+        var bytes: [UInt8] = []
+        for ch in text {
+            let b = Array(String(ch).utf8)
+            if bytes.count + b.count > cap - 1 { break }
+            bytes += b
+        }
+        return bytes
+    }
+
+    /// Called on an MCP server thread. Publishes the question and blocks
+    /// until `answerQuestion`; `nil` = closed without an answer.
+    nonisolated fileprivate func askQuestionBlocking(_ json: String) -> String? {
+        struct Raw: Codable { let agent: String?; let question: String?; let options: [String]?; let allow_other: Bool? }
+        guard let raw = try? JSONDecoder().decode(Raw.self, from: Data(json.utf8)) else { return nil }
+        questionLock.lock()
+        defer { questionLock.unlock() }
+        let agent = raw.agent, question = raw.question ?? ""
+        let options = raw.options ?? [], allowOther = raw.allow_other ?? true
+        Task { @MainActor in
+            self.pendingQuestion = AgentQuestion(
+                agent: agent ?? self.liveAgent ?? "agent",
+                question: question, options: options, allowOther: allowOther)
+            NSApp.requestUserAttention(.informationalRequest)
+        }
+        questionGate.wait()
+        return questionAnswer
+    }
+
+    func answerQuestion(_ text: String?) {
+        guard pendingQuestion != nil else { return }
+        questionAnswer = text
+        pendingQuestion = nil
+        questionGate.signal()
     }
 
     /// Turns block the engine queue until they finish, so the ledger cannot be
@@ -1461,7 +1532,7 @@ final class Engine: ObservableObject {
         let cb: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Int32 = { ctx, ask in
             guard let ctx, let ask else { return 0 }
             let engine = Unmanaged<Engine>.fromOpaque(ctx).takeUnretainedValue()
-            return engine.askPermissionBlocking(String(cString: ask)) ? 1 : 0
+            return engine.askPermissionBlocking(String(cString: ask))
         }
         queue.async { [weak self] in
             let json = prompt.withCString { p in

@@ -74,6 +74,10 @@ struct ContentView: View {
     @State private var model = ""
     @AppStorage("chorus.autoRoute") private var autoRoute = true
     @State private var sessionModes: [Int64: SessionMode] = [:]
+    /// The mode picked before a session exists (a fresh launch opens a draft
+    /// with no id). Without it the pick was dropped and the menu snapped back
+    /// to the default — only changing the default in Settings "worked".
+    @State private var draftSessionMode: SessionMode?
     @AppStorage(SettingsKey.defaultMode) private var defaultSessionMode = "auto"
     @AppStorage(SettingsKey.orchestratorModel) private var configuredOrchestrator = ""
     @AppStorage(SettingsKey.orchestratorBackup) private var configuredOrchestratorBackup = ""
@@ -86,7 +90,7 @@ struct ContentView: View {
     private var currentSessionMode: SessionMode {
         get {
             guard engine.sessionID >= 0 else {
-                return SessionMode(rawValue: defaultSessionMode) ?? .autoRoute
+                return draftSessionMode ?? SessionMode(rawValue: defaultSessionMode) ?? .autoRoute
             }
             if let m = sessionModes[engine.sessionID] { return m }
             return SessionMode(rawValue: defaultSessionMode) ?? .autoRoute
@@ -94,6 +98,8 @@ struct ContentView: View {
         nonmutating set {
             if engine.sessionID >= 0 {
                 sessionModes[engine.sessionID] = newValue
+            } else {
+                draftSessionMode = newValue
             }
         }
     }
@@ -1075,6 +1081,12 @@ struct ContentView: View {
                 }
             }
         }
+        // The last choice is the next launch's default (Settings › สิทธิ์เริ่มต้น
+        // reads the same key) — picking "ให้ทำเลย" once should not revert to
+        // asking every time the app opens.
+        .onChange(of: permission) { _, p in
+            UserDefaults.standard.set(Int(p.rawValue), forKey: "chorus.defaultPermission")
+        }
         .onChange(of: autoRoute) { _, enabled in
             if enabled {
                 routerAutoInstallAttempted = false
@@ -1107,6 +1119,11 @@ struct ContentView: View {
             if autoRoute { engine.loadRouterModels() }
         }
         .onChange(of: engine.sessionID) { _, id in
+            // The draft's first message just made it a session: keep its mode.
+            if id >= 0, let m = draftSessionMode {
+                if sessionModes[id] == nil { sessionModes[id] = m }
+                draftSessionMode = nil
+            }
             guard !workspace.isEmpty else { return }
             engine.loadSessions(db: dbPath)
             if id >= 0, let p = projects.project(containing: workspace) {
@@ -1271,14 +1288,21 @@ struct ContentView: View {
                     Text(ask.detail).font(.callout).textSelection(.enabled)
                 }
                 HStack {
+                    Button("ไม่อนุญาต", role: .destructive) { engine.answerPermission(.deny) }
+                        .keyboardShortcut(.cancelAction)
                     Spacer()
-                    Button("Deny", role: .destructive) { engine.answerPermission(false) }
-                    Button("Allow") { engine.answerPermission(true) }
+                    Button("อนุญาตตลอด session นี้") { engine.answerPermission(.session) }
+                        .help("ไม่ถามซ้ำกับคำขอเดียวกันจนกว่าจะปิด session — คำสั่งใหม่ยังถาม")
+                    Button("อนุญาตครั้งนี้") { engine.answerPermission(.once) }
                         .keyboardShortcut(.defaultAction)
                 }
             }
             .padding(20)
-            .frame(width: 420)
+            .frame(width: 480)
+            .interactiveDismissDisabled()
+        }
+        .sheet(item: $engine.pendingQuestion) { q in
+            AgentQuestionSheet(question: q, agentLabel: askingAgentLabel(q.agent)) { engine.answerQuestion($0) }
         }
         .sheet(isPresented: $showSearchSheet) {
             ChatSearchView(

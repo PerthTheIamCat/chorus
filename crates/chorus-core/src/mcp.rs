@@ -109,8 +109,9 @@ impl McpServer {
     }
 
     fn start_scoped(db_path: &str, session_scope: Option<i64>) -> Result<Self> {
+        // Blocking accept: a 25 ms poll was 40 wake-ups a second per open
+        // session, idle or not. `stop()` wakes it with a connection of its own.
         let listener = TcpListener::bind("127.0.0.1:0")?;
-        listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
         let url = format!("http://127.0.0.1:{port}/mcp");
 
@@ -123,6 +124,7 @@ impl McpServer {
         let handle = std::thread::spawn(move || {
             while !stop_thread.load(Ordering::Relaxed) {
                 match listener.accept() {
+                    Ok(_) if stop_thread.load(Ordering::Relaxed) => break,
                     Ok((stream, _)) => {
                         // One SQLite connection per connection thread — the
                         // GET/SSE stream is long-lived, so a shared handle
@@ -136,9 +138,7 @@ impl McpServer {
                             }
                         });
                     }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(std::time::Duration::from_millis(25));
-                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(_) => break,
                 }
             }
@@ -199,6 +199,16 @@ impl McpServer {
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
+            // Wake the blocking accept. If the connect fails the listener is
+            // already gone (its thread ended), so joining cannot hang either.
+            if let Some(addr) = self
+                .url
+                .strip_prefix("http://")
+                .and_then(|u| u.strip_suffix("/mcp"))
+                .and_then(|a| a.parse::<std::net::SocketAddr>().ok())
+            {
+                let _ = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(1));
+            }
             let _ = h.join();
         }
     }
@@ -406,6 +416,9 @@ fn dispatch(req: &Value, conn: &rusqlite::Connection, caller: &Caller) -> Value 
                 if session_scope.is_some_and(|s| computer::enabled(conn, s)) {
                     tools.push(computer::tool_schema());
                 }
+                if session_scope.is_some_and(|s| crate::ask_user::available(conn, s)) {
+                    tools.push(crate::ask_user::tool_schema());
+                }
             }
             tools.extend([synthesize_role_schema(), notify_user_schema()]);
             Ok(json!({ "tools": tools }))
@@ -543,6 +556,10 @@ fn call_tool(
             json!({"type":"text","text":format!("Attachment {} ({}); characters {}–{} of {}; next_offset_chars={}\n{}",meta.name,mime,start,end,total,next_offset,excerpt)})
         };
         return Ok(json!({"content":[block]}));
+    }
+    if name == "chorus_ask_user" {
+        let sess = session_scope.ok_or("asking the user is only available in a session")?;
+        return crate::ask_user::call(conn, sess, &caller.actor, &args);
     }
     if name == "computer" {
         let sess = session_scope.ok_or("computer use is only available in a session")?;
