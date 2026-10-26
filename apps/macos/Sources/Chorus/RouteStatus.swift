@@ -53,7 +53,7 @@ struct RouteStatusCard: View {
                 Button(action: onDismiss) {
                     Image(systemName: "xmark.circle.fill")
                 }
-                .buttonStyle(.plain).foregroundStyle(.tertiary)
+                .buttonStyle(.chorusPlain).foregroundStyle(.tertiary)
                 .accessibilityLabel("ปิดสรุปการเลือก")
             }
             .padding(10)

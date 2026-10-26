@@ -210,7 +210,7 @@ struct ToolGroupRow: View {
                 .foregroundStyle(.secondary)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.chorusPlain)
 
             if open {
                 VStack(alignment: .leading, spacing: 6) {
@@ -265,7 +265,7 @@ struct LiveToolsView: View {
                 .contentShape(Rectangle())
                 .clipped()
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.chorusPlain)
             .animation(.spring(response: 0.3, dampingFraction: 0.85), value: shown?.id)
 
             if open {

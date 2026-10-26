@@ -196,7 +196,7 @@ struct CodeViewerView: View {
                 .background(Color.primary.opacity(0.04))
                 .cornerRadius(4)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.chorusPlain)
             .help("Copy file content")
 
             // External Editor Handoff Button
@@ -224,7 +224,7 @@ struct CodeViewerView: View {
                 .background(Color.accentColor.opacity(0.1))
                 .cornerRadius(5)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.chorusPlain)
             .help("Open in \(detectedEditor) at line \(selectedLine ?? 1) (⌥⌘E)")
 
             // Maximize / Restore Button
@@ -241,7 +241,7 @@ struct CodeViewerView: View {
                     .background(Color.primary.opacity(0.04))
                     .clipShape(Circle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.chorusPlain)
             .keyboardShortcut(.escape, modifiers: [])
             .help("Close file viewer (Esc)")
         }

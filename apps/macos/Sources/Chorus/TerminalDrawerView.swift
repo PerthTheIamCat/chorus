@@ -272,29 +272,29 @@ struct TerminalDrawerView: View {
             } primaryAction: {
                 newTab()   // "+" itself opens a tab; the chevron holds the options
             }
-            .menuStyle(.borderlessButton).frame(width: 40)
+            .menuStyle(.borderlessButton).frame(width: 40).hoverHighlight()
             .help("เทอร์มินัลใหม่ (กดลูกศรเพื่อเลือก worktree / sandbox)")
             Spacer()
             if let tab = currentTab, !showAgentFeed {
                 Button { tab.zoom(-1) } label: { Image(systemName: "textformat.size.smaller") }
-                    .buttonStyle(.plain).keyboardShortcut("-", modifiers: .command).help("ลดขนาดตัวอักษร (⌘-)")
+                    .buttonStyle(.chorusPlain).keyboardShortcut("-", modifiers: .command).help("ลดขนาดตัวอักษร (⌘-)")
                 Button { tab.zoom(1) } label: { Image(systemName: "textformat.size.larger") }
-                    .buttonStyle(.plain).keyboardShortcut("=", modifiers: .command).help("เพิ่มขนาดตัวอักษร (⌘+)")
+                    .buttonStyle(.chorusPlain).keyboardShortcut("=", modifiers: .command).help("เพิ่มขนาดตัวอักษร (⌘+)")
                 Button { tab.clear() } label: { Image(systemName: "eraser") }
-                    .buttonStyle(.plain).keyboardShortcut("k", modifiers: .command).help("ล้างหน้าจอ (⌘K)")
+                    .buttonStyle(.chorusPlain).keyboardShortcut("k", modifiers: .command).help("ล้างหน้าจอ (⌘K)")
             }
             Button { showAgentFeed.toggle() } label: {
                 Label("คำสั่งของ agent", systemImage: "cpu")
                     .font(.caption)
                     .foregroundStyle(showAgentFeed ? Color.accentColor : .secondary)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.chorusPlain)
             .help("ดูคำสั่งที่ agent รันใน session นี้ (อ่านอย่างเดียว)")
             if let tab = currentTab, tab.exitCode != nil, !showAgentFeed {
                 Button("เปิดใหม่") { tab.start() }.font(.caption)
             }
             Button(action: onClose) { Image(systemName: "xmark").font(.caption2) }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
         }
         .padding(.horizontal, 10).padding(.vertical, 5)
         .overlay(alignment: .bottom) { Divider().opacity(0.5) }
@@ -332,11 +332,12 @@ private struct TabChip: View {
             Circle().fill(tab.exitCode == nil ? Color.green : Color.secondary).frame(width: 6, height: 6)
             Text(tab.title).font(.caption).lineLimit(1)
             if tab.sandboxed { Image(systemName: "lock.shield").font(.system(size: 9)) }
-            Button(action: onClose) { Image(systemName: "xmark").font(.system(size: 8)) }.buttonStyle(.plain)
+            Button(action: onClose) { Image(systemName: "xmark").font(.system(size: 8)) }.buttonStyle(.chorusPlain)
         }
         .padding(.horizontal, 8).padding(.vertical, 3)
         .background(selected ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.05), in: Capsule())
         .contentShape(Capsule())
+        .hoverHighlight(cornerRadius: 99)
         .onTapGesture(perform: onSelect)
     }
 }

@@ -635,7 +635,7 @@ struct ContentView: View {
                             .lineLimit(1)
                     }
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
                 .foregroundStyle(Color.accentColor)
 
                 Image(systemName: "chevron.right")
@@ -885,12 +885,18 @@ struct ContentView: View {
             .help("เปิด/ปิดแถบไฟล์ (⌘B)")
         }
         ToolbarItem(placement: .navigation) {
-            HStack(spacing: 6) {
-                Text(engine.sessionID < 0 ? (engine.draft != nil ? "session ใหม่" : "ยังไม่ได้เปิด session")
+            HStack(spacing: 8) {
+                let title = engine.sessionID < 0 ? (engine.draft != nil ? "session ใหม่" : "ยังไม่ได้เปิด session")
                      : (engine.sessionsByDB[dbPath]?.first { $0.id == engine.sessionID }).map(displayTitle)
-                        ?? "session \(engine.sessionID)")
+                        ?? "session \(engine.sessionID)"
+                // Capped: a long AI-written title pushed every toolbar item
+                // off to the overflow menu. The full title is on hover.
+                Text(title)
                     .lineLimit(1)
+                    .truncationMode(.tail)
                     .font(.headline)
+                    .frame(maxWidth: 280, alignment: .leading)
+                    .help(title)
 
                 if engine.sessionID >= 0 {
                     let isRenaming = engine.renamingSessionIDs.contains(engine.sessionID)
@@ -908,7 +914,7 @@ struct ContentView: View {
                                 .font(.system(size: 11))
                                 .foregroundColor(.accentColor)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.chorusPlain)
                         .help("ให้ AI ตั้งชื่อ session")
                     }
                 }
@@ -926,23 +932,23 @@ struct ContentView: View {
             // Handing over is one click per agent. Everything the next
             // agent needs is already in the ledger, so asking the user to
             // fill in a form would be asking them to retype what we know.
-            if engine.sessionID >= 0 {
-                ForEach(engine.agents.filter { $0.ready && $0.id != currentAgentID }) { a in
-                    Button {
-                        engine.handoffAuto(to: a.id, level: max(permission.rawValue, 0))
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "arrowshape.turn.up.right.fill")
-                                .font(.caption2)
-                                .foregroundStyle(Color.accentColor)
-                            ProviderIcon(provider: a.id, size: 13)
-                            Text("ส่งต่อ \(a.label)")
-                                .font(.caption.weight(.medium))
+            // One menu, not a button per agent: with three agents ready the
+            // row of "ส่งต่อ X" labels crowded the toolbar and read as text.
+            let targets = engine.agents.filter { $0.ready && $0.id != currentAgentID }
+            if engine.sessionID >= 0 && !targets.isEmpty {
+                Menu {
+                    ForEach(targets) { a in
+                        Button {
+                            engine.handoffAuto(to: a.id, level: max(permission.rawValue, 0))
+                        } label: {
+                            Label("ส่งต่อให้ \(a.label)", systemImage: "arrowshape.turn.up.right")
                         }
                     }
-                    .disabled(engine.busy)
-                    .help("ส่งงานต่อให้ \(a.label) พร้อมเป้าหมาย สิ่งที่ทำไปแล้ว และ diff (ไม่ต้องพิมพ์อะไร)")
+                } label: {
+                    Label("ส่งต่อ", systemImage: "arrowshape.turn.up.right")
                 }
+                .disabled(engine.busy)
+                .help("ส่งงานต่อให้ agent อื่น พร้อมเป้าหมาย สิ่งที่ทำไปแล้ว และ diff (ไม่ต้องพิมพ์อะไร)")
             }
         }
         ToolbarItem(placement: .primaryAction) {
@@ -1347,7 +1353,7 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
                 .help("เปิดห้องแชทอิสระใหม่")
             }
             .padding(.horizontal, 10)
@@ -1412,7 +1418,7 @@ struct ContentView: View {
                     TextField("ค้นหา session", text: $sessionQuery).textFieldStyle(.plain)
                     if !sessionQuery.isEmpty {
                         Button { sessionQuery = "" } label: { Image(systemName: "xmark.circle.fill") }
-                            .buttonStyle(.plain).foregroundStyle(.tertiary)
+                            .buttonStyle(.chorusPlain).foregroundStyle(.tertiary)
                     }
                 }
                 .padding(.horizontal, 8).padding(.vertical, 6)
@@ -1507,10 +1513,18 @@ struct ContentView: View {
                                     .offset(x: 2, y: 2)
                             }
 
-                            Text("\(readyAgentsCount) พร้อมใช้")
-                                .font(.system(size: 11, weight: .medium))
-                                .lineLimit(1)
-                                .fixedSize()
+                            // Drops the words before anything wraps: a narrow
+                            // sidebar squeezed this into a tall column.
+                            ViewThatFits(in: .horizontal) {
+                                Text("\(readyAgentsCount) พร้อมใช้")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .lineLimit(1)
+                                    .fixedSize()
+                                Text("\(readyAgentsCount)")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .lineLimit(1)
+                                    .fixedSize()
+                            }
 
                             Image(systemName: "chevron.up")
                                 .font(.system(size: 8, weight: .bold))
@@ -1520,7 +1534,7 @@ struct ContentView: View {
                         .padding(.vertical, 4.5)
                         .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.chorusPlain)
                     .popover(isPresented: $showProvidersPopover, arrowEdge: .top) {
                         providersPopoverContent
                     }
@@ -1541,9 +1555,10 @@ struct ContentView: View {
                         .padding(5)
                         .background(Color.primary.opacity(0.04), in: Circle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
                 .help("ตั้งค่า (⌘,)")
             }
+            .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 10).padding(.vertical, 8)
         }
     }
@@ -1658,7 +1673,7 @@ struct ContentView: View {
                         .padding(8)
                         .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.chorusPlain)
                     .help(agentHelpTooltip(a, accs: accs, limited: limited, worst: worst))
                 }
             }
@@ -1683,7 +1698,7 @@ struct ContentView: View {
                 }
                 .foregroundStyle(.secondary)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.chorusPlain)
         }
         .padding(12)
         .frame(width: 270)
@@ -1940,7 +1955,7 @@ struct ContentView: View {
                                             .background(.regularMaterial, in: Circle())
                                             .overlay(Circle().stroke(Color.primary.opacity(0.1), lineWidth: 1))
                                     }
-                                    .buttonStyle(.plain)
+                                    .buttonStyle(.chorusPlain)
                                     .help("ไปที่ข้อความล่าสุด")
                                     .padding(.bottom, 10)
                                     .transition(.scale(scale: 0.8).combined(with: .opacity))
@@ -1991,7 +2006,7 @@ struct ContentView: View {
                         Text(err).font(.callout).lineLimit(3).textSelection(.enabled)
                         Spacer(minLength: 0)
                         Button { engine.lastError = nil } label: { Image(systemName: "xmark") }
-                            .buttonStyle(.borderless)
+                            .buttonStyle(.chorusPlain)
                     }
                     .padding(.horizontal, 14).padding(.vertical, 9)
                     .floatingPanel(cornerRadius: 14, tint: .red)
@@ -2120,7 +2135,7 @@ struct ContentView: View {
             .background(Color(nsColor: .controlBackgroundColor).opacity(0.6), in: Capsule())
             .overlay(Capsule().stroke(Color.primary.opacity(0.08), lineWidth: 1))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.chorusPlain)
     }
 
     @ViewBuilder
@@ -2164,7 +2179,7 @@ struct ContentView: View {
                             Text(q.text).font(.caption).lineLimit(1)
                             Spacer()
                             Button { queued.remove(at: i) } label: { Image(systemName: "xmark.circle.fill") }
-                                .buttonStyle(.plain).foregroundStyle(.secondary)
+                                .buttonStyle(.chorusPlain).foregroundStyle(.secondary)
                         }
                     }
                     Text("รอคิว — จะส่งต่อเมื่อเทิร์นนี้จบ").font(.caption2).foregroundStyle(.tertiary)
@@ -2209,27 +2224,29 @@ struct ContentView: View {
                     ) { engine.setRoutePreset($0) }
                     .help(engine.routePresets.first { $0.id == engine.routePreset }.map { "\($0.label) — \($0.hint)" } ?? "")
                 }
+                // One switch for how the agent may act: ask first, plan first
+                // (read-only, then carry the plan out with the last ask/allow
+                // pick), or just do it. Orchestra plans by itself, so it only
+                // offers the two.
+                let modes = currentSessionMode == .orchestra ? ["ask", "allow"] : ["ask", "plan", "allow"]
+                let modeLabels = ["ask": PermissionLevel.ask.label, "plan": "วางแผนก่อน", "allow": PermissionLevel.allowAll.label]
+                let modeValue = planFirst && currentSessionMode != .orchestra ? "plan" : (permission == .ask ? "ask" : "allow")
                 ChipPicker(
-                    icon: permission == .ask ? "hand.raised" : "bolt.fill",
-                    value: "\(permission.rawValue)",
-                    options: PermissionLevel.allCases.map { "\($0.rawValue)" },
-                    labels: Dictionary(uniqueKeysWithValues: PermissionLevel.allCases.map { ("\($0.rawValue)", $0.label) }),
-                    selected: "\(permission.rawValue)"
-                ) { v in if let p = PermissionLevel(rawValue: Int32(v) ?? 0) { permission = p } }
-                .help("\(permission.label) — \(permission.hint)")
-                if currentSessionMode != .orchestra {
-                    Button { planFirst.toggle() } label: {
-                        CompactLabel(text: "วางแผนก่อน", spacing: 3) {
-                            Image(systemName: planFirst ? "list.bullet.clipboard.fill" : "list.bullet.clipboard")
-                        }
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(planFirst ? Color.accentColor : .secondary)
+                    icon: modeValue == "plan" ? "list.bullet.clipboard" : (modeValue == "ask" ? "hand.raised" : "bolt.fill"),
+                    value: modeValue,
+                    options: modes,
+                    labels: modeLabels,
+                    selected: modeValue
+                ) { v in
+                    switch v {
+                    case "plan": planFirst = true
+                    case "ask": planFirst = false; permission = .ask
+                    default: planFirst = false; permission = .allowAll
                     }
-                    .buttonStyle(InteractiveStyle(cornerRadius: 7, padding: .init(top: 4, leading: 8, bottom: 4, trailing: 8)))
-                    .help(planFirst
-                          ? "วางแผนก่อน: เปิดอยู่ — agent อ่านอย่างเดียวแล้วตอบเป็นแผน ยังไม่แก้อะไรจนกว่าจะกด ทำตามแผน"
-                          : "วางแผนก่อน: ให้ agent ตอบเป็นแผน (อ่านอย่างเดียว) ก่อนลงมือ")
                 }
+                .help(modeValue == "plan"
+                      ? "วางแผนก่อน — agent อ่านอย่างเดียวแล้วตอบเป็นแผน กด ทำตามแผน แล้วลงมือด้วยสิทธิ์ \(permission.label)"
+                      : "\(permission.label) — \(permission.hint)")
             } trailing: {
                 if currentSessionMode == .orchestra {
                     let orchLabel = configuredOrchestrator.isEmpty ? "Claude Opus 5.5" : ModelID(configuredOrchestrator).base
@@ -2696,7 +2713,7 @@ struct ContentView: View {
                 .controlSize(.small)
                 .help("ส่งให้ agent ลงมือตามแผน ด้วยสิทธิ์ \(permission.label)")
             Button { engine.pendingPlanAgents = nil } label: { Image(systemName: "xmark") }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
                 .foregroundStyle(.secondary)
                 .help("ไม่ทำตามแผนนี้")
         }
@@ -3130,7 +3147,7 @@ struct ContentView: View {
                                 .rotationEffect(.degrees(open ? 90 : 0))
                                 .frame(width: 14, height: 14)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.chorusPlain)
 
                         Image(systemName: "square.stack.3d.up.fill").foregroundStyle(Color.accentColor)
                         Text(p.name).fontWeight(.medium).lineLimit(1)
@@ -3313,7 +3330,7 @@ struct ContentView: View {
                                     .rotationEffect(.degrees(isExpanded ? 90 : 0))
                                     .frame(width: 12, height: 12)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.chorusPlain)
                         }
 
                         Text(displayTitle(s)).lineLimit(1)
@@ -3654,7 +3671,7 @@ struct ContentView: View {
                                     .font(.system(size: 10))
                                     .foregroundStyle(.secondary)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.chorusPlain)
                             .help("รีเฟรชค่าใช้จ่าย")
                         }
                         if let cost = engine.sessionCostUSD {
@@ -3729,7 +3746,7 @@ struct ContentView: View {
                                     .font(.system(size: 10))
                                     .foregroundStyle(.secondary)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.chorusPlain)
                             .disabled(engine.isVerifying || workspace.isEmpty || !engine.projectTrusted)
                             .help("รัน cargo check, biome, ruff หรือ swiftlint ในโปรเจกต์ทันที (ใน sandbox)")
                         }
@@ -4185,7 +4202,7 @@ struct EventRow: View, Equatable {
             .padding(.horizontal, 6).padding(.vertical, 2)
             .background(Color.primary.opacity(0.06), in: Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.chorusPlain)
     }
 
     /// One collapsed line per tool call; click to see the payload.
@@ -4652,7 +4669,7 @@ struct CodeBlockView: View {
                                 .padding(.vertical, 2)
                                 .background(showCanvas ? Color.purple.opacity(0.14) : Color.clear, in: RoundedRectangle(cornerRadius: 4))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.chorusPlain)
 
                         Button {
                             showCanvas = false
@@ -4664,7 +4681,7 @@ struct CodeBlockView: View {
                                 .padding(.vertical, 2)
                                 .background(!showCanvas ? Color.primary.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: 4))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.chorusPlain)
                     }
                     .padding(2)
                     .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
@@ -4692,7 +4709,7 @@ struct CodeBlockView: View {
                     .padding(.vertical, 3)
                     .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
@@ -4761,7 +4778,7 @@ struct WorkingRow: View {
                         .padding(.horizontal, 8).padding(.vertical, 3.5)
                         .background(Color.red.opacity(0.08), in: Capsule())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.chorusPlain)
                     .help("หยุดเทิร์นนี้ (⌘.) — ล้างคิวด้วย")
                 }
 
@@ -4913,7 +4930,7 @@ struct ThinkingBlock: View {
                 }
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.chorusPlain)
 
             if isOpen {
                 let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -5247,7 +5264,7 @@ struct SubagentTreeRow: View {
                                         .padding(.vertical, 0.5)
                                         .background(Color.purple, in: Capsule())
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(.chorusPlain)
                                 .help("บันทึก Role '\(sub.role)' ลง .chorus/agents/\(sub.role).md")
                             }
                         }

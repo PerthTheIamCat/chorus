@@ -45,7 +45,7 @@ struct ChatSearchView: View {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundColor(.secondary)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.chorusPlain)
                 }
 
                 Button("Done", action: onClose)
@@ -112,7 +112,7 @@ struct ChatSearchView: View {
                         }
                         .padding(.vertical, 4)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.chorusPlain)
                 }
             }
         }
@@ -195,7 +195,7 @@ struct ChatSearchView: View {
                         .padding(.vertical, 4)
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.chorusPlain)
                     .disabled(importing != nil)
                     .help("นำเข้าบทสนทนานี้มาเป็น session ใน Chorus แล้วคุยต่อกับ agent ตัวไหนก็ได้")
                 }

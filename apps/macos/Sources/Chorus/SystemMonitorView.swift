@@ -324,6 +324,7 @@ struct SystemMonitorView: View {
                 .padding(.vertical, 6)
                 .background(Color.orange.opacity(0.1))
                 .contentShape(Rectangle())
+                .hoverHighlight(cornerRadius: 0)
                 .onTapGesture { model.notice = nil; model.error = nil }
             }
             Divider().opacity(0.5)
@@ -948,12 +949,13 @@ struct ChorusRAMLabel: View {
             HStack(spacing: 3) {
                 Image(systemName: "memorychip").font(.system(size: 9))
                 Text(bytes.map(MonFormat.bytes) ?? "—").font(.system(size: 10, weight: .medium)).monospacedDigit()
+                    .lineLimit(1).fixedSize()
             }
             .foregroundStyle(.secondary)
             .padding(.horizontal, 6).padding(.vertical, 4)
             .background(Color.primary.opacity(isPresented ? 0.1 : 0.04), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.chorusPlain)
         .popover(isPresented: $isPresented, arrowEdge: .top) {
             SystemMonitorView()
                 .environmentObject(engine)

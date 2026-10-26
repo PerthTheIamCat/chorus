@@ -41,7 +41,7 @@ struct CanvasPreviewView: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.chorusPlain)
                     .help(isExpanded ? "ย่อขนาด" : "ขยายเต็มจอ")
                 }
             }

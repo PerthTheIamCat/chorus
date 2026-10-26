@@ -62,7 +62,7 @@ public struct LivePreviewView: View {
                         Image(systemName: "chevron.left")
                             .font(.system(size: 11, weight: .semibold))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.chorusPlain)
                     .disabled(!canGoBack)
                     .help("ย้อนกลับ")
 
@@ -72,7 +72,7 @@ public struct LivePreviewView: View {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 11, weight: .semibold))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.chorusPlain)
                     .disabled(!canGoForward)
                     .help("ไปข้างหน้า")
 
@@ -82,7 +82,7 @@ public struct LivePreviewView: View {
                         Image(systemName: isLoading ? "xmark" : "arrow.clockwise")
                             .font(.system(size: 11, weight: .semibold))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.chorusPlain)
                     .help(isLoading ? "หยุดโหลด" : "รีเฟรชหน้าเว็บ (⌘R)")
                 }
                 .foregroundStyle(.secondary)
@@ -107,6 +107,7 @@ public struct LivePreviewView: View {
                     .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
                 }
                 .menuStyle(.borderlessButton)
+                .hoverHighlight()
                 .fixedSize()
 
                 // Address Bar
@@ -151,7 +152,7 @@ public struct LivePreviewView: View {
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
                 .help("เปิดในเบราว์เซอร์ของระบบ (Safari / Chrome)")
 
                 if let onClose {
@@ -160,7 +161,7 @@ public struct LivePreviewView: View {
                             .font(.system(size: 13))
                             .foregroundStyle(.secondary)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.chorusPlain)
                     .help("ปิดแผงพรีวิว")
                 }
             }

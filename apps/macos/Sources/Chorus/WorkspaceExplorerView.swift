@@ -32,7 +32,7 @@ struct WorkspaceExplorerView: View {
                             .font(.system(size: 14))
                             .foregroundColor(.secondary)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.chorusPlain)
                     .help("โครงสร้างไฟล์ (Rail Mode)")
                     .padding(.top, 10)
 
@@ -58,7 +58,7 @@ struct WorkspaceExplorerView: View {
                                         .background(node.is_focus ? Color.blue.opacity(0.12) : Color.clear)
                                         .cornerRadius(6)
                                     }
-                                    .buttonStyle(.plain)
+                                    .buttonStyle(.chorusPlain)
                                     .help(node.name)
                                 }
                             }
@@ -82,7 +82,7 @@ struct WorkspaceExplorerView: View {
                             Image(systemName: "arrow.clockwise")
                                 .font(.system(size: 11))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.chorusPlain)
                         .help("Refresh explorer")
 
                         if let onToggleMaximize {
@@ -105,7 +105,7 @@ struct WorkspaceExplorerView: View {
                                     .foregroundColor(.secondary)
                                     .font(.system(size: 11))
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.chorusPlain)
                         }
                     }
                     .padding(.horizontal, 8)
@@ -319,7 +319,7 @@ private struct FileTreeNodeRow: View {
                 .padding(.horizontal, 8)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.chorusPlain)
 
             if node.is_dir && isExpanded {
                 ForEach(node.children, id: \.id) { child in

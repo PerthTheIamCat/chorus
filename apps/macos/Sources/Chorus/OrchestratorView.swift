@@ -104,7 +104,7 @@ struct OrchestratorView: View {
                     .foregroundColor(.accentColor)
                     .cornerRadius(5)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
                 .help("ให้ AI ออกแบบ Role ใหม่ตามคำสั่งภารกิจ")
 
                 Button(action: {
@@ -124,7 +124,7 @@ struct OrchestratorView: View {
                     .foregroundColor(.primary)
                     .cornerRadius(5)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
                 .help("สร้าง Custom Role กำหนดเอง")
             }
 
@@ -205,6 +205,7 @@ struct OrchestratorView: View {
                         .cornerRadius(3)
                     }
                     .menuStyle(.borderlessButton)
+                    .hoverHighlight()
                 }
 
                 Text(role.description)
@@ -245,7 +246,7 @@ struct OrchestratorView: View {
                         .background(Color.accentColor.opacity(0.12))
                         .clipShape(RoundedRectangle(cornerRadius: 4))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
                 .help("สั่งกระจายงานด้วย Role นี้")
 
                 Button(action: {
@@ -260,7 +261,7 @@ struct OrchestratorView: View {
                         .background(Color.primary.opacity(0.05))
                         .clipShape(RoundedRectangle(cornerRadius: 4))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
                 .help(role.isBuiltin ? "ปรับแต่ง Prompt หรือตั้ง Model ของ Role นี้" : "แก้ไข Role นี้")
 
                 if !role.isBuiltin {
@@ -274,7 +275,7 @@ struct OrchestratorView: View {
                             .background(Color.red.opacity(0.08))
                             .clipShape(RoundedRectangle(cornerRadius: 4))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.chorusPlain)
                     .help("ลบ Custom Role")
                 }
             }
@@ -386,7 +387,7 @@ struct RoleEditorSheet: View {
                         .foregroundColor(.secondary)
                         .font(.system(size: 16))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
             }
             .padding(14)
             .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
@@ -431,7 +432,7 @@ struct RoleEditorSheet: View {
                 Spacer()
 
                 Button("ยกเลิก", action: onCancel)
-                    .buttonStyle(.plain)
+                    .buttonStyle(.chorusPlain)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .background(Color.primary.opacity(0.06))
@@ -453,7 +454,7 @@ struct RoleEditorSheet: View {
                     .foregroundColor(.white)
                     .cornerRadius(6)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
                 .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || isSaving)
             }
             .padding(12)
@@ -503,7 +504,7 @@ struct RoleEditorSheet: View {
                     .foregroundColor(.accentColor)
                     .cornerRadius(6)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
                 .disabled(aiTaskPrompt.trimmingCharacters(in: .whitespaces).isEmpty || isSynthesizing)
             }
 
@@ -576,7 +577,7 @@ struct RoleEditorSheet: View {
                             .foregroundColor(isSelected ? .accentColor : .primary)
                             .cornerRadius(5)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.chorusPlain)
                     }
                 }
 
@@ -592,7 +593,7 @@ struct RoleEditorSheet: View {
                             customToolInput = ""
                         }
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.chorusPlain)
                     .font(.system(size: 10))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)

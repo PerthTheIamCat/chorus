@@ -117,7 +117,7 @@ struct ProjectEditor: View {
                         Button { project.folders.removeAll { $0 == f } } label: {
                             Image(systemName: "minus.circle.fill")
                         }
-                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                        .buttonStyle(.chorusPlain).foregroundStyle(.secondary)
                         .help("เอาออกจากโปรเจกต์ (ไม่ลบไฟล์)")
                     }
                     .padding(8)

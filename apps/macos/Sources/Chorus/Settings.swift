@@ -621,7 +621,7 @@ struct ComputerUseSettings: View {
                     }
                     .controlSize(.small)
                     Button { perms = engine.computerPermissions() } label: { Image(systemName: "arrow.clockwise") }
-                        .buttonStyle(.borderless)
+                        .buttonStyle(.chorusPlain)
                         .help("ตรวจอีกครั้ง")
                 }
             }
@@ -1321,7 +1321,7 @@ struct LearnedRoutesSheet: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.chorusPlain)
                     }
                 }
                 .padding(.horizontal, 10)
@@ -1555,7 +1555,7 @@ struct LearnedRouteCard: View {
                         .font(.caption)
                         .foregroundStyle(isCopied ? .green : .secondary)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
                 .help("คัดลอกข้อความ")
             }
 

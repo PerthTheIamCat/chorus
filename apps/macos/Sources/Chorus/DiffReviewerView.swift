@@ -366,7 +366,7 @@ struct DiffReviewerView: View {
                             .background(Color.red)
                             .cornerRadius(5)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.chorusPlain)
 
                         Button("ยกเลิก") {
                             rejectedHunkIDs.removeAll()
@@ -403,7 +403,7 @@ struct DiffReviewerView: View {
                             .background(Color.blue)
                             .cornerRadius(5)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.chorusPlain)
                     } else {
                         Spacer()
                     }
@@ -485,7 +485,7 @@ struct DiffReviewerView: View {
                     .background(isRejected ? Color.red.opacity(0.12) : Color.clear)
                     .cornerRadius(4)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
                 .help("เลือกก้อนนี้เพื่อตีกลับ (Reverse apply)")
             }
             .padding(.horizontal, 8)
@@ -673,7 +673,7 @@ private struct UnifiedLineRow: View {
                         .font(.system(size: 10))
                         .foregroundColor(.blue)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
                 .padding(.trailing, 4)
             }
         }
@@ -737,7 +737,7 @@ private struct SplitLineRow: View {
                             .font(.system(size: 10))
                             .foregroundColor(.blue)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.chorusPlain)
                     .padding(.trailing, 4)
                 }
             }

@@ -278,7 +278,7 @@ struct ComposerField<Leading: View, Trailing: View>: View {
                     .frame(width: 28, height: 28)
                     .background(Color.primary, in: RoundedRectangle(cornerRadius: 8))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.chorusPlain)
             .help("หยุด (⌘.) — ↩ ยังส่งข้อความเข้าคิวได้")
             .accessibilityLabel("หยุด")
         } else {
@@ -289,7 +289,7 @@ struct ComposerField<Leading: View, Trailing: View>: View {
                     .frame(width: 28, height: 28)
                     .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 8))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.chorusPlain)
             .disabled(!canSend || !hasContent)
             .opacity(canSend && hasContent ? 1 : 0.35)
             .help(enterSends ? "ส่ง (↩)" : "ส่ง (⌘↩)")
@@ -393,6 +393,7 @@ struct ComposerField<Leading: View, Trailing: View>: View {
                 .background(i == selected ? Color.accentColor.opacity(0.18) : .clear,
                             in: RoundedRectangle(cornerRadius: 5))
                 .contentShape(Rectangle())
+                .hoverHighlight(cornerRadius: 5)
                 .onTapGesture { apply(s) }
                 .onHover { if $0 { selected = i } }
             }
@@ -433,7 +434,7 @@ private struct AttachmentChip: View {
                         .foregroundStyle(.white, .black.opacity(0.6))
                         .font(.system(size: 14))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
                 .padding(2)
                 .opacity(hover ? 1 : 0)
                 .accessibilityLabel("เอา \(attachment.name) ออก")
@@ -515,7 +516,7 @@ private struct RejectedChip: View {
             }
             .frame(maxWidth: 180, alignment: .leading)
             Button(action: onRemove) { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary) }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
                 .accessibilityLabel("ปิด")
         }
         .padding(.horizontal, 8)
@@ -587,6 +588,7 @@ struct ComposerModeMenu: View {
             }
         }
         .menuStyle(.borderlessButton)
+        .hoverHighlight()
         .fixedSize()
         .padding(.horizontal, 8).padding(.vertical, 4)
         .background(
