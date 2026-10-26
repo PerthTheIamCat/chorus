@@ -60,10 +60,10 @@ struct PlainInteractiveStyle: ButtonStyle {
     var outset: CGFloat = 3
 
     func makeBody(configuration: Configuration) -> some View {
-        Body(configuration: configuration, style: self)
+        PlainLabel(configuration: configuration, style: self)
     }
 
-    private struct Body: View {
+    private struct PlainLabel: View {
         let configuration: Configuration
         let style: PlainInteractiveStyle
         @State private var hover = false
