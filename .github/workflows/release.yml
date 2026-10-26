@@ -5,6 +5,13 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # Release without pushing a tag (e.g. from an environment that may not push
+  # tags): `gh release create` makes the tag on main.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without the v, e.g. 0.2.4 (needs a CHANGELOG section)"
+        required: true
 
 permissions:
   contents: write
@@ -20,7 +27,7 @@ jobs:
         env:
           SPARKLE_ED_KEY: ${{ secrets.SPARKLE_ED_KEY }}
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
         run: |
           test -n "$SPARKLE_ED_KEY" || { echo "SPARKLE_ED_KEY secret is missing"; exit 1; }
           cd apps/macos
