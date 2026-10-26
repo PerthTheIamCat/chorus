@@ -312,6 +312,22 @@ fn acp_log() -> Option<chorus_acp::Log> {
 /// turn, which needs no cooperation from the agent. So the mode request stays
 /// (free, and correct the day a bridge honours it), the outcome is reported,
 /// and the guard does the work.
+/// claude-agent-acp only knows Claude Code's own modes and rejects ours
+/// ("Invalid Mode"), which left the session on `permissions.defaultMode` from
+/// the account's settings. With `dontAsk` or `plan` there, every Write was
+/// refused without one request reaching Chorus — no dialog, whatever the
+/// app's switch said (seen 26 Oct 2026, claude-agent-acp 0.23.1).
+/// `default` asks Chorus about everything; `acceptEdits` takes edits and
+/// still asks about commands, which `AllowAll` answers yes. Never
+/// `bypassPermissions`: Chorus would stop seeing requests at all.
+fn claude_mode(mode: &str) -> &'static str {
+    if mode == "agent" {
+        "acceptEdits"
+    } else {
+        "default"
+    }
+}
+
 fn note_mode(agent_name: &str, outcome: &chorus_acp::codex::ModeOutcome, log: bool) {
     if !log || outcome.requested.is_empty() || outcome.confirmed() {
         return;
@@ -2332,6 +2348,8 @@ impl Session {
         let sandboxed = command.as_slice() != bridge;
         let mode = if sandboxed && crate::accounts::split(agent_name).0 == "codex" {
             "agent-full-access"
+        } else if crate::accounts::split(agent_name).0.contains("claude") {
+            claude_mode(mode)
         } else {
             mode
         };
@@ -3378,6 +3396,13 @@ pub fn list_sessions(db: &Path) -> Result<Vec<SessionSummary>> {
 #[cfg(test)]
 mod policy_tests {
     use super::*;
+
+    #[test]
+    fn claude_gets_its_own_mode_names() {
+        assert_eq!(claude_mode(Policy::AllowAll.mode_id()), "acceptEdits");
+        assert_eq!(claude_mode(Policy::ReadOnly.mode_id()), "default");
+        assert_eq!(claude_mode(Policy::DenyAll.mode_id()), "default");
+    }
 
     #[test]
     fn a_session_grant_covers_the_same_request_only() {
