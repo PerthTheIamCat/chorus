@@ -44,7 +44,7 @@ struct SetupPromptCard: View {
                 Image(systemName: "xmark")
                     .font(.caption.weight(.semibold))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.chorusPlain)
             .foregroundStyle(.secondary)
             .accessibilityLabel("ปิดคำแนะนำ: \(title)")
             .help("ปิดคำแนะนำนี้ — เปิดกลับได้ในตั้งค่า")

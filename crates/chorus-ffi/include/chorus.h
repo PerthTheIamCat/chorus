@@ -503,6 +503,15 @@ char *chorus_structural_diff_json(const char *old_code, const char *new_code);
  * 5 function · 6 attribute/macro/key · 7 constant. */
 char *chorus_highlight(const char *path, const char *text);
 
+/* Installable tree-sitter grammars (Settings › ภาษา).
+ * {"ok":true,"grammars":[{"id","label","extensions":[..],"installed",
+ * "source"}]}. An installed grammar replaces the built-in lexer for its
+ * language in chorus_highlight. */
+char *chorus_grammars_json(void);
+/* action: "install" | "remove". Blocking (download + C compile) — call off
+ * the main thread. {"ok":true} or {"ok":false,"error":"..."} */
+char *chorus_grammar_action(const char *id, const char *action);
+
 /* Composer (pure, no engine). Pasted HTML -> Markdown, capped; past a cap the
  * plain flavour is returned. {"ok","markdown","fallback":null|reason}.
  * Spans: {"ok","spans":[{"start","end","kind"}]} in UTF-16 units; kind is

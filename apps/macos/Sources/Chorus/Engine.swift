@@ -573,6 +573,10 @@ final class Engine: ObservableObject {
         let allowOther: Bool
     }
     @Published var pendingQuestion: AgentQuestion?
+    // Settings › ภาษา — stored here because extensions cannot hold state.
+    @Published var grammars: [GrammarRow] = []
+    @Published var grammarWorking: Set<String> = []
+    @Published var grammarError: String?
     nonisolated private let questionGate = DispatchSemaphore(value: 0)
     /// Serialises questions from parallel agents: one sheet at a time.
     nonisolated private let questionLock = NSLock()
@@ -3216,4 +3220,41 @@ final class Engine: ObservableObject {
 /// The running turn's streamed state, split off `Engine` (see `liveStream`).
 final class LiveStream: ObservableObject {
     @Published var turn = Engine.LiveTurn()
+}
+
+// MARK: - Syntax grammars (Settings › ภาษา)
+
+extension Engine {
+    struct GrammarRow: Codable, Identifiable {
+        let id: String
+        let label: String
+        let extensions: [String]
+        let installed: Bool
+        let source: String
+    }
+    private struct GrammarList: Codable { let ok: Bool; let grammars: [GrammarRow]?; let error: String? }
+    private struct GrammarActionResult: Codable { let ok: Bool; let error: String? }
+
+    func loadGrammars() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let list = Self.decode(GrammarList.self, Self.string(from: chorus_grammars_json()))
+            DispatchQueue.main.async { self?.grammars = list?.grammars ?? [] }
+        }
+    }
+
+    /// `install` downloads and compiles (seconds to a minute); `remove` deletes.
+    func grammarAction(_ id: String, _ action: String) {
+        grammarWorking.insert(id)
+        grammarError = nil
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let json = id.withCString { i in action.withCString { a in Self.string(from: chorus_grammar_action(i, a)) } }
+            let r = Self.decode(GrammarActionResult.self, json)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.grammarWorking.remove(id)
+                if r?.ok != true { self.grammarError = r?.error ?? "ไม่สำเร็จ" }
+                self.loadGrammars()
+            }
+        }
+    }
 }

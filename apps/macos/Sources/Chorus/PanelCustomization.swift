@@ -265,7 +265,7 @@ public struct PanelMaximizeButton: View {
                 .background(isMaximized ? Color.accentColor.opacity(0.15) : Color.primary.opacity(0.05))
                 .clipShape(RoundedRectangle(cornerRadius: 5))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.chorusPlain)
         .help(isMaximized ? "ย่อกลับ (Esc)" : "ขยายเต็มจอ")
     }
 }

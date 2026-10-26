@@ -346,7 +346,7 @@ private struct ResultBanner: View {
                 .font(.callout).textSelection(.enabled)
             Spacer(minLength: 6)
             Button(action: onDismiss) { Image(systemName: "xmark").font(.caption.weight(.semibold)) }
-                .buttonStyle(.plain).foregroundStyle(.secondary)
+                .buttonStyle(.chorusPlain).foregroundStyle(.secondary)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)

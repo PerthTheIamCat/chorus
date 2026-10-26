@@ -30,6 +30,7 @@ pub mod integration_catalog;
 pub mod ledger;
 pub mod local_router;
 pub mod gitflow;
+pub mod grammars;
 pub mod lsp_client;
 pub mod mcp;
 pub mod mcp_config;

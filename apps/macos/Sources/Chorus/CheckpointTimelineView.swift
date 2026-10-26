@@ -54,7 +54,7 @@ struct CheckpointTimelineView: View {
                     Image(systemName: "arrow.clockwise")
                         .font(.caption)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.chorusPlain)
                 .help("รีเฟรชจุดบันทึก")
 
                 if let onClose {
@@ -65,7 +65,7 @@ struct CheckpointTimelineView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.chorusPlain)
                 }
             }
             .padding(.horizontal, 14)
@@ -83,7 +83,7 @@ struct CheckpointTimelineView: View {
                     Spacer()
                     Button("ตกลง") { statusMessage = nil }
                         .font(.caption2)
-                        .buttonStyle(.plain)
+                        .buttonStyle(.chorusPlain)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
@@ -194,6 +194,7 @@ struct CheckpointTimelineView: View {
                         .font(.caption)
                 }
                 .menuStyle(.borderlessButton)
+                .hoverHighlight()
                 .disabled(isRewinding)
             }
             .padding(.top, 2)

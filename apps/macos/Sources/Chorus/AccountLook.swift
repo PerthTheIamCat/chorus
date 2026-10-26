@@ -213,7 +213,7 @@ struct AccountEditorSheet: View {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .strokeBorder(icon == value ? Color.accentColor : .clear, lineWidth: 2))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.chorusPlain)
         .help(value == nil ? "โลโก้ของเจ้านี้" : "ไอคอน")
         .accessibilityLabel(value == nil ? "โลโก้ของเจ้านี้" : "ไอคอน")
         .accessibilityAddTraits(icon == value ? .isSelected : [])
@@ -226,7 +226,7 @@ struct AccountEditorSheet: View {
                 .frame(width: 20, height: 20)
                 .overlay(Circle().strokeBorder(Color.primary.opacity(0.35), lineWidth: color == value ? 2 : 0).padding(-3))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.chorusPlain)
         .help(value == nil ? "สีของเจ้านี้" : "สี")
         .accessibilityLabel(value == nil ? "สีของเจ้านี้" : "สี")
         .accessibilityAddTraits(color == value ? .isSelected : [])
