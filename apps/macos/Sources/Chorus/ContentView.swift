@@ -74,6 +74,10 @@ struct ContentView: View {
     @State private var model = ""
     @AppStorage("chorus.autoRoute") private var autoRoute = true
     @State private var sessionModes: [Int64: SessionMode] = [:]
+    /// The mode picked before a session exists (a fresh launch opens a draft
+    /// with no id). Without it the pick was dropped and the menu snapped back
+    /// to the default — only changing the default in Settings "worked".
+    @State private var draftSessionMode: SessionMode?
     @AppStorage(SettingsKey.defaultMode) private var defaultSessionMode = "auto"
     @AppStorage(SettingsKey.orchestratorModel) private var configuredOrchestrator = ""
     @AppStorage(SettingsKey.orchestratorBackup) private var configuredOrchestratorBackup = ""
@@ -86,7 +90,7 @@ struct ContentView: View {
     private var currentSessionMode: SessionMode {
         get {
             guard engine.sessionID >= 0 else {
-                return SessionMode(rawValue: defaultSessionMode) ?? .autoRoute
+                return draftSessionMode ?? SessionMode(rawValue: defaultSessionMode) ?? .autoRoute
             }
             if let m = sessionModes[engine.sessionID] { return m }
             return SessionMode(rawValue: defaultSessionMode) ?? .autoRoute
@@ -94,6 +98,8 @@ struct ContentView: View {
         nonmutating set {
             if engine.sessionID >= 0 {
                 sessionModes[engine.sessionID] = newValue
+            } else {
+                draftSessionMode = newValue
             }
         }
     }
@@ -1113,6 +1119,11 @@ struct ContentView: View {
             if autoRoute { engine.loadRouterModels() }
         }
         .onChange(of: engine.sessionID) { _, id in
+            // The draft's first message just made it a session: keep its mode.
+            if id >= 0, let m = draftSessionMode {
+                if sessionModes[id] == nil { sessionModes[id] = m }
+                draftSessionMode = nil
+            }
             guard !workspace.isEmpty else { return }
             engine.loadSessions(db: dbPath)
             if id >= 0, let p = projects.project(containing: workspace) {
