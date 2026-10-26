@@ -573,6 +573,8 @@ final class Engine: ObservableObject {
         let allowOther: Bool
     }
     @Published var pendingQuestion: AgentQuestion?
+    /// Composer hint after a turn (`chorus_suggest_reply`); nil = none.
+    @Published var nextHint: String?
     // Settings › ภาษา — stored here because extensions cannot hold state.
     @Published var grammars: [GrammarRow] = []
     @Published var grammarWorking: Set<String> = []
@@ -3254,6 +3256,34 @@ extension Engine {
                 self.grammarWorking.remove(id)
                 if r?.ok != true { self.grammarError = r?.error ?? "ไม่สำเร็จ" }
                 self.loadGrammars()
+            }
+        }
+    }
+}
+
+// MARK: - Next-message hint (composer Tab)
+
+extension Engine {
+    private struct Exchange: Codable { let ok: Bool; let user: String?; let agent: String? }
+    private struct Hint: Codable { let ok: Bool; let text: String? }
+
+    /// Read the last exchange on the turn queue (it touches SQLite), then ask
+    /// the local model off it — a slow Ollama must never hold up a turn.
+    func loadNextHint(model: String) {
+        guard let h = handle, !model.isEmpty else { return }
+        let session = sessionID
+        queue.async { [weak self] in
+            let ex = Self.decode(Exchange.self, Self.string(from: chorus_last_exchange(h.raw)))
+            guard let user = ex?.user, let agent = ex?.agent, !agent.isEmpty else { return }
+            DispatchQueue.global(qos: .utility).async {
+                let json = model.withCString { m in user.withCString { u in agent.withCString { a in
+                    Self.string(from: chorus_suggest_reply(m, u, a)) } } }
+                let hint = Self.decode(Hint.self, json)?.text
+                DispatchQueue.main.async {
+                    // Dropped if a new turn started or the session changed meanwhile.
+                    guard let self, !self.busy, self.sessionID == session else { return }
+                    self.nextHint = hint
+                }
             }
         }
     }

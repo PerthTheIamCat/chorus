@@ -97,7 +97,7 @@ struct ModelPicker: View {
     private var current: ModelID { ModelID(model) }
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 6) {
             Button { open.toggle() } label: {
                 HStack(spacing: 5) {
                     if let agent { ProviderIcon(provider: agent.id, size: 14) }
@@ -253,7 +253,8 @@ struct ChipPicker: View {
             .font(.caption)
         }
         .buttonStyle(InteractiveStyle(cornerRadius: 99, selected: open,
-                                      padding: .init(top: 4, leading: 9, bottom: 4, trailing: 9)))
+                                      padding: .init(top: 4, leading: 9, bottom: 4, trailing: 9),
+                                      bordered: true))
         .popover(isPresented: $open, arrowEdge: .top) {
             VStack(alignment: .leading, spacing: 2) {
                 ForEach(options, id: \.self) { o in

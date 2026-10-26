@@ -235,7 +235,7 @@ struct OrchestratorView: View {
 
             Spacer(minLength: 4)
 
-            HStack(spacing: 4) {
+            HStack(spacing: 6) {
                 Button(action: {
                     onDispatchParallelPrompt?("แตกงานย่อยให้ subagent ในบทบาท \(role.name) (ขอบเขต: \(role.description))")
                 }) {

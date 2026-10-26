@@ -138,7 +138,9 @@ impl Ollama {
         }
     }
 
-    fn generate(&self, prompt: &str) -> Option<String> {
+    /// One non-streamed completion; `None` on any failure (no Ollama, no
+    /// model, timeout). Also used by `suggest` for next-message hints.
+    pub fn generate(&self, prompt: &str) -> Option<String> {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::net::TcpStream;
         use std::time::Duration;

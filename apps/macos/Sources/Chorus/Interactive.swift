@@ -71,6 +71,9 @@ struct PlainInteractiveStyle: ButtonStyle {
 
         var body: some View {
             configuration.label
+                // Tiny glyphs (9 pt chevrons) were hard to hit; the target is
+                // at least 18 pt whatever the label draws.
+                .frame(minWidth: 18, minHeight: 18)
                 .contentShape(Rectangle())
                 .background(
                     RoundedRectangle(cornerRadius: style.cornerRadius, style: .continuous)

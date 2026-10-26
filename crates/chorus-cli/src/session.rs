@@ -1792,6 +1792,28 @@ impl Session {
     /// for, `pending`/`constraints` come from the most recent handoff brief,
     /// and `done` is decisions plus the *stored* L2 gists of recent agent
     /// turns. No summariser runs on this path.
+    /// The latest user message and the agent reply after it, for the
+    /// next-message hint (`chorus_core::suggest`). Empty agent text = nothing
+    /// to follow up on yet. A ledger read only — cheap enough for the turn
+    /// queue; the model call happens elsewhere.
+    pub fn last_exchange(&self) -> Result<(String, String)> {
+        let c = self.store.conn();
+        let events = ledger::history(c, self.sess, 200)?;
+        let mut agent = String::new();
+        for e in events.iter().rev() {
+            if e.kind != EventKind::Msg {
+                continue;
+            }
+            if e.actor == self.user {
+                return Ok((ledger::body(c, e)?, agent));
+            }
+            if agent.is_empty() {
+                agent = ledger::body(c, e)?;
+            }
+        }
+        Ok((String::new(), agent))
+    }
+
     pub fn task_state(&self) -> Result<TaskState> {
         let c = self.store.conn();
         let events = ledger::history(c, self.sess, 400)?;

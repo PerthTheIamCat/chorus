@@ -503,6 +503,13 @@ char *chorus_structural_diff_json(const char *old_code, const char *new_code);
  * 5 function · 6 attribute/macro/key · 7 constant. */
 char *chorus_highlight(const char *path, const char *text);
 
+/* Next-message hint for the composer (Tab to take it).
+ * chorus_last_exchange: {"ok":true,"user":"...","agent":"..."} — ledger read.
+ * chorus_suggest_reply: {"ok":true,"text":"..."|null} — one local Ollama
+ * call with `model`; blocking, independent of any engine. */
+char *chorus_last_exchange(const ChorusEngine *e);
+char *chorus_suggest_reply(const char *model, const char *user, const char *agent);
+
 /* Installable tree-sitter grammars (Settings › ภาษา).
  * {"ok":true,"grammars":[{"id","label","extensions":[..],"installed",
  * "source"}]}. An installed grammar replaces the built-in lexer for its

@@ -3985,6 +3985,46 @@ pub unsafe extern "C" fn chorus_highlight(path: *const c_char, text: *const c_ch
     }
 }
 
+/// The latest user message and the agent reply after it:
+/// `{"ok":true,"user":"…","agent":"…"}` (agent empty = nothing to follow).
+/// A ledger read — fine on the turn queue.
+///
+/// # Safety
+/// `e` must be live or null.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_last_exchange(e: *const ChorusEngine) -> *mut c_char {
+    let Some(engine) = e.as_ref() else {
+        return err("null engine");
+    };
+    match catch_unwind(AssertUnwindSafe(|| engine.session.last_exchange())) {
+        Ok(Ok((user, agent))) => out(serde_json::json!({"ok": true, "user": user, "agent": agent}).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in last_exchange"),
+    }
+}
+
+/// A guess at the user's next message from the local `model` (Ollama), for
+/// the composer's Tab hint. Blocking (one local model call, ≤ ~20 s) and
+/// independent of any engine: call it off both the main and the turn queue.
+/// `{"ok":true,"text":"…"}` or `{"ok":true,"text":null}` (no hint).
+///
+/// # Safety
+/// `model`, `user`, `agent` valid NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_suggest_reply(
+    model: *const c_char,
+    user: *const c_char,
+    agent: *const c_char,
+) -> *mut c_char {
+    let (Some(model), Some(user), Some(agent)) = (borrow(model), borrow(user), borrow(agent)) else {
+        return err("model/user/agent must be valid UTF-8");
+    };
+    match catch_unwind(|| chorus_core::suggest::next_message(model, user, agent)) {
+        Ok(text) => out(serde_json::json!({"ok": true, "text": text}).to_string()),
+        Err(_) => err("panic in suggest_reply"),
+    }
+}
+
 /// Installable syntax grammars for Settings:
 /// `{"ok":true,"grammars":[{id,label,extensions,installed,source}]}`.
 #[no_mangle]

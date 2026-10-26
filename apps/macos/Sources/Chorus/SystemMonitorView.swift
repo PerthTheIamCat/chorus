@@ -602,7 +602,7 @@ struct SystemMonitorView: View {
             case nil:
                 let target = Confirm(pid: p.pid, group: group)
                 if confirming == target {
-                    HStack(spacing: 4) {
+                    HStack(spacing: 6) {
                         Button("ยืนยันหยุด") {
                             confirming = nil
                             model.stop(p, group: group)

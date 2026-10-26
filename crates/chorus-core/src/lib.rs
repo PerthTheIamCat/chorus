@@ -57,6 +57,7 @@ pub mod session_cleanup;
 pub mod skills;
 pub mod store;
 pub mod structural_diff;
+pub mod suggest;
 pub mod swarm;
 pub mod tokens;
 pub mod trust;
