@@ -573,10 +573,12 @@ final class Engine: ObservableObject {
         let allowOther: Bool
     }
     @Published var pendingQuestion: AgentQuestion?
-    private let questionGate = DispatchSemaphore(value: 0)
+    nonisolated private let questionGate = DispatchSemaphore(value: 0)
     /// Serialises questions from parallel agents: one sheet at a time.
-    private let questionLock = NSLock()
-    private var questionAnswer: String?
+    nonisolated private let questionLock = NSLock()
+    /// Written on the main actor, read by the waiting MCP thread after the
+    /// semaphore — the gate orders the two, so no actor protects it.
+    nonisolated(unsafe) private var questionAnswer: String?
 
     /// UTF-8 of `text` that fits `cap - 1` bytes, cut on a character
     /// boundary so Rust never sees half a code point.
@@ -592,17 +594,17 @@ final class Engine: ObservableObject {
 
     /// Called on an MCP server thread. Publishes the question and blocks
     /// until `answerQuestion`; `nil` = closed without an answer.
-    fileprivate func askQuestionBlocking(_ json: String) -> String? {
+    nonisolated fileprivate func askQuestionBlocking(_ json: String) -> String? {
         struct Raw: Codable { let agent: String?; let question: String?; let options: [String]?; let allow_other: Bool? }
         guard let raw = try? JSONDecoder().decode(Raw.self, from: Data(json.utf8)) else { return nil }
         questionLock.lock()
         defer { questionLock.unlock() }
-        DispatchQueue.main.async {
+        let agent = raw.agent, question = raw.question ?? ""
+        let options = raw.options ?? [], allowOther = raw.allow_other ?? true
+        Task { @MainActor in
             self.pendingQuestion = AgentQuestion(
-                agent: raw.agent ?? self.liveAgent ?? "agent",
-                question: raw.question ?? "",
-                options: raw.options ?? [],
-                allowOther: raw.allow_other ?? true)
+                agent: agent ?? self.liveAgent ?? "agent",
+                question: question, options: options, allowOther: allowOther)
             NSApp.requestUserAttention(.informationalRequest)
         }
         questionGate.wait()
