@@ -74,6 +74,14 @@ impl Policy {
         }
     }
 
+    /// The OS-level wall that keeps this policy's promise.
+    fn sandbox_profile(self) -> sandbox::Profile {
+        match self {
+            Policy::DenyAll | Policy::ReadOnly => sandbox::Profile::ReadOnly,
+            Policy::AllowAll => sandbox::Profile::Workspace,
+        }
+    }
+
     fn decide(self, ask: &PermissionAsk) -> Permission {
         let allow = match self {
             Policy::DenyAll => false,
@@ -698,6 +706,27 @@ fn event_row(
 pub struct OrchestraReport {
     pub relay: RelayReport,
     pub lead: Vec<crate::orchestra::Lead>,
+}
+
+/// "Allow for this session" answers, so the same request does not ask
+/// twice. Keyed by what the dialog showed (tool title + kind): Claude titles
+/// a shell call with the command itself, so a new command still asks.
+/// Memory only — closing the session or the app forgets every grant.
+#[derive(Debug, Default)]
+pub struct PermissionGrants(std::collections::HashSet<(String, String)>);
+
+impl PermissionGrants {
+    fn key(ask: &PermissionAsk) -> (String, String) {
+        (ask.tool.trim().to_string(), ask.kind.trim().to_lowercase())
+    }
+
+    pub fn allows(&self, ask: &PermissionAsk) -> bool {
+        self.0.contains(&Self::key(ask))
+    }
+
+    pub fn grant(&mut self, ask: &PermissionAsk) {
+        self.0.insert(Self::key(ask));
+    }
 }
 
 pub struct Session {
@@ -2073,6 +2102,7 @@ impl Session {
             bridge,
             text,
             policy.mode_id(),
+            policy.sandbox_profile(),
             attachment_ids,
             &mut decide,
         );
@@ -2218,12 +2248,14 @@ impl Session {
     /// Every streamed token, tool and usage signal of the turn is tagged with
     /// this session, and the shell hears `status` when an agent starts and
     /// stops answering here.
+    #[allow(clippy::too_many_arguments)]
     fn one_turn_decide(
         &self,
         agent_name: &str,
         bridge: &[String],
         text: &str,
         mode: &str,
+        profile: sandbox::Profile,
         attachment_ids: &[i64],
         decide: &mut dyn FnMut(&PermissionAsk) -> Permission,
     ) -> Result<TurnOutcome> {
@@ -2231,18 +2263,20 @@ impl Session {
         let _scope = chorus_acp::push_scope(self.sess, head);
         chorus_acp::push(self.sess, head, "status", "running");
         let out =
-            self.one_turn_decide_inner(agent_name, bridge, text, mode, attachment_ids, decide);
+            self.one_turn_decide_inner(agent_name, bridge, text, mode, profile, attachment_ids, decide);
         let status = if out.is_ok() { "idle" } else { "failed" };
         chorus_acp::push(self.sess, head, "status", status);
         out
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn one_turn_decide_inner(
         &self,
         agent_name: &str,
         bridge: &[String],
         text: &str,
         mode: &str,
+        profile: sandbox::Profile,
         attachment_ids: &[i64],
         decide: &mut dyn FnMut(&PermissionAsk) -> Permission,
     ) -> Result<TurnOutcome> {
@@ -2269,14 +2303,9 @@ impl Session {
         }
         let mcp_servers = serde_json::Value::Array(servers);
         // Confine the agent's writes with the OS before the turn, not just
-        // revert them after it. `mode` already told us how much this policy
-        // promised; the sandbox is what makes that promise true for files the
-        // shadow repo cannot reach.
-        let profile = if mode == "read-only" {
-            sandbox::Profile::ReadOnly
-        } else {
-            sandbox::Profile::Workspace
-        };
+        // revert them after it. The caller picks `profile` separately from
+        // `mode`: an interactive turn asks the agent for its asking mode, but
+        // a write the user allowed must still land.
         let opts = sandbox::Options {
             hide_secret_files: self.hide_secret_files,
             extra_roots: self.project_folders.clone(),
@@ -2285,7 +2314,7 @@ impl Session {
             Ok(c) => c,
             Err(why) => {
                 anyhow::ensure!(
-                    mode != "read-only",
+                    profile != sandbox::Profile::ReadOnly,
                     "Cannot enforce read-only sandbox: {why}"
                 );
                 if self.log_permissions {
@@ -2573,12 +2602,16 @@ impl Session {
         }
         // An interactive caller shows the user a dialog per action, so it wants
         // the agent to ask about everything — the same mode the restrictive
-        // policies use.
+        // policies use. Not the same sandbox, though: with the read-only
+        // profile every write the user pressed Allow on died with "operation
+        // not permitted", so "ask first" could never edit anything. Workspace
+        // still keeps writes inside the project, and a deny is undone below.
         let outcome = self.one_turn_decide(
             agent_name,
             &bridge,
             &prompt,
             Policy::ReadOnly.mode_id(),
+            sandbox::Profile::Workspace,
             attachment_ids,
             &mut watch,
         )?;
@@ -2839,6 +2872,13 @@ impl Session {
 
     pub fn project_folders(&self) -> &[PathBuf] {
         &self.project_folders
+    }
+
+    /// Who answers `chorus_ask_user` for this session. Unlike the computer
+    /// asker it outlives a turn: a question is not a permission, so it works
+    /// in "allow everything" turns too.
+    pub fn set_question_asker(&self, asker: Option<chorus_core::ask_user::Asker>) {
+        chorus_core::ask_user::set_asker(self.store.conn(), self.sess, asker);
     }
 
     /// Who answers "may the agent click here?" during an interactive turn.
@@ -3338,6 +3378,21 @@ pub fn list_sessions(db: &Path) -> Result<Vec<SessionSummary>> {
 #[cfg(test)]
 mod policy_tests {
     use super::*;
+
+    #[test]
+    fn a_session_grant_covers_the_same_request_only() {
+        let ask = |tool: &str, kind: &str| PermissionAsk {
+            tool: tool.into(),
+            kind: kind.into(),
+            detail: String::new(),
+        };
+        let mut g = PermissionGrants::default();
+        assert!(!g.allows(&ask("`git status`", "execute")));
+        g.grant(&ask("`git status`", "execute"));
+        assert!(g.allows(&ask(" `git status` ", "Execute")));
+        assert!(!g.allows(&ask("`git push`", "execute")), "a new command still asks");
+        assert!(!g.allows(&ask("`git status`", "edit")));
+    }
 
     #[test]
     fn read_only_never_grants_unknown_or_mixed_permission_kinds() {

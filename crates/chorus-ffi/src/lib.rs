@@ -168,6 +168,17 @@ pub extern "C" fn chorus_catalog_progress_json() -> *mut c_char {
 /// Opaque handle. One per open session.
 pub struct ChorusEngine {
     session: Session,
+    /// "Allow for this session" answers — per open session, memory only.
+    grants: chorus_cli::session::PermissionGrants,
+}
+
+impl ChorusEngine {
+    fn new(session: Session) -> Self {
+        Self {
+            session,
+            grants: Default::default(),
+        }
+    }
 }
 
 // ---- string helpers ---------------------------------------------------
@@ -437,7 +448,7 @@ pub unsafe extern "C" fn chorus_engine_open(
         let cwd = PathBuf::from(borrow(cwd)?);
         let title = borrow(title)?;
         let session = Session::create(&db, &cwd, title).ok()?;
-        Some(ChorusEngine { session })
+        Some(ChorusEngine::new(session))
     };
     match catch_unwind(AssertUnwindSafe(run)) {
         Ok(Some(e)) => Box::into_raw(Box::new(e)),
@@ -460,7 +471,7 @@ pub unsafe extern "C" fn chorus_engine_reopen(
         if let Some(preset) = remembered_preset(session_id) {
             session.set_route_preset(preset);
         }
-        Some(ChorusEngine { session })
+        Some(ChorusEngine::new(session))
     };
     match catch_unwind(AssertUnwindSafe(run)) {
         Ok(Some(e)) => Box::into_raw(Box::new(e)),
@@ -520,7 +531,7 @@ pub unsafe extern "C" fn chorus_draft_commit(draft_id: u64, title: *const c_char
     let run = || -> Option<ChorusEngine> {
         let title = borrow(title)?;
         let session = drafts().lock().ok()?.commit(draft_id, title).ok()?;
-        Some(ChorusEngine { session })
+        Some(ChorusEngine::new(session))
     };
     match catch_unwind(AssertUnwindSafe(run)) {
         Ok(Some(e)) => Box::into_raw(Box::new(e)),
@@ -859,9 +870,37 @@ fn ask_payload(agent: &str, ask: &chorus_cli::session::PermissionAsk) -> String 
     .to_string()
 }
 
+/// The callback's answer that also covers the same request for the rest of
+/// the session. `1` (or any other non-zero) allows once, `0` denies.
+const ALLOW_FOR_SESSION: c_int = 2;
+
+/// Ask the shell unless this session already said "always" to the same
+/// request. The grant lives here, not in the shell: the shell only draws.
+fn ask_with_grants(
+    grants: &mut chorus_cli::session::PermissionGrants,
+    agent: &str,
+    ask: &chorus_cli::session::PermissionAsk,
+    callback: PermissionCallback,
+    ctx_usize: usize,
+) -> chorus_cli::session::Permission {
+    if grants.allows(ask) {
+        return chorus_cli::session::Permission::Allow;
+    }
+    let c = CString::new(ask_payload(agent, ask)).unwrap_or_default();
+    match callback(ctx_usize as *mut std::ffi::c_void, c.as_ptr()) {
+        0 => chorus_cli::session::Permission::Deny,
+        ALLOW_FOR_SESSION => {
+            grants.grant(ask);
+            chorus_cli::session::Permission::Allow
+        }
+        _ => chorus_cli::session::Permission::Allow,
+    }
+}
+
 /// A permission callback: given the ask as JSON
 /// (`{"agent":"...","tool":"...","kind":"...","detail":"..."}`), return
-/// non-zero to allow.
+/// `0` to deny, `1` to allow once, `2` to allow the same request for the
+/// rest of the session.
 /// Called on the same thread as `chorus_run_turn_interactive` (which the
 /// shell already runs off its main thread) — the shell hops to its UI,
 /// shows a dialog, and blocks here until the user answers.
@@ -889,14 +928,9 @@ pub unsafe extern "C" fn chorus_run_turn_interactive(
     };
 
     let ctx_usize = ctx as usize; // move a Copy value into the closure
+    let grants = &mut engine.grants;
     let mut decide = |ask: &chorus_cli::session::PermissionAsk| {
-        let c = std::ffi::CString::new(ask_payload(agent, ask)).unwrap_or_default();
-        let allow = callback(ctx_usize as *mut std::ffi::c_void, c.as_ptr());
-        if allow != 0 {
-            chorus_cli::session::Permission::Allow
-        } else {
-            chorus_cli::session::Permission::Deny
-        }
+        ask_with_grants(grants, agent, ask, callback, ctx_usize)
     };
 
     engine
@@ -953,13 +987,9 @@ pub unsafe extern "C" fn chorus_run_turn_interactive_with_attachments(
         return err("null permission callback");
     };
     let ctx_usize = ctx as usize;
+    let grants = &mut engine.grants;
     let mut decide = |ask: &chorus_cli::session::PermissionAsk| {
-        let c = CString::new(ask_payload(agent, ask)).unwrap_or_default();
-        if callback(ctx_usize as *mut std::ffi::c_void, c.as_ptr()) != 0 {
-            chorus_cli::session::Permission::Allow
-        } else {
-            chorus_cli::session::Permission::Deny
-        }
+        ask_with_grants(grants, agent, ask, callback, ctx_usize)
     };
     engine
         .session
@@ -1426,6 +1456,61 @@ pub unsafe extern "C" fn chorus_set_computer_use(e: *mut ChorusEngine, on: c_int
             engine.session.set_computer_use(on != 0)
         }));
     }
+}
+
+/// Answers `chorus_ask_user`: given the question as JSON
+/// (`{"agent":"...","question":"...","options":[...],"allow_other":bool}`),
+/// write the answer as NUL-terminated UTF-8 into `answer` (at most `cap`
+/// bytes, NUL included) and return non-zero, or return `0` when the person
+/// closed the question. Called on an MCP server thread — block while asking.
+pub type QuestionCallback = extern "C" fn(
+    ctx: *mut std::ffi::c_void,
+    question_json: *const c_char,
+    answer: *mut c_char,
+    cap: usize,
+) -> c_int;
+
+/// Room for `ask_user::MAX_ANSWER` characters of any script, plus the NUL.
+const ANSWER_CAP: usize = chorus_core::ask_user::MAX_ANSWER * 4 + 1;
+
+/// Who answers agents' questions in the open session; `NULL` removes it.
+/// Call again after every open/reopen — it is tied to the session.
+///
+/// # Safety
+/// `e` must be live or null; `callback` and `ctx` must stay valid until
+/// replaced or removed.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_question_callback(
+    e: *mut ChorusEngine,
+    callback: Option<QuestionCallback>,
+    ctx: *mut std::ffi::c_void,
+) {
+    let Some(engine) = e.as_mut() else {
+        return;
+    };
+    let ctx_usize = ctx as usize;
+    let asker = callback.map(|cb| -> chorus_core::ask_user::Asker {
+        std::sync::Arc::new(move |q: &chorus_core::ask_user::Question| {
+            let payload = serde_json::to_string(q).unwrap_or_default();
+            let c = CString::new(payload).unwrap_or_default();
+            let mut buf = vec![0u8; ANSWER_CAP];
+            let answered = cb(
+                ctx_usize as *mut std::ffi::c_void,
+                c.as_ptr(),
+                buf.as_mut_ptr() as *mut c_char,
+                buf.len(),
+            );
+            if answered == 0 {
+                return None;
+            }
+            buf[ANSWER_CAP - 1] = 0; // whatever the shell wrote, it ends here
+            let end = buf.iter().position(|&b| b == 0).unwrap_or(0);
+            Some(String::from_utf8_lossy(&buf[..end]).into_owned())
+        })
+    });
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        engine.session.set_question_asker(asker)
+    }));
 }
 
 /// Claude uses the user's own Chrome through the Claude in Chrome extension

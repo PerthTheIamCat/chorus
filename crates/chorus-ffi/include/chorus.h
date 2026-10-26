@@ -107,8 +107,9 @@ char *chorus_run_turn_with_attachments(ChorusEngine *e, const char *agent,
                                        const char *attachment_ids_json,
                                        int allow);
 
-/* A permission callback. `ask_json` is {"tool":"...","kind":"...","detail":"..."};
- * return non-zero to allow. Called on the calling thread — block here while
+/* A permission callback. `ask_json` is {"agent":"...","tool":"...","kind":"...","detail":"..."};
+ * return 0 to deny, 1 to allow once, 2 to allow the same request for the
+ * rest of the open session. Called on the calling thread — block here while
  * you show a dialog. */
 typedef int (*ChorusPermissionCallback)(void *ctx, const char *ask_json);
 
@@ -261,6 +262,19 @@ char *chorus_run_relay_with_attachments(ChorusEngine *e, const char *agents,
 char *chorus_run_plan_with_attachments(ChorusEngine *e, const char *agents,
                                        const char *prompt,
                                        const char *attachment_ids_json);
+
+/* Answers an agent's `chorus_ask_user`. `question_json` is
+ * {"agent":"...","question":"...","options":["..."],"allow_other":bool}.
+ * Write the answer as NUL-terminated UTF-8 into `answer` (at most `cap` bytes)
+ * and return non-zero, or return 0 if the person closed the question.
+ * Called on an MCP server thread — block while asking. */
+typedef int (*ChorusQuestionCallback)(void *ctx, const char *question_json,
+                                      char *answer, size_t cap);
+
+/* Who answers questions in the open session; NULL removes it. Tied to the
+ * session: call again after every open/reopen. */
+void chorus_set_question_callback(ChorusEngine *e,
+                                  ChorusQuestionCallback callback, void *ctx);
 
 /* Computer use (the `computer` MCP tool) on/off for the open session.
  * Off by default. Read-only turns may only take screenshots; interactive

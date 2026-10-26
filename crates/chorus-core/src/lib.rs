@@ -7,6 +7,7 @@
 
 pub mod actor;
 pub mod agent_control;
+pub mod ask_user;
 pub mod attachments;
 pub mod blob;
 pub mod checkpoint;

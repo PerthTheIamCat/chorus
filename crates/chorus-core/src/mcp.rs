@@ -406,6 +406,9 @@ fn dispatch(req: &Value, conn: &rusqlite::Connection, caller: &Caller) -> Value 
                 if session_scope.is_some_and(|s| computer::enabled(conn, s)) {
                     tools.push(computer::tool_schema());
                 }
+                if session_scope.is_some_and(|s| crate::ask_user::available(conn, s)) {
+                    tools.push(crate::ask_user::tool_schema());
+                }
             }
             tools.extend([synthesize_role_schema(), notify_user_schema()]);
             Ok(json!({ "tools": tools }))
@@ -543,6 +546,10 @@ fn call_tool(
             json!({"type":"text","text":format!("Attachment {} ({}); characters {}–{} of {}; next_offset_chars={}\n{}",meta.name,mime,start,end,total,next_offset,excerpt)})
         };
         return Ok(json!({"content":[block]}));
+    }
+    if name == "chorus_ask_user" {
+        let sess = session_scope.ok_or("asking the user is only available in a session")?;
+        return crate::ask_user::call(conn, sess, &caller.actor, &args);
     }
     if name == "computer" {
         let sess = session_scope.ok_or("computer use is only available in a session")?;

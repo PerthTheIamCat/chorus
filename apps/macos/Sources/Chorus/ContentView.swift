@@ -1075,6 +1075,12 @@ struct ContentView: View {
                 }
             }
         }
+        // The last choice is the next launch's default (Settings › สิทธิ์เริ่มต้น
+        // reads the same key) — picking "ให้ทำเลย" once should not revert to
+        // asking every time the app opens.
+        .onChange(of: permission) { _, p in
+            UserDefaults.standard.set(Int(p.rawValue), forKey: "chorus.defaultPermission")
+        }
         .onChange(of: autoRoute) { _, enabled in
             if enabled {
                 routerAutoInstallAttempted = false
@@ -1271,14 +1277,21 @@ struct ContentView: View {
                     Text(ask.detail).font(.callout).textSelection(.enabled)
                 }
                 HStack {
+                    Button("ไม่อนุญาต", role: .destructive) { engine.answerPermission(.deny) }
+                        .keyboardShortcut(.cancelAction)
                     Spacer()
-                    Button("Deny", role: .destructive) { engine.answerPermission(false) }
-                    Button("Allow") { engine.answerPermission(true) }
+                    Button("อนุญาตตลอด session นี้") { engine.answerPermission(.session) }
+                        .help("ไม่ถามซ้ำกับคำขอเดียวกันจนกว่าจะปิด session — คำสั่งใหม่ยังถาม")
+                    Button("อนุญาตครั้งนี้") { engine.answerPermission(.once) }
                         .keyboardShortcut(.defaultAction)
                 }
             }
             .padding(20)
-            .frame(width: 420)
+            .frame(width: 480)
+            .interactiveDismissDisabled()
+        }
+        .sheet(item: $engine.pendingQuestion) { q in
+            AgentQuestionSheet(question: q, agentLabel: askingAgentLabel(q.agent)) { engine.answerQuestion($0) }
         }
         .sheet(isPresented: $showSearchSheet) {
             ChatSearchView(
