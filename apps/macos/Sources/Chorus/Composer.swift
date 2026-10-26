@@ -262,7 +262,7 @@ struct ComposerField<Leading: View, Trailing: View>: View {
     }
 
     private var controlRowContent: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 6) {
             Button { showingImporter = true } label: {
                 Image(systemName: "plus").font(.system(size: 13, weight: .medium)).frame(width: 26, height: 26)
             }

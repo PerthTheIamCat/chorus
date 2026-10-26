@@ -55,7 +55,7 @@ public struct LivePreviewView: View {
             // Control Header
             HStack(spacing: 8) {
                 // Navigation buttons
-                HStack(spacing: 4) {
+                HStack(spacing: 6) {
                     Button {
                         if webView.canGoBack { webView.goBack() }
                     } label: {

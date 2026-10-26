@@ -3146,7 +3146,7 @@ struct ContentView: View {
         let rows = sessions(of: p).filter { matches($0.s) }
         let isCurrent = p.folders.contains(workspace)
         return VStack(alignment: .leading, spacing: 1) {
-            HStack(spacing: 2) {
+            HStack(spacing: 4) {
                 Button { selectProject(p) } label: {
                     HStack(spacing: 7) {
                         Button { toggle(p) } label: {
@@ -4666,7 +4666,7 @@ struct CodeBlockView: View {
                     .foregroundStyle(.secondary)
 
                 if isCanvasSupported {
-                    HStack(spacing: 2) {
+                    HStack(spacing: 4) {
                         Button {
                             showCanvas = true
                         } label: {
