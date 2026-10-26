@@ -3985,6 +3985,39 @@ pub unsafe extern "C" fn chorus_highlight(path: *const c_char, text: *const c_ch
     }
 }
 
+/// Installable syntax grammars for Settings:
+/// `{"ok":true,"grammars":[{id,label,extensions,installed,source}]}`.
+#[no_mangle]
+pub extern "C" fn chorus_grammars_json() -> *mut c_char {
+    match catch_unwind(chorus_core::grammars::list) {
+        Ok(rows) => out(serde_json::json!({"ok": true, "grammars": rows}).to_string()),
+        Err(_) => err("panic in grammars"),
+    }
+}
+
+/// `action` is `install` or `remove`. Blocking — install downloads the
+/// grammar and compiles it; call it off the main thread. `{"ok":true}` or
+/// `{"ok":false,"error":"…"}` (the error is already user-facing Thai).
+///
+/// # Safety
+/// `id`, `action` valid NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_grammar_action(id: *const c_char, action: *const c_char) -> *mut c_char {
+    let (Some(id), Some(action)) = (borrow(id), borrow(action)) else {
+        return err("id/action must be valid UTF-8");
+    };
+    let r = catch_unwind(|| match action {
+        "install" => chorus_core::grammars::install(id),
+        "remove" => chorus_core::grammars::remove(id),
+        other => Err(format!("unknown action {other}")),
+    });
+    match r {
+        Ok(Ok(())) => out(serde_json::json!({"ok": true}).to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in grammar action"),
+    }
+}
+
 
 // ── integrated terminal ────────────────────────────────────────────────────
 // Logic lives in `chorus_acp::pty`; this is only the C seam. Output arrives as

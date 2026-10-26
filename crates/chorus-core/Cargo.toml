@@ -16,6 +16,11 @@ thiserror.workspace = true
 similar.workspace = true
 htmd = "0.5"
 pulldown-cmark = { version = "0.13", default-features = false }
+# Installable grammars for the code viewer (grammars.rs). The loader compiles
+# a grammar's parser.c with the system C compiler, as the tree-sitter CLI does.
+tree-sitter = "0.27"
+tree-sitter-highlight = "0.27"
+tree-sitter-loader = "0.27"
 
 [dev-dependencies]
 tempfile.workspace = true

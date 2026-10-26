@@ -441,7 +441,17 @@ pub fn highlight(path: &str, text: &str) -> Vec<Vec<Span>> {
     if ext == "md" || ext == "markdown" {
         return markdown(&lines);
     }
-    let Some(lang) = lang_for(&ext) else {
+    // An installed tree-sitter grammar beats the lexer for its language.
+    if let Some(spans) = crate::grammars::highlight(path, text) {
+        return spans;
+    }
+    // No extension the lexer knows (`Dockerfile`, a `#!/usr/bin/env python`
+    // script): borrow the grammar catalog's detection, then its extension.
+    let lang = lang_for(&ext).or_else(|| {
+        crate::grammars::detect(path, text)
+            .and_then(|g| g.extensions.iter().find_map(|e| lang_for(e)))
+    });
+    let Some(lang) = lang else {
         return vec![Vec::new(); lines.len()];
     };
     let mut carry = Carry::Code;
@@ -692,6 +702,12 @@ fn markdown(lines: &[&str]) -> Vec<Vec<Span>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shebang_script_without_extension_still_gets_colour() {
+        let lines = highlight("bin/deploy", "#!/usr/bin/env python3\ndef go(): return None");
+        assert!(lines[1].iter().any(|s| s.2 == Kind::Keyword as u8), "{lines:?}");
+    }
 
     fn kinds(path: &str, text: &str) -> Vec<Vec<(String, u8)>> {
         let lines: Vec<&str> = text.split('\n').collect();

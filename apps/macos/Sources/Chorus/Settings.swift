@@ -14,7 +14,7 @@ struct SettingsSheet: View {
     enum Section: String, CaseIterable, Identifiable {
         case general, accounts, routing, orchestration
         case agents, safety, integrations, skills
-        case review, cost, storage
+        case review, cost, storage, languages
         case companion, about, changelog
         var id: String { rawValue }
 
@@ -31,6 +31,7 @@ struct SettingsSheet: View {
             case .review: "Review และ checkpoint"
             case .cost: "การใช้งานและค่าใช้จ่าย"
             case .storage: "พื้นที่และประสิทธิภาพ"
+            case .languages: "ภาษา (Syntax)"
             case .companion: "Mobile Companion"
             case .about: "เกี่ยวกับ"
             case .changelog: "มีอะไรใหม่"
@@ -50,6 +51,7 @@ struct SettingsSheet: View {
             case .review: "การตรวจสิ่งที่ agent แก้"
             case .cost: "token โควตา และเงิน"
             case .storage: "โมเดลในเครื่อง หน่วยความจำ และข้อมูล"
+            case .languages: "สีตามไวยากรณ์ของแต่ละภาษาในตัวดูโค้ด"
             case .companion: "สั่งงานจาก iPhone"
             case .about: "เวอร์ชันและสัญญาอนุญาต"
             case .changelog: "สิ่งที่เปลี่ยนในแต่ละเวอร์ชัน"
@@ -69,6 +71,7 @@ struct SettingsSheet: View {
             case .review: "plusminus"
             case .cost: "bahtsign.circle"
             case .storage: "internaldrive"
+            case .languages: "chevron.left.forwardslash.chevron.right"
             case .companion: "iphone"
             case .about: "info.circle"
             case .changelog: "clock.arrow.circlepath"
@@ -88,6 +91,7 @@ struct SettingsSheet: View {
             case .review: .green
             case .cost: .mint
             case .storage: .brown
+            case .languages: .pink
             case .companion: .cyan
             }
         }
@@ -95,7 +99,7 @@ struct SettingsSheet: View {
         static let groups: [(title: String, items: [Section])] = [
             ("ใช้งาน", [.general, .accounts, .routing, .orchestration]),
             ("Agent", [.agents, .safety, .integrations, .skills]),
-            ("ข้อมูล", [.review, .cost, .storage]),
+            ("ข้อมูล", [.review, .cost, .storage, .languages]),
             ("ระบบ", [.companion, .about, .changelog]),
         ]
     }
@@ -180,6 +184,7 @@ struct SettingsSheet: View {
         case .review: ReviewSettings()
         case .cost: CostSettings()
         case .storage: StorageSettings()
+        case .languages: LanguagesSettings()
         case .companion: RemotePairingView()
         case .about: AboutSettings(showChangelog: { section = .changelog })
         case .changelog: ChangelogSettings()
@@ -1595,3 +1600,56 @@ struct LearnedRouteCard: View {
     }
 }
 
+
+/// Installable tree-sitter grammars. Drawing only: what a grammar is, where
+/// it comes from and how it installs all live in `grammars.rs`.
+struct LanguagesSettings: View {
+    @EnvironmentObject private var engine: Engine
+
+    var body: some View {
+        let installed = engine.grammars.filter(\.installed)
+        let available = engine.grammars.filter { !$0.installed }
+        if let e = engine.grammarError {
+            Label(e, systemImage: "exclamationmark.triangle.fill")
+                .font(.callout).foregroundStyle(.orange)
+                .textSelection(.enabled)
+        }
+        SettingsGroup(title: "ติดตั้งแล้ว (\(installed.count))",
+                      footer: "ภาษาที่ไม่ได้ติดตั้งยังมีสีแบบพื้นฐานจากตัวแยกคำในแอป · ติดตั้งแล้วจะลงสีตามไวยากรณ์จริงด้วย tree-sitter") {
+            if installed.isEmpty {
+                SettingsRow(title: "ยังไม่มี", detail: "กดติดตั้งจากรายการด้านล่าง") { EmptyView() }
+            }
+            ForEach(Array(installed.enumerated()), id: \.element.id) { i, g in
+                if i > 0 { RowDivider() }
+                row(g)
+            }
+        }
+        SettingsGroup(title: "ติดตั้งได้ (\(available.count))",
+                      footer: "ดาวน์โหลด source ของ grammar จาก GitHub แล้ว compile ในเครื่อง — ต้องมี Command Line Tools (`xcode-select --install`) · เก็บที่ ~/.chorus/grammars") {
+            ForEach(Array(available.enumerated()), id: \.element.id) { i, g in
+                if i > 0 { RowDivider() }
+                row(g)
+            }
+        }
+        .onAppear { engine.loadGrammars() }
+    }
+
+    private func row(_ g: Engine.GrammarRow) -> some View {
+        SettingsRow(title: g.label, detail: g.extensions.map { ".\($0)" }.joined(separator: " ")) {
+            HStack(spacing: 8) {
+                Link(destination: URL(string: g.source)!) {
+                    Image(systemName: "arrow.up.right.square")
+                }
+                .help(g.source)
+                if engine.grammarWorking.contains(g.id) {
+                    ProgressView().controlSize(.small)
+                    Text(g.installed ? "กำลังลบ…" : "กำลังติดตั้ง…").font(.caption).foregroundStyle(.secondary)
+                } else if g.installed {
+                    Button("ลบ", role: .destructive) { engine.grammarAction(g.id, "remove") }
+                } else {
+                    Button("ติดตั้ง") { engine.grammarAction(g.id, "install") }
+                }
+            }
+        }
+    }
+}
