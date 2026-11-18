@@ -201,8 +201,10 @@ pub fn test_lock_rules(ws: &Path) -> Result<String, String> {
     deny(format!(
         "(.*/)?([^./]*({suffix})|[^/]*({suffix})\\.[^./]*|[^/]+({dotted})\\.[^./]*)$"
     ));
-    // FooTest.java · FooTests.swift (CamelCase only, so `Latest.rs` stays out)
-    deny("(.*/)?([^/]+Test|[^/]*Tests)\\.[^./]+$".to_string());
+    // No rule for FooTest.java / FooTests.swift outside a test folder: Seatbelt
+    // matched `src/latest.rs` against `[^/]+Test` on macOS (measured in CI), so
+    // the regex cannot tell CamelCase from a plain word ending in "test".
+    // Those files are still locked under tests/ · Tests/ · src/test/.
     // Prose, then dependency and build folders, are not the project's tests.
     s.push_str(&format!(
         "(allow file-write* (regex #\"^{root}/(.*/)?[^/]*\\.({})$\"))\n",
@@ -786,7 +788,7 @@ mod tests {
                 ("pkg/parser_test.go", true),
                 ("web/app.test.ts", true),
                 ("web/app.spec.js", true),
-                ("App/OrderTests.swift", true),
+                ("Tests/OrderTests.swift", true),
                 ("src/main.rs", false),
                 ("src/latest.rs", false),
                 ("src/Latest.rs", false),
