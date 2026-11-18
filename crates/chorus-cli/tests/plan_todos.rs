@@ -7,22 +7,15 @@
 
 use chorus_cli::session::{Policy, Session};
 use chorus_core::agent_control::get_checklist;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-fn probe_bin() -> PathBuf {
-    let mut p = std::env::current_exe().expect("test exe");
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.join("acp-probe")
-}
+mod common;
 
 fn replay_bridge(name: &str) -> Vec<String> {
     let f = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
     vec![
-        probe_bin().to_string_lossy().into_owned(),
+        common::probe_bin().to_string_lossy().into_owned(),
         "--serve-mock".into(),
         "--replay".into(),
         f.to_string_lossy().into_owned(),
