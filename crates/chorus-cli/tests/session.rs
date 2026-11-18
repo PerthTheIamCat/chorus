@@ -5,13 +5,10 @@
 use chorus_cli::session::{AgentSpec, Permission, Policy, Session};
 use chorus_core::handoff::HandoffReason;
 
+mod common;
+
 fn probe_bin() -> std::path::PathBuf {
-    let mut p = std::env::current_exe().expect("test exe");
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.join("acp-probe")
+    common::probe_bin()
 }
 
 fn mock_bridge() -> Vec<String> {
