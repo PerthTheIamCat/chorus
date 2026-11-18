@@ -1496,15 +1496,32 @@ fn a_tool_call_repeated_six_times_stops_the_turn_and_says_why() {
 fn a_different_call_between_repeats_resets_the_count() {
     use chorus_cli::session::{LoopVerdict, RepeatGuard};
     let mut g = RepeatGuard::new(3, 6);
-    let seen: Vec<_> = ["a", "a", "b", "a", "a", "b", "a", "a"].iter().map(|t| g.see(t)).collect();
+    let seen: Vec<_> = ["a", "a", "b", "a", "a", "b", "a", "a"].iter().map(|t| g.see(t, Some(1))).collect();
     assert!(seen.iter().all(|v| *v == LoopVerdict::Fine), "{seen:?}");
 
     let mut g = RepeatGuard::new(3, 6);
-    let seen: Vec<_> = (0..7).map(|_| g.see(" cargo test ")).collect();
+    let seen: Vec<_> = (0..7).map(|_| g.see(" cargo test ", Some(7))).collect();
     assert_eq!(seen[2], LoopVerdict::Warn(3));
     assert_eq!(seen[5], LoopVerdict::Stop(6));
     assert_eq!(seen[3], LoopVerdict::Fine, "warn once, not on every repeat");
     assert_eq!(seen[6], LoopVerdict::Fine);
+}
+
+#[test]
+fn the_same_title_with_different_arguments_is_not_a_loop() {
+    use chorus_cli::session::{LoopVerdict, RepeatGuard};
+    let mut g = RepeatGuard::new(3, 6);
+    let seen: Vec<_> = (0..8u64).map(|i| g.see("Read file", Some(i))).collect();
+    assert!(seen.iter().all(|v| *v == LoopVerdict::Fine), "six different reads: {seen:?}");
+}
+
+#[test]
+fn calls_without_arguments_can_warn_but_never_stop() {
+    use chorus_cli::session::{LoopVerdict, RepeatGuard};
+    let mut g = RepeatGuard::new(3, 6);
+    let seen: Vec<_> = (0..10).map(|_| g.see("Search", None)).collect();
+    assert_eq!(seen[2], LoopVerdict::Warn(3));
+    assert!(!seen.iter().any(|v| matches!(v, LoopVerdict::Stop(_))), "{seen:?}");
 }
 
 #[test]
@@ -1550,10 +1567,17 @@ fn every_prompt_carries_the_honesty_guidance_but_the_ledger_does_not() {
     s.run_turn("codex", "openai", "MOCK_ECHO_SECRETS add a feature", Policy::AllowAll).unwrap();
 
     let saw = std::fs::read_to_string(tmp.join("mock-saw.txt")).expect("mock recorded the prompt");
-    assert!(saw.contains("chorus_ask_user") && saw.contains("Do not edit, weaken, skip or delete a test"), "{saw}");
+    assert!(saw.contains("ask the user before starting") && saw.contains("Do not edit, weaken, skip or delete a test"), "{saw}");
+    assert!(!saw.contains("chorus_ask_user"), "no answerer registered, so no tool named: {saw}");
     // Rule 2.1: guidance rides with the prompt, it is not something anyone said.
     for (_, body) in s.transcript().unwrap() {
         assert!(!body.contains("Do not edit, weaken, skip"), "guidance leaked into the ledger");
     }
+
+    // With an answerer registered the tool is listed, so the prompt may name it.
+    s.set_question_asker(Some(std::sync::Arc::new(|_| None)));
+    s.run_turn("codex", "openai", "MOCK_ECHO_SECRETS again", Policy::AllowAll).unwrap();
+    let saw = std::fs::read_to_string(tmp.join("mock-saw.txt")).unwrap();
+    assert!(saw.contains("chorus_ask_user"), "{saw}");
     let _ = std::fs::remove_dir_all(&tmp);
 }

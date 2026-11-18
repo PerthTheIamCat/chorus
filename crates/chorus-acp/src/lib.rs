@@ -197,9 +197,11 @@ pub fn set_usage_observer(observer: Option<UsageObserver>) -> Option<UsageObserv
 }
 
 /// Called with the title of every top-level tool call as the agent starts it,
-/// on the thread running the turn. Thread-local like [`UsageObserver`]: the
+/// plus a digest of its arguments (`rawInput` and `locations`) when the frame
+/// carried any, on the thread running the turn. A title alone can be generic
+/// ("Read file"), so callers that act on repeats need the digest. Thread-local like [`UsageObserver`]: the
 /// session that owns the turn installs it around its own `prompt` call.
-pub type ToolObserver = Box<dyn FnMut(&str)>;
+pub type ToolObserver = Box<dyn FnMut(&str, Option<u64>)>;
 
 thread_local! {
     static TOOL: std::cell::RefCell<Option<ToolObserver>> = const { std::cell::RefCell::new(None) };
@@ -210,10 +212,10 @@ pub fn set_tool_observer(observer: Option<ToolObserver>) -> Option<ToolObserver>
     TOOL.with(|t| std::mem::replace(&mut *t.borrow_mut(), observer))
 }
 
-pub(crate) fn observe_tool(title: &str) {
+pub(crate) fn observe_tool(title: &str, args: Option<u64>) {
     TOOL.with(|t| {
         if let Some(f) = t.borrow_mut().as_mut() {
-            f(title);
+            f(title, args);
         }
     });
 }
@@ -956,6 +958,7 @@ pub mod mock {
                                 "toolCallId": format!("loop{i}"),
                                 "title": "Run `cargo test`",
                                 "kind": "execute",
+                                "rawInput": {"command": "cargo test"},
                                 "status": "pending"
                             }),
                         )?;

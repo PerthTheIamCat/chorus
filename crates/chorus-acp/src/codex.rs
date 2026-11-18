@@ -762,6 +762,23 @@ fn resolve_inside(cwd: &Path, path: &str) -> Result<PathBuf> {
     Ok(canon)
 }
 
+/// A digest of a `tool_call` frame's arguments: `rawInput` and `locations`.
+/// `None` when the frame carries neither (or only empty ones), so a caller
+/// never mistakes "no arguments reported" for "same arguments".
+fn args_digest(update: &Value) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let nonempty = |v: &&Value| !(v.is_null() || v.as_str() == Some("") || v.as_array().is_some_and(Vec::is_empty) || v.as_object().is_some_and(|o| o.is_empty()));
+    let raw = update.get("rawInput").filter(nonempty);
+    let loc = update.get("locations").filter(nonempty);
+    if raw.is_none() && loc.is_none() {
+        return None;
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    raw.map(Value::to_string).hash(&mut h);
+    loc.map(Value::to_string).hash(&mut h);
+    Some(h.finish())
+}
+
 /// Forward one parent-session `session/update` to the live progress sink.
 /// Child frames never come here: they would stream into the parent's bubble.
 fn report_progress(update: &Value) {
@@ -785,7 +802,7 @@ fn report_progress(update: &Value) {
                 .get("title")
                 .and_then(Value::as_str)
                 .unwrap_or("tool");
-            crate::observe_tool(title);
+            crate::observe_tool(title, args_digest(update));
             crate::emit_progress("tool", title);
         }
         "tool_call_update" => {

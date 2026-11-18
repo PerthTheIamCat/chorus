@@ -883,10 +883,13 @@ const PLAN_MODE_GUIDANCE: &str = "\n\n(Chorus plan mode: this turn is read-only 
 /// what it needs (then guessing), and bending a test or the spec so a check
 /// goes green. Both are cheaper to say out loud than to review afterwards.
 const HONESTY_GUIDANCE: &str = "\n(Chorus: if the task is missing information you need in order \
-     to act (which file, which behaviour, which constraint), ask with `chorus_ask_user` before \
-     starting instead of guessing. If the spec cannot be met, say so plainly. Do not edit, \
-     weaken, skip or delete a test just to make it pass; if a test is wrong, say why and let the \
-     user decide.)\n";
+     to act (which file, which behaviour, which constraint), ask the user before starting instead \
+     of guessing. If the spec cannot be met, say so plainly. Do not edit, weaken, skip or delete \
+     a test just to make it pass; if a test is wrong, say why and let the user decide.)\n";
+
+/// Added only when someone is registered to answer: an agent is never told to
+/// call a tool it was not given.
+const ASK_USER_HINT: &str = "(Chorus: you can ask with the `chorus_ask_user` tool.)\n";
 
 /// Identical consecutive tool calls in one turn: warn at `warn`, stop at `stop`.
 /// Consecutive on purpose. Running `cargo test` five times in a fix loop is
@@ -902,13 +905,19 @@ pub enum LoopVerdict {
     Stop(u32),
 }
 
-/// Counts back-to-back repeats of the same tool call. Pure, so the thresholds
-/// are testable without an agent.
+/// Counts back-to-back repeats of the same tool call: same title and same
+/// arguments. Pure, so the thresholds are testable without an agent.
+///
+/// A title alone can be generic ("Read file"), so six different reads in a row
+/// would look like a loop. A call whose frame carried no arguments can still
+/// count toward the warning, but never toward a Stop: a false Stop throws away
+/// a turn, a missed loop only costs tokens.
 #[derive(Debug)]
 pub struct RepeatGuard {
     warn_at: u32,
     stop_at: u32,
     last: String,
+    last_args: Option<u64>,
     run: u32,
 }
 
@@ -918,21 +927,24 @@ impl RepeatGuard {
             warn_at,
             stop_at,
             last: String::new(),
+            last_args: None,
             run: 0,
         }
     }
 
-    /// Feed the next tool call's title. `Warn` is returned once, at the
-    /// threshold, not on every further repeat; `Stop` once, at its own.
-    pub fn see(&mut self, title: &str) -> LoopVerdict {
+    /// Feed the next tool call. `Warn` is returned once, at the threshold,
+    /// not on every further repeat; `Stop` once, at its own, and only when
+    /// the repeated calls carried arguments to compare.
+    pub fn see(&mut self, title: &str, args: Option<u64>) -> LoopVerdict {
         let title = title.trim();
-        if title == self.last {
+        if title == self.last && args == self.last_args {
             self.run += 1;
         } else {
             self.last = title.to_string();
+            self.last_args = args;
             self.run = 1;
         }
-        if self.run == self.stop_at {
+        if self.run == self.stop_at && self.last_args.is_some() {
             LoopVerdict::Stop(self.run)
         } else if self.run == self.warn_at {
             LoopVerdict::Warn(self.run)
@@ -2579,6 +2591,9 @@ impl Session {
             prompt_text.push_str(PLAN_MODE_GUIDANCE);
         }
         prompt_text.push_str(HONESTY_GUIDANCE);
+        if chorus_core::ask_user::available(self.store.conn(), self.sess) {
+            prompt_text.push_str(ASK_USER_HINT);
+        }
         if !named.is_empty() {
             prompt_text.push_str(secrets::AGENT_GUIDANCE);
         }
@@ -2691,8 +2706,8 @@ impl Session {
             let notes = loop_notes.clone();
             let stop = loop_stop.clone();
             let tag = chorus_acp::scope::current();
-            Box::new(move |title: &str| {
-                let verdict = guard.borrow_mut().see(title);
+            Box::new(move |title: &str, args: Option<u64>| {
+                let verdict = guard.borrow_mut().see(title, args);
                 let shown = short_title(guard.borrow().last());
                 let note = match verdict {
                     LoopVerdict::Fine => return,
