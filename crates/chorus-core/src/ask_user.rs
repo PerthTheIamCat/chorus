@@ -71,9 +71,11 @@ fn asker(conn: &Connection, sess: i64) -> Option<Asker> {
 pub fn tool_schema() -> Value {
     json!({
         "name": "chorus_ask_user",
-        "description": "Ask the user a question and wait for the answer. Use it when you need a \
-decision only the user can make (which approach, which file, missing requirements) instead of \
-guessing. Give `options` for a quick choice; the user can also type their own answer unless \
+        "description": "Ask the user a question and wait for the answer. Use it BEFORE starting when \
+the task lacks information you need to act (which approach, which file, which behaviour, \
+missing requirements): a question costs seconds, a wrong guess costs a turn. Use it too when \
+the spec cannot be met as written, instead of bending a test or the requirement to make a \
+check pass. Give `options` for a quick choice; the user can also type their own answer unless \
 `allow_other` is false. Ask one question at a time and keep it short.",
         "inputSchema": {
             "type": "object",

@@ -1065,8 +1065,20 @@ pub unsafe extern "C" fn chorus_events_since(e: *const ChorusEngine, after: i64)
 
 // ---- checkpoints -----------------------------------------------
 
+/// The `{"ok","diff","test_files"}` JSON every working-diff getter returns.
+/// `test_files` is the subset of changed paths that are tests, decided here
+/// so the shell only draws the label (rule 2.3).
+fn diff_json(diff: &str) -> String {
+    serde_json::json!({
+        "ok": true,
+        "diff": diff,
+        "test_files": chorus_core::checkpoint::test_files_in_diff(diff),
+    })
+    .to_string()
+}
+
 /// The workspace diff since the session base checkpoint.
-/// JSON: {"ok":true,"diff":"..."}
+/// JSON: {"ok":true,"diff":"...","test_files":["tests/x.rs"]}
 ///
 /// # Safety
 /// `e` must be a live engine handle.
@@ -1076,7 +1088,7 @@ pub unsafe extern "C" fn chorus_working_diff(e: *const ChorusEngine) -> *mut c_c
         return err("null engine");
     };
     let diff = catch_unwind(AssertUnwindSafe(|| engine.session.working_diff())).unwrap_or_default();
-    out(serde_json::json!({ "ok": true, "diff": diff }).to_string())
+    out(diff_json(&diff))
 }
 
 /// Take a manual checkpoint. JSON: {"ok":true,"sha":"..."}
@@ -2038,7 +2050,7 @@ pub unsafe extern "C" fn chorus_reader_working_diff(r: *const ChorusReader) -> *
         return err("null reader");
     };
     let diff = catch_unwind(AssertUnwindSafe(|| r.reader.working_diff())).unwrap_or_default();
-    out(serde_json::json!({ "ok": true, "diff": diff }).to_string())
+    out(diff_json(&diff))
 }
 
 /// Mark reviewed: snapshot shadow repo as new baseline. JSON: {"ok":true,"base":"..."}
@@ -2096,7 +2108,7 @@ pub unsafe extern "C" fn chorus_working_diff_scoped(
         engine.session.working_diff_scoped(scope_str, inc)
     }))
     .unwrap_or_default();
-    out(serde_json::json!({ "ok": true, "diff": diff }).to_string())
+    out(diff_json(&diff))
 }
 
 /// Scoped working diff on reader handle.
@@ -2120,7 +2132,7 @@ pub unsafe extern "C" fn chorus_reader_working_diff_scoped(
         r.reader.working_diff_scoped(scope_str, inc)
     }))
     .unwrap_or_default();
-    out(serde_json::json!({ "ok": true, "diff": diff }).to_string())
+    out(diff_json(&diff))
 }
 
 /// File diff stats report: fast numstat path on reader.

@@ -1,6 +1,8 @@
 //! Pure tests for the handoff brief. No database — events are built by hand.
 
-use chorus_core::handoff::{files_touched, Brief, BriefInput, HandoffMeta, HandoffReason};
+use chorus_core::handoff::{
+    files_touched, tests_with_code_note, Brief, BriefInput, HandoffMeta, HandoffReason,
+};
 use chorus_core::types::{Event, EventKind};
 
 fn ev(seq: i64, kind: EventKind, body: &str) -> (Event, String) {
@@ -296,4 +298,41 @@ fn a_refused_model_is_a_reason_to_move_on_but_a_long_answer_is_not() {
         "Updated the routing table and the tests. ".repeat(20)
     );
     assert!(!is_refused_configuration(&long));
+}
+
+fn paths(p: &[&str]) -> Vec<String> {
+    p.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn a_turn_that_edits_code_and_tests_leaves_a_note_for_the_next_agent() {
+    let note = tests_with_code_note(&paths(&["src/lib.rs", "tests/api.rs", "tests/b.rs"]))
+        .expect("code and tests together");
+    assert!(note.contains("tests/api.rs") && note.contains("tests/b.rs"), "{note}");
+    assert!(!note.contains('\n'), "one line: {note}");
+}
+
+#[test]
+fn the_note_names_three_tests_at_most() {
+    let note = tests_with_code_note(&paths(&[
+        "src/lib.rs", "tests/a.rs", "tests/b.rs", "tests/c.rs", "tests/d.rs", "tests/e.rs",
+    ]))
+    .unwrap();
+    assert!(note.contains("tests/c.rs") && !note.contains("tests/d.rs"), "{note}");
+    assert!(note.contains("+2"), "{note}");
+}
+
+#[test]
+fn tests_alone_or_code_alone_leave_no_note() {
+    assert_eq!(tests_with_code_note(&paths(&["tests/a.rs", "tests/b.rs"])), None);
+    assert_eq!(tests_with_code_note(&paths(&["src/lib.rs", "src/main.rs"])), None);
+    assert_eq!(tests_with_code_note(&[]), None);
+}
+
+#[test]
+fn files_chorus_writes_or_prose_do_not_count_as_the_code_half() {
+    assert_eq!(
+        tests_with_code_note(&paths(&["tests/a.rs", "CLAUDE.md", "AGENTS.md", "Cargo.lock", "README.md", ".claude/skills/x/SKILL.md"])),
+        None
+    );
 }

@@ -785,6 +785,7 @@ fn report_progress(update: &Value) {
                 .get("title")
                 .and_then(Value::as_str)
                 .unwrap_or("tool");
+            crate::observe_tool(title);
             crate::emit_progress("tool", title);
         }
         "tool_call_update" => {
