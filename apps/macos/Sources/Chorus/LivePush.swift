@@ -24,6 +24,8 @@ struct LiveFold {
     var statuses: [Int64: String] = [:]
     /// Focus file reported by tool or chorus_show_file
     var focusFile: String? = nil
+    /// The agent's latest plan (ACP `plan`), whole: it replaces the checklist.
+    var plan: [Engine.ChecklistItem]? = nil
 
     static func extractFocusPath(from text: String) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -76,6 +78,10 @@ struct LiveFold {
                 let parts = p.text.split(separator: "\t", omittingEmptySubsequences: false)
                 if let used = parts.first.flatMap({ Int64($0) }) { f.contextUsed = used }
                 if parts.count > 1, let size = Int64(parts[1]) { f.contextWindow = size }
+            case "plan":
+                if let items = try? JSONDecoder().decode([Engine.ChecklistItem].self, from: Data(p.text.utf8)) {
+                    f.plan = items
+                }
             case "events":
                 if p.seq > lastSeq { f.pull = true }
             default: break

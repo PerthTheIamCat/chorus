@@ -1137,6 +1137,8 @@ struct ContentView: View {
                 if sessionModes[id] == nil { sessionModes[id] = m }
                 draftSessionMode = nil
             }
+            engine.metrics = nil
+            if !workspace.isEmpty { engine.refreshMetrics(db: dbPath) }
             guard !workspace.isEmpty else { return }
             engine.loadSessions(db: dbPath)
             if id >= 0, let p = projects.project(containing: workspace) {
@@ -1149,6 +1151,7 @@ struct ContentView: View {
             }
         }
         .onChange(of: engine.busy) { _, busy in
+            if !busy { engine.refreshMetrics(db: dbPath) }
             flushQueue()
             if !busy && engine.sessionID >= 0 && !NSApp.isActive {
                 let reply = engine.events.last(where: { $0.actor != "user" && $0.kind == "msg" })
@@ -1979,7 +1982,10 @@ struct ContentView: View {
         // stopping at a divider, the way Claude/Codex/ChatGPT do.
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if toolPage == nil {
-                composer
+                VStack(spacing: 4) {
+                    composer
+                    MetricsStripView(engine: engine)
+                }
                     .frame(maxWidth: 820)
                     .padding(.horizontal, 16).padding(.bottom, 14).padding(.top, 4)
             }

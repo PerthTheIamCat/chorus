@@ -3571,6 +3571,42 @@ pub unsafe extern "C" fn chorus_get_checklist_json(
     }
 }
 
+/// Numbers for the metrics strip under the chat. Stateless like
+/// `chorus_get_checklist_json`: reads the store by path, never the engine
+/// queue. `account` is a relay-chain name (`codex`, `claude@work`) whose
+/// limit to show; `""` skips the limit lookup, which can spawn the agent CLI
+/// on a cold cache, so call it from a background thread.
+///
+/// Every field may be null (the shell hides it); `tok_per_s` is an estimate.
+/// JSON: {"ok":true,"metrics":{tok_per_s,tok_per_s_estimated,cache_hit_pct,
+/// cost_usd,context_pct,limit_pct,limit_window}}
+///
+/// # Safety
+/// `db_path` and `account` must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_session_metrics(
+    db_path: *const c_char,
+    session_id: i64,
+    account: *const c_char,
+) -> *mut c_char {
+    let Some(db_path) = borrow(db_path) else {
+        return err("db_path must be valid UTF-8");
+    };
+    let account = borrow(account).unwrap_or("").to_string();
+    let db = PathBuf::from(db_path);
+    let r = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
+        let store = chorus_core::store::Store::open(&db).map_err(|e| e.to_string())?;
+        let m = chorus_cli::metrics::session_metrics(&store, session_id, &account)
+            .map_err(|e| format!("{e:#}"))?;
+        Ok(serde_json::json!({ "ok": true, "metrics": m }))
+    }));
+    match r {
+        Ok(Ok(val)) => out(val.to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in session_metrics"),
+    }
+}
+
 /// Update the active task checklist for a session.
 ///
 /// # Safety

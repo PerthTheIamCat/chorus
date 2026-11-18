@@ -1,0 +1,4 @@
+{"update":{"sessionUpdate":"plan","entries":[{"content":"Read the module","priority":"high","status":"in_progress"},{"content":"Write the fix","priority":"high","status":"pending"},{"content":"Run the tests","priority":"medium","status":"pending"}]}}
+{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Reading the module first."}}}
+{"update":{"sessionUpdate":"plan","entries":[{"content":"Read the module","priority":"high","status":"completed"},{"content":"Write the fix","priority":"high","status":"in_progress"},{"content":"Run the tests","priority":"medium","status":"pending"}]}}
+{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Now writing the fix."}}}

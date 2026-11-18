@@ -2796,6 +2796,33 @@ impl Session {
             0,
             outcome.cost_usd,
         )?;
+        // The agent's own plan is the task list the shell shows (the ACP
+        // `plan` frame replaces the whole list each time, so the last one
+        // wins). It goes through the same checklist as `chorus_update_checklist`.
+        if let Some(plan) = &outcome.plan {
+            let items: Vec<chorus_core::agent_control::ChecklistItem> = plan
+                .iter()
+                .map(|e| chorus_core::agent_control::ChecklistItem {
+                    text: mask_secrets(&e.content),
+                    done: e.status == "completed",
+                    in_progress: e.status == "in_progress",
+                })
+                .collect();
+            chorus_core::agent_control::update_checklist(c, self.sess, &items)?;
+        }
+        // Speed for the metrics strip: what the agent streamed over the time
+        // it spent streaming. Memory only.
+        let streamed = outcome
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Message(m) => Some(m.as_str()),
+                _ => None,
+            })
+            .chain(std::iter::once(outcome.thoughts.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        crate::metrics::record_speed(self.sess, &streamed, outcome.stream_ms);
         if let Some(&last) = seqs.last() {
             self.announce(last);
         }
