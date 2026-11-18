@@ -420,6 +420,12 @@ fn dispatch(req: &Value, conn: &rusqlite::Connection, caller: &Caller) -> Value 
                 if session_scope.is_some_and(|s| crate::ask_user::available(conn, s)) {
                     tools.push(crate::ask_user::tool_schema());
                 }
+                if session_scope.is_some_and(|s| crate::request_secret::available(conn, s)) {
+                    tools.push(crate::request_secret::tool_schema());
+                }
+                if session_scope.is_some_and(|s| crate::variants::available(conn, s)) {
+                    tools.push(crate::variants::tool_schema());
+                }
             }
             tools.extend([synthesize_role_schema(), notify_user_schema()]);
             Ok(json!({ "tools": tools }))
@@ -579,6 +585,14 @@ fn call_tool(
     if name == "chorus_ask_user" {
         let sess = session_scope.ok_or("asking the user is only available in a session")?;
         return crate::ask_user::call(conn, sess, &caller.actor, &args);
+    }
+    if name == "chorus_request_secret" {
+        let sess = session_scope.ok_or("requesting a secret is only available in a session")?;
+        return crate::request_secret::call(conn, sess, &caller.actor, &args);
+    }
+    if name == "chorus_offer_variants" {
+        let sess = session_scope.ok_or("offering variants is only available in a session")?;
+        return crate::variants::call(conn, sess, &caller.actor, &args);
     }
     if name == "computer" {
         let sess = session_scope.ok_or("computer use is only available in a session")?;

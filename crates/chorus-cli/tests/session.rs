@@ -1591,3 +1591,47 @@ fn every_prompt_carries_the_honesty_guidance_but_the_ledger_does_not() {
     assert!(saw.contains("chorus_ask_user"), "{saw}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn a_secret_the_agent_asked_for_reaches_the_next_turn_and_never_the_ledger() {
+    std::env::set_var("CHORUS_SECRETS_BACKEND", "memory");
+    let tmp = std::env::temp_dir().join(format!("chorus-reqsecret-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let mut s = Session::create(&tmp.join("store.db"), &tmp, "reqsecret")
+        .unwrap()
+        .with_bridge(mock_bridge());
+    s.run_turn("codex", "openai", "MOCK_ECHO_SECRETS first", Policy::AllowAll).unwrap();
+    let saw = std::fs::read_to_string(tmp.join("mock-saw.txt")).unwrap();
+    assert!(!saw.contains("chorus_request_secret"), "no answerer, no tool named: {saw}");
+
+    // The sheet answered (what `request_secret::call` does with the user's input).
+    let value = "pw-for-the-staging-db-4471";
+    let scope = chorus_core::secrets::project_scope(&tmp);
+    chorus_core::secrets::user_vault().put_requested("REQ_STAGING_DB_PW", value, Some(&scope));
+    s.set_secret_asker(Some(std::sync::Arc::new(|_| None)));
+    s.set_variants_asker(Some(std::sync::Arc::new(|_| None)));
+
+    s.run_turn("codex", "openai", "MOCK_ECHO_SECRETS second", Policy::AllowAll).unwrap();
+    let saw = std::fs::read_to_string(tmp.join("mock-saw.txt")).unwrap();
+    assert!(saw.contains(&format!("CHORUS_SECRET_REQ_STAGING_DB_PW={value}")), "in the shell env: {saw}");
+    let prompt = saw.split("---env---").next().unwrap();
+    assert!(!prompt.contains(value), "the prompt names the variable, not the value: {prompt}");
+    assert!(prompt.contains("REQ_STAGING_DB_PW") && prompt.contains("chorus_request_secret") && prompt.contains("chorus_offer_variants"), "{prompt}");
+    for (_, body) in s.transcript().unwrap() {
+        assert!(!body.contains(value), "the value reached the ledger: {body}");
+    }
+
+    // Another project does not get it.
+    let other = std::env::temp_dir().join(format!("chorus-reqsecret-other-{}", std::process::id()));
+    std::fs::create_dir_all(&other).unwrap();
+    let mut o = Session::create(&other.join("store.db"), &other, "other")
+        .unwrap()
+        .with_bridge(mock_bridge());
+    o.run_turn("codex", "openai", "MOCK_ECHO_SECRETS elsewhere", Policy::AllowAll).unwrap();
+    let saw = std::fs::read_to_string(other.join("mock-saw.txt")).unwrap();
+    assert!(!saw.contains(value), "project scope leaked: {saw}");
+
+    let _ = chorus_core::secrets::user_vault().forget("CHORUS_SECRET_REQ_STAGING_DB_PW");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_dir_all(&other);
+}

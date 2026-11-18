@@ -1314,8 +1314,8 @@ struct ContentView: View {
             .frame(width: 480)
             .interactiveDismissDisabled()
         }
-        .sheet(item: $engine.pendingQuestion) { q in
-            AgentQuestionSheet(question: q, agentLabel: askingAgentLabel(q.agent)) { engine.answerQuestion($0) }
+        .sheet(item: $engine.pendingSecret) { req in
+            SecretRequestSheet(request: req, agentLabel: askingAgentLabel(req.agent)) { engine.answerSecret($0) }
         }
         .sheet(isPresented: $showSearchSheet) {
             ChatSearchView(
@@ -1896,6 +1896,9 @@ struct ContentView: View {
                                         .transition(.opacity.combined(with: .offset(y: 8)))
                                 }
                                 orchestraStatusSection
+                                AgentPromptCards(engine: engine, agentLabel: askingAgentLabel) {
+                                    if chatPinned { proxy.scrollTo("chatBottom", anchor: .bottom) }
+                                }
                                 Color.clear.frame(height: 1).id("chatBottom")
                             }
                             .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.88),
@@ -3364,6 +3367,16 @@ struct ContentView: View {
                                 .font(.system(size: 9))
                                 .foregroundStyle(.orange)
                                 .help("มีงานย่อยรอคำยืนยัน")
+                        }
+                        // The open session is the only one that can be waiting:
+                        // its agent is blocked on a question, a key or a choice.
+                        if selected, let waiting = AgentPromptNotice.badge(engine.waitingForYou) {
+                            Text(waiting)
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.orange, in: Capsule())
                         }
 
                         Spacer(minLength: 4)
