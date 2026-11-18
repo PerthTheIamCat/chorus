@@ -603,11 +603,11 @@ pub fn spawn_agent_with_options(
         // Fork at the lead's latest event so the child's context carries the
         // lead's goal, constraints and decisions through the usual rungs. An
         // empty parent has nothing to inherit.
-        let fork_at: Option<i64> = conn.query_row(
-            "SELECT MAX(seq) FROM event WHERE sess = ?1",
-            [parent],
-            |r| r.get(0),
-        )?;
+        // Use the lead's history head, not its own newest row: a lead that is
+        // itself a fork may have no events of its own yet.
+        let fork_at: Option<i64> = crate::ledger::history(conn, parent, 1)?
+            .last()
+            .map(|e| e.seq);
         conn.execute(
             "INSERT INTO session(title, cwd, started_ms, forked_from, fork_at_seq)
              VALUES (?1, ?2, ?3, ?4, ?5)",

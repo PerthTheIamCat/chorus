@@ -1833,6 +1833,27 @@ impl Session {
                 break;
             }
         }
+        // A Chorus child's own goal is what its lead asked of it; the
+        // inherited first user message is the lead's, kept as one context line.
+        if is_chorus_child(&self.store, self.sess) {
+            let own: Option<String> = c
+                .query_row(
+                    "SELECT task FROM subagent WHERE child_sess = ?1 AND kind = 'chorus'",
+                    [self.sess],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(task) = own {
+                let mine = chorus_core::agent_control::task_text(&task).trim();
+                if !mine.is_empty() {
+                    ts.goal = if ts.goal.trim().is_empty() {
+                        clip(mine, 240)
+                    } else {
+                        format!("{}\n(lead goal: {})", clip(mine, 240), clip(&ts.goal, 160))
+                    };
+                }
+            }
+        }
 
         // The last handoff brief is the only place a human states what is
         // still pending, so it wins over anything we could infer.
@@ -3083,9 +3104,11 @@ impl Session {
     /// The whole session so far, oldest first, with bodies resolved.
     pub fn transcript(&self) -> Result<Vec<(chorus_core::Event, String)>> {
         let c = self.store.conn();
+        let own_only = is_chorus_child(&self.store, self.sess);
         let events = ledger::history(c, self.sess, 10_000)?;
         events
             .into_iter()
+            .filter(|e| !own_only || e.sess == self.sess)
             .map(|e| {
                 let body = ledger::body(c, &e)?;
                 Ok((e, body))
@@ -3151,8 +3174,9 @@ pub type LabeledEvent = (
 fn labeled_since(store: &Store, sess: i64, after: i64) -> Result<Vec<LabeledEvent>> {
     let c = store.conn();
     let mut out = Vec::new();
+    let own_only = is_chorus_child(store, sess);
     for e in ledger::history(c, sess, 10_000)? {
-        if e.seq <= after {
+        if e.seq <= after || (own_only && e.sess != sess) {
             continue;
         }
         let body = ledger::body(c, &e)?;
@@ -3167,6 +3191,18 @@ fn labeled_since(store: &Store, sess: i64, after: i64) -> Result<Vec<LabeledEven
         ));
     }
     Ok(out)
+}
+
+/// A Chorus subagent's session forks from its lead so its *context* carries
+/// the lead's history, but the sub-session view shows only what the child did.
+/// Compare forks and user forks are not children and keep their full chain.
+fn is_chorus_child(store: &Store, sess: i64) -> bool {
+    store.conn().query_row(
+        "SELECT 1 FROM subagent WHERE child_sess = ?1 AND kind = 'chorus'",
+        [sess],
+        |_| Ok(true),
+    )
+    .unwrap_or(false)
 }
 
 fn head_seq(store: &Store, sess: i64) -> i64 {
