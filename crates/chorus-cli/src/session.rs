@@ -484,6 +484,14 @@ pub fn worktree_diff_stat(dir: &Path) -> (String, Vec<String>) {
 
 /// The prompt a child starts from: its role's instructions, then the task.
 fn child_prompt(role: Option<&chorus_core::roles::AgentRole>, task: &str) -> String {
+    let rendered;
+    let task = match chorus_core::agent_control::TaskSpec::split(task) {
+        (_, Some(spec)) => {
+            rendered = spec.render();
+            rendered.as_str()
+        }
+        (plain, None) => plain,
+    };
     match role
         .map(|r| r.system_prompt.trim())
         .filter(|p| !p.is_empty())
@@ -1827,6 +1835,27 @@ impl Session {
                 break;
             }
         }
+        // A Chorus child's own goal is what its lead asked of it; the
+        // inherited first user message is the lead's, kept as one context line.
+        if is_chorus_child(&self.store, self.sess) {
+            let own: Option<String> = c
+                .query_row(
+                    "SELECT task FROM subagent WHERE child_sess = ?1 AND kind = 'chorus'",
+                    [self.sess],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(task) = own {
+                let mine = chorus_core::agent_control::task_text(&task).trim();
+                if !mine.is_empty() {
+                    ts.goal = if ts.goal.trim().is_empty() {
+                        clip(mine, 240)
+                    } else {
+                        format!("{}\n(lead goal: {})", clip(mine, 240), clip(&ts.goal, 160))
+                    };
+                }
+            }
+        }
 
         // The last handoff brief is the only place a human states what is
         // still pending, so it wins over anything we could infer.
@@ -2451,11 +2480,14 @@ impl Session {
                 "\n\n(Chorus: if the user asks you to remember something, or states a durable \
                  project fact, call the `memory_propose` tool with it. Do not just say you \
                  remembered it.)\n\
-                 (Chorus: Multi-agent orchestration is enabled. For complex, multi-step, or exploratory \
-                 tasks, you can act as Lead Orchestrator: decompose objectives, spawn subagents via \
-                 `chorus_spawn_agent` (roles: investigator, builder, reviewer, or custom roles in \
-                 isolated git worktrees), coordinate them with `chorus_wait_agent` and \
-                 `chorus_collect_results`, and track your progress with `chorus_update_checklist`.)\n",
+                 (Chorus: Multi-agent orchestration is enabled, but split only when it pays off: \
+                 spawn with `chorus_spawn_agent` only if there are at least two parts that do not \
+                 depend on each other and do not touch the same files. Sequential coding, or work \
+                 where each step needs the last one's result, stays with you alone. Investigators \
+                 and reviewers only read, so they may run in parallel; give each writer its own \
+                 `files_owned` and never let two writers share a file. Prefer a reviewer from a \
+                 different provider than the builder. Coordinate with `chorus_wait_agent` and \
+                 `chorus_collect_results`, and track progress with `chorus_update_checklist`.)\n",
             );
         }
         if self.plan_turn {
@@ -3073,9 +3105,11 @@ impl Session {
     /// The whole session so far, oldest first, with bodies resolved.
     pub fn transcript(&self) -> Result<Vec<(chorus_core::Event, String)>> {
         let c = self.store.conn();
+        let own_only = is_chorus_child(&self.store, self.sess);
         let events = ledger::history(c, self.sess, 10_000)?;
         events
             .into_iter()
+            .filter(|e| !own_only || e.sess == self.sess)
             .map(|e| {
                 let body = ledger::body(c, &e)?;
                 Ok((e, body))
@@ -3141,8 +3175,9 @@ pub type LabeledEvent = (
 fn labeled_since(store: &Store, sess: i64, after: i64) -> Result<Vec<LabeledEvent>> {
     let c = store.conn();
     let mut out = Vec::new();
+    let own_only = is_chorus_child(store, sess);
     for e in ledger::history(c, sess, 10_000)? {
-        if e.seq <= after {
+        if e.seq <= after || (own_only && e.sess != sess) {
             continue;
         }
         let body = ledger::body(c, &e)?;
@@ -3157,6 +3192,18 @@ fn labeled_since(store: &Store, sess: i64, after: i64) -> Result<Vec<LabeledEven
         ));
     }
     Ok(out)
+}
+
+/// A Chorus subagent's session forks from its lead so its *context* carries
+/// the lead's history, but the sub-session view shows only what the child did.
+/// Compare forks and user forks are not children and keep their full chain.
+fn is_chorus_child(store: &Store, sess: i64) -> bool {
+    store.conn().query_row(
+        "SELECT 1 FROM subagent WHERE child_sess = ?1 AND kind = 'chorus'",
+        [sess],
+        |_| Ok(true),
+    )
+    .unwrap_or(false)
 }
 
 fn head_seq(store: &Store, sess: i64) -> i64 {
@@ -3519,6 +3566,19 @@ mod child_tests {
         let (stat, files) = worktree_diff_stat(dir.path());
         assert_eq!(files, vec!["a.rs".to_string(), "new.rs".to_string()]);
         assert_eq!(stat, "2 files changed, 3 insertions(+), 1 deletion(-)");
+    }
+
+    #[test]
+    fn child_prompt_renders_a_structured_spec() {
+        let spec = chorus_core::agent_control::TaskSpec {
+            goal: "fix parser".into(),
+            files_owned: vec!["src/p.rs".into()],
+            done_when: "cargo test".into(),
+            ..Default::default()
+        };
+        let p = child_prompt(None, &spec.encode());
+        assert!(p.contains("Goal: fix parser") && p.contains("src/p.rs") && p.contains("cargo test"));
+        assert!(!p.contains("spec:"), "the stored marker leaked into the prompt: {p}");
     }
 
     #[test]

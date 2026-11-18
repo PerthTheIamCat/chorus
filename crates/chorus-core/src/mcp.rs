@@ -591,10 +591,44 @@ fn call_tool(
             .get("role")
             .and_then(Value::as_str)
             .ok_or("role is required")?;
-        let task = args
-            .get("task")
-            .and_then(Value::as_str)
-            .ok_or("task is required")?;
+        // `goal` plus optional structure; bare `task` still works.
+        let list = |k: &str| -> Vec<String> {
+            args.get(k)
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let text = |k: &str| {
+            args.get(k)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let goal = {
+            let g = text("goal");
+            if g.trim().is_empty() {
+                text("task")
+            } else {
+                g
+            }
+        };
+        if goal.trim().is_empty() {
+            return Err("goal is required (or the older `task`)".into());
+        }
+        let spec = agent_control::TaskSpec {
+            goal,
+            files_owned: list("files_owned"),
+            out_of_scope: list("out_of_scope"),
+            output: text("output"),
+            done_when: text("done_when"),
+        };
+        let encoded = spec.encode();
+        let task = encoded.as_str();
         let weight = args.get("weight").and_then(Value::as_str);
         let default_worktree = role == "builder";
         let worktree = args
@@ -626,7 +660,7 @@ fn call_tool(
             "sessionId": format!("subagent-{}", agent.id),
             "parentSessionId": format!("{sess}"),
             "name": format!("Role: {role}"),
-            "task": task,
+            "task": spec.goal,
         })
         .to_string();
         let actor_id = caller_actor(conn, caller)?;
@@ -644,7 +678,7 @@ fn call_tool(
             agent.id,
             agent.role,
             agent.status.as_str(),
-            agent.task,
+            agent_control::task_text(&agent.task),
             agent.worktree.as_deref().unwrap_or("none"),
             json!({
                 "agent_id": agent.id,
@@ -908,9 +942,31 @@ fn spawn_agent_schema() -> Value {
                     "type": "string",
                     "description": "The agent role to spawn (e.g. 'investigator', 'builder', 'reviewer', or custom role name)"
                 },
+                "goal": {
+                    "type": "string",
+                    "description": "What the child must achieve, in one or two sentences. Required (or the older `task`)."
+                },
+                "files_owned": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Files or directories only this child may edit. Rejected if they overlap a still-running sibling's."
+                },
+                "out_of_scope": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Files or topics the child must leave alone"
+                },
+                "output": {
+                    "type": "string",
+                    "description": "What the child should return (e.g. 'a list of file:line findings')"
+                },
+                "done_when": {
+                    "type": "string",
+                    "description": "A command whose success means the work is done (e.g. 'cargo test -p foo')"
+                },
                 "task": {
                     "type": "string",
-                    "description": "The specific task or instruction for the child agent"
+                    "description": "Older free-text form of `goal`; still accepted"
                 },
                 "weight": {
                     "type": "string",
@@ -926,7 +982,7 @@ fn spawn_agent_schema() -> Value {
                     "description": "Optional model override preference for the child agent"
                 }
             },
-            "required": ["role", "task"]
+            "required": ["role"]
         }
     })
 }
