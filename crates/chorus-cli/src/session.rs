@@ -1243,6 +1243,8 @@ impl Session {
             std::fs::create_dir_all(dir).context("create project memory dir")?;
         }
         let shared = Store::open(path).context("open project memory")?;
+        // Every scope this folder's reader can see (project, global, legacy
+        // session rows) moves along under its own scope.
         for f in memory::top(self.store.conn(), 1, 1000)? {
             memory::add(shared.conn(), f.scope, &f.text)?;
         }
@@ -1814,6 +1816,22 @@ impl Session {
         Ok((String::new(), agent))
     }
 
+    /// `task_state()` rendered, plus a few lines about this project's earlier
+    /// sessions so a fresh session does not start from nothing. Read-only
+    /// (ledger + stored `summary` rows), and kept out of `task_state()` itself
+    /// so the handoff brief and the projected agent files don't carry it.
+    fn task_state_with_previous(&self) -> Result<String> {
+        let mut text = self.task_state()?.render();
+        let prev = chorus_core::history::previous_sessions(self.store.conn(), self.sess, 3)
+            .unwrap_or_default();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        text.push_str(&chorus_core::history::render_previous(&prev, now));
+        Ok(text)
+    }
+
     pub fn task_state(&self) -> Result<TaskState> {
         let c = self.store.conn();
         let events = ledger::history(c, self.sess, 400)?;
@@ -2065,7 +2083,7 @@ impl Session {
             system: "You are one of several agents sharing this session. The context below \
                      was assembled by Chorus from the shared ledger."
                 .into(),
-            task_state: self.task_state()?.render(),
+            task_state: self.task_state_with_previous()?,
             memory: memory_items,
             turns,
             code,

@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- **session ใหม่รู้ว่าเคยทำอะไรไว้:** เมื่อเปิด session ใหม่ในโฟลเดอร์ที่เคยมี session มาก่อน task state จะมีบรรทัด `previous sessions` ไม่เกิน 3 บรรทัด (เลข session · เมื่อไหร่ · agent · เป้าหมาย · ค้าง/ล่าสุด) อ่านจาก ledger กับตาราง `summary` ที่มีอยู่ ไม่เรียกโมเดล ไม่ลงไฟล์ที่ฉายให้ agent
+- **เครื่องมือ MCP `chorus_search_history`:** agent ค้นข้อความและการตัดสินใจใน session ก่อน ๆ ของโปรเจกต์ได้เอง (ผลสั้น: session · seq · agent · ข้อความ)
+
+### Fixed
+
+- **ความจำที่ agent เสนอด้วย scope 0 (global) หรือ 2 ถูกอนุมัติแล้วไม่โผล่ที่ไหนเลย:** ทุกที่ที่อ่านความจำ (context, แท็บ Memory, ไฟล์ที่ฉายให้ agent) อ่าน scope 0 ด้วยแล้ว และ scope 2 (session ซึ่งไม่มี id ให้ผูก) ถูกนับเป็นความจำของโปรเจกต์ · tool `memory_propose` รับแค่ 0/1
+
 ## [0.2.6] - 2026-10-26
 
 ### Added
