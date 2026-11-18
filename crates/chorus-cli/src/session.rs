@@ -272,10 +272,7 @@ fn str_list(v: &serde_json::Value, key: &str) -> Vec<String> {
 /// seen — reaches the next agent unchanged, because the cost of dropping a
 /// line that mattered is much higher than the tokens it saves.
 fn is_bare_success(body: &str) -> bool {
-    let Some((_, status)) = body.rsplit_once(" → ") else {
-        return false;
-    };
-    matches!(status.trim(), "completed" | "success" | "ok")
+    chorus_core::render::parse_tool_result(body).is_some_and(|v| v.is_bare_success())
 }
 
 /// `CHORUS_ACP_LOG=<path>` writes every JSON-RPC frame, both directions, to a
@@ -688,9 +685,15 @@ fn event_row(
     match ev {
         AgentEvent::Message(m) => (EventKind::Msg, m.clone()),
         AgentEvent::ToolCall { title, kind } => (EventKind::ToolCall, format!("{kind}: {title}")),
-        AgentEvent::ToolResult { title, status } => {
-            (EventKind::ToolResult, format!("{title} → {status}"))
-        }
+        AgentEvent::ToolResult {
+            title,
+            status,
+            exit,
+            output,
+        } => (
+            EventKind::ToolResult,
+            chorus_core::render::encode_tool_result(title, status, *exit, output),
+        ),
         AgentEvent::SubagentSpawned {
             session_id,
             parent_session_id,
@@ -2188,6 +2191,7 @@ impl Session {
             .collect();
 
         let n = bodies.len();
+        let tool_refs = !std::env::var("CHORUS_R1_TOOL_REFS").is_ok_and(|v| v == "off");
         let turns: Vec<TurnItem> = bodies
             .iter()
             .enumerate()
@@ -2206,6 +2210,24 @@ impl Session {
                     }
                 }
                 let who = actor::name(c, e.actor).unwrap_or_else(|_| "?".into());
+                // A tool result that printed something: recent ones keep an
+                // excerpt, older ones become one line with a blob reference.
+                // The compacted rungs are for prose; they would only cut the
+                // output mid-line.
+                if tool_refs && e.kind == EventKind::ToolResult {
+                    if let Some((l0, older)) = chorus_core::render::tool_result_rungs(
+                        body,
+                        e.blob.as_ref().map(|b| b.0.as_str()),
+                    ) {
+                        return TurnItem {
+                            text_l0: format!("{who}: {l0}"),
+                            text_l1: Some(format!("{who}: {older}")),
+                            text_l2: Some(format!("{who}: {older}")),
+                            age: n - 1 - i,
+                            key: None,
+                        };
+                    }
+                }
                 let r = match rungs.get(&e.seq) {
                     Some(r) => r.clone(),
                     None => compaction::rungs_for(&compaction::Extractive, body),

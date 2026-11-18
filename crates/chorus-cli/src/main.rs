@@ -689,6 +689,90 @@ fn bench() -> Result<()> {
 
     bench_real_path(&dir)?;
     bench_handoff_in_context(&dir)?;
+    bench_tool_output_and_memory(&dir)?;
+    Ok(())
+}
+
+/// R1 + R2, measured through the real `assemble_context` / `memory::relevant`
+/// with each part switched off by its `CHORUS_R*` flag, so "before" is the
+/// product's own old behaviour and not a number typed in.
+///
+/// R1: 40 tool calls whose results printed 212-line file reads and 300-line
+/// failing test runs, then 2 chatty turns: the last few results are inside the
+/// 10-turn raw window, the rest are past it. R2: twelve facts, one about the question.
+fn bench_tool_output_and_memory(dir: &Path) -> Result<()> {
+    let db_path = dir.join("toolout.db");
+    let _ = std::fs::remove_file(&db_path);
+    let cwd = dir.join("toolout-ws");
+    std::fs::create_dir_all(&cwd)?;
+    let s = Session::create(&db_path, &cwd, "bench tool output")?;
+    let sess = s.session_id();
+    {
+        let store = Store::open(&db_path)?;
+        let c = store.conn();
+        let user = actor::intern(c, "user", "human")?;
+        let agent = actor::intern(c, "codex", "openai")?;
+        ledger::append(c, &NewEvent::new(sess, EventKind::Msg, user, "แก้ N+1 ใน order list"))?;
+        for i in 0..40 {
+            let (title, status, exit, out) = if i % 4 == 3 {
+                let out: String = (0..300).map(|n| format!("test order::case_{n} ... FAILED\n")).collect();
+                ("cargo test".to_string(), "failed", Some(101), out)
+            } else {
+                let out: String = (0..212)
+                    .map(|n| format!("  const row{n} = await db.query('select * from orders where id = $1', [id]);\n"))
+                    .collect();
+                (format!("read src/order/file{i}.ts"), "completed", None, out)
+            };
+            ledger::append(c, &NewEvent::new(sess, EventKind::ToolCall, agent, format!("execute: {title}")))?;
+            ledger::append(
+                c,
+                &NewEvent::new(sess, EventKind::ToolResult, agent, chorus_core::render::encode_tool_result(&title, status, exit, &out)),
+            )?;
+        }
+        for i in 0..2 {
+            ledger::append(c, &NewEvent::new(sess, EventKind::Msg, agent, format!("ต่อไป {i}")))?;
+        }
+    }
+    let s = Session::open(&db_path, sess)?;
+    let counter = HeuristicCounter;
+    std::env::set_var("CHORUS_R1_TOOL_REFS", "off");
+    let before = counter.count(&s.assemble_context(200_000)?);
+    let before_small = counter.count(&s.assemble_context(24_000)?);
+    std::env::remove_var("CHORUS_R1_TOOL_REFS");
+    let after_text = s.assemble_context(200_000)?;
+    let after = counter.count(&after_text);
+    let after_small = counter.count(&s.assemble_context(24_000)?);
+    println!("\n── R1 tool output in context ──────────────────────────");
+    println!("  @200k   tool refs off {before} token → on {after} token");
+    println!("  @24k    tool refs off {before_small} token → on {after_small} token");
+    assert!(after_text.contains("lines (blob:"), "old tool results did not become blob references");
+    assert!(after < before, "R1 made a tool-heavy session bigger ({before} → {after})");
+
+    let st = Store::open_in_memory()?;
+    for t in [
+        "database is PostgreSQL 16 with pgbouncer",
+        "ผู้ใช้ชอบให้ตอบเป็นภาษาไทย",
+        "tests live under tests/ and use pytest",
+        "never commit .env files",
+        "frontend uses SvelteKit with Tailwind",
+        "order list must stay under 200ms",
+        "prefer small typed changes over rewrites",
+        "migrations are numbered 0001_ upward",
+        "logs go to stderr, never stdout",
+        "Thai text counts one token per character",
+        "the shadow repo lives in .chorus/ckpt",
+    ] {
+        memory::add(st.conn(), 1, t)?;
+    }
+    memory::add(st.conn(), 1, "deploys go through GitHub Actions on tag push")?;
+    let q = "how do we deploy a release with actions?";
+    std::env::set_var("CHORUS_R2_MIN_RELEVANCE", "off");
+    let old = memory::relevant(st.conn(), 1, q, 12)?.len();
+    std::env::remove_var("CHORUS_R2_MIN_RELEVANCE");
+    let new = memory::relevant(st.conn(), 1, q, 12)?.len();
+    println!("\n── R2 memory relevance floor ──────────────────────────");
+    println!("  facts injected for one question: {old} → {new}  (store has 12, one relevant)");
+    assert!(new < old && new >= 1, "R2 floor did not cut unrelated facts ({old} → {new})");
     Ok(())
 }
 
@@ -734,6 +818,8 @@ fn bench_handoff_in_context(dir: &Path) -> Result<()> {
                     files: vec!["src/order/repo.ts".into()],
                     diff,
                     handoff: HandoffMeta { from: "claude".into(), to: "codex".into(), reason: HandoffReason::QuotaExhausted, at: 0 },
+                    evidence: vec![],
+                    unverified: vec![],
                 };
                 // Stored exactly as `Session::handoff` stores it.
                 ledger::append(c, &NewEvent::new(sess, EventKind::Handoff, codex, brief.to_json()))?;
