@@ -1776,6 +1776,9 @@ pub unsafe extern "C" fn chorus_run_orchestra(
 struct CompareJson {
     ok: bool,
     branches: Vec<CompareBranchJson>,
+    /// Present when the compare was judged (additive).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verdict: Option<chorus_cli::session::judge::Verdict>,
 }
 #[derive(Serialize)]
 struct CompareBranchJson {
@@ -1790,6 +1793,9 @@ struct CompareBranchJson {
     cost_usd: Option<f64>,
     worktree: Option<String>,
     worktree_branch: Option<String>,
+    /// Evidence and rank when the compare was scored (additive).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    score: Option<chorus_cli::session::judge::LaneScore>,
 }
 
 /// Compare mode: fork per agent, run `prompt` on each, return each branch.
@@ -1815,13 +1821,27 @@ pub unsafe extern "C" fn chorus_compare(
     }
     let policy = Policy::from_level(allow);
 
+    let lanes: Vec<chorus_cli::session::Lane> =
+        specs.into_iter().map(chorus_cli::session::Lane::single).collect();
+    compare_run(engine, &lanes, prompt, policy, &chorus_cli::session::CompareOptions::default())
+}
+
+fn compare_run(
+    engine: &mut ChorusEngine,
+    lanes: &[chorus_cli::session::Lane],
+    prompt: &str,
+    policy: Policy,
+    opts: &chorus_cli::session::CompareOptions,
+) -> *mut c_char {
     let r = catch_unwind(AssertUnwindSafe(|| {
-        engine.session.compare(&specs, prompt, policy)
+        engine.session.compare_with(lanes, prompt, policy, opts)
     }));
     match r {
-        Ok(Ok(branches)) => out(serde_json::to_string(&CompareJson {
+        Ok(Ok(report)) => out(serde_json::to_string(&CompareJson {
             ok: true,
-            branches: branches
+            verdict: report.verdict,
+            branches: report
+                .branches
                 .into_iter()
                 .map(|b| {
                     let (message, stop_reason, error) = match b.result {
@@ -1840,6 +1860,7 @@ pub unsafe extern "C" fn chorus_compare(
                         cost_usd: b.cost_usd,
                         worktree: b.worktree,
                         worktree_branch: b.worktree_branch,
+                        score: b.score,
                     }
                 })
                 .collect(),
@@ -1848,6 +1869,93 @@ pub unsafe extern "C" fn chorus_compare(
         Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in compare"),
     }
+}
+
+/// Compare mode with scoring and judging (gap map E4, F6). `agents` is a CSV;
+/// an entry ending `+orchestra` runs as an orchestra lead. `options_json` is
+/// `{"score":bool,"judge":bool,"discriminating_test":bool,"judge_agent":"..."}`
+/// or NULL for a plain compare. JSON as [`chorus_compare`], plus `score` per
+/// branch and a `verdict` when judged.
+///
+/// # Safety
+/// `e` live; `agents`, `prompt` valid NUL-terminated UTF-8; `options_json` null or the same.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_compare_ex(
+    e: *mut ChorusEngine,
+    agents: *const c_char,
+    prompt: *const c_char,
+    allow: c_int,
+    options_json: *const c_char,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let (Some(agents), Some(prompt)) = (borrow(agents), borrow(prompt)) else {
+        return err("agents/prompt must be valid UTF-8");
+    };
+    let opts: chorus_cli::session::CompareOptions = match borrow(options_json) {
+        Some(j) if !j.trim().is_empty() => match serde_json::from_str(j) {
+            Ok(o) => o,
+            Err(e) => return err(format!("bad options: {e}")),
+        },
+        _ => Default::default(),
+    };
+    let lanes = chorus_cli::session::judge::lanes_from_csv(agents, |n| {
+        chorus_cli::orchestra::provider_for(n).to_string()
+    });
+    if lanes.len() < 2 {
+        return err("compare needs at least two lanes");
+    }
+    compare_run(engine, &lanes, prompt, Policy::from_level(allow), &opts)
+}
+
+/// Stored compare results for the router, newest first, with per
+/// (agent, mode) totals. JSON: `{"ok":true,"results":[...],"stats":[...]}`.
+///
+/// # Safety
+/// `e` must be a live engine.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_compare_results_json(e: *mut ChorusEngine, limit: c_int) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        chorus_cli::session::judge::compare_results(engine.session.store(), limit.max(1) as usize)
+    }));
+    match r {
+        Ok(Ok(rows)) => {
+            let stats = chorus_cli::session::judge::lane_stats(&rows);
+            out(serde_json::json!({ "ok": true, "results": rows, "stats": stats }).to_string())
+        }
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in compare results"),
+    }
+}
+
+/// Turn the cross-provider review on: after a turn that changed files,
+/// `reviewer` (an agent of another provider) checks the change against
+/// `criteria_json` (a JSON string array, may be empty) and answers into the
+/// ledger. A NULL or empty `reviewer` turns it off.
+///
+/// # Safety
+/// `reviewer` and `criteria_json` must be null or valid NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_cross_review(
+    e: *mut ChorusEngine,
+    reviewer: *const c_char,
+    criteria_json: *const c_char,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let review = borrow(reviewer).map(str::trim).filter(|r| !r.is_empty()).map(|name| {
+        let spec = specs_from_csv(name).into_iter().next();
+        spec.map(|spec| {
+            chorus_cli::session::CrossReview::new(spec, parse_str_array(borrow(criteria_json)))
+        })
+    });
+    engine.session.set_cross_review(review.flatten());
+    out(serde_json::json!({ "ok": true }).to_string())
 }
 
 fn parse_str_array(s: Option<&str>) -> Vec<String> {

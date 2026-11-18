@@ -318,6 +318,13 @@ pub fn tests_with_code_note(changed: &[String]) -> Option<String> {
     ))
 }
 
+/// Side effects the outgoing agent started and never closed (R6b), as
+/// lines for the brief's `pending`: the receiving agent must check them
+/// before repeating a push or a PR. Empty when nothing was left open.
+pub fn half_done_notes(events: &[(Event, String)]) -> Vec<String> {
+    crate::journal::half_done_lines(events)
+}
+
 /// The hot form of a stored handoff event: one line for the conversation
 /// tier, or `None` when `stored` is not a brief.
 ///
@@ -356,7 +363,7 @@ impl Brief {
         // Decisions recorded mid-session are "done" facts the next agent
         // must not relitigate. Fold them in after the task-state items.
         for (e, body) in input.events {
-            if e.kind == EventKind::Decision {
+            if e.kind == EventKind::Decision && !crate::journal::is_marker(body) {
                 let line = body.trim();
                 if !line.is_empty() && !done.iter().any(|d| d == line) {
                     done.push(line.to_string());

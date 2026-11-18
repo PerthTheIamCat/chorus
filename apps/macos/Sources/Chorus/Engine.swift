@@ -1781,7 +1781,7 @@ final class Engine: ObservableObject {
     }
 
     /// Compare mode — fork per agent, run the prompt on each.
-    func compare(_ prompt: String, agents: String, level: Int32,
+    func compare(_ prompt: String, agents: String, level: Int32, options: String? = nil,
                  completion: @escaping (String) -> Void) {
         guard let h = handle, !busy else { return }
         busy = true; lastError = nil
@@ -1789,7 +1789,12 @@ final class Engine: ObservableObject {
         queue.async { [weak self] in
             let json = prompt.withCString { p in
                 agents.withCString { a in
-                    Self.string(from: chorus_compare(h.raw, a, p, level))
+                    if let options {
+                        return options.withCString { o in
+                            Self.string(from: chorus_compare_ex(h.raw, a, p, level, o))
+                        }
+                    }
+                    return Self.string(from: chorus_compare(h.raw, a, p, level))
                 }
             }
             DispatchQueue.main.async {
