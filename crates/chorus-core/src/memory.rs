@@ -52,18 +52,38 @@ pub fn add(c: &Connection, scope: i64, text: &str) -> Result<i64> {
     Ok(id)
 }
 
+/// The scopes a read of `scope` covers. Project (1) is what every reader asks
+/// for, and it must also see global facts (0) and legacy session-scope rows (2:
+/// a session has no id to scope by, so the scope was never meaningful) —
+/// otherwise a fact an agent proposed with scope 0 or 2 is approved and then
+/// never shown to anyone. Any other scope reads just itself.
+fn read_scopes(scope: i64) -> (i64, i64, i64) {
+    if scope == 1 {
+        (0, 1, 2)
+    } else {
+        (scope, scope, scope)
+    }
+}
+
+/// Drop later facts whose text equals an earlier one's: the same sentence can
+/// exist in two scopes that one read now covers. Keeps the first (best-ranked).
+fn dedup_text(facts: Vec<Fact>) -> Vec<Fact> {
+    let mut seen = std::collections::HashSet::new();
+    facts.into_iter().filter(|f| seen.insert(f.text.clone())).collect()
+}
+
 /// The top `k` facts for a scope, ordered pinned-first, then by hits, then
 /// most-recently-created. Bumps `hits`/`last_used_ms` for every fact
 /// returned.
 pub fn top(c: &Connection, scope: i64, k: usize) -> Result<Vec<Fact>> {
     let mut stmt = c.prepare(
         "SELECT id, scope, text, pinned, hits FROM fact
-         WHERE scope = ?1
-         ORDER BY pinned DESC, hits DESC, created_ms DESC
-         LIMIT ?2",
+         WHERE scope IN (?1, ?2, ?3)
+         ORDER BY pinned DESC, hits DESC, created_ms DESC",
     )?;
+    let (s0, s1, s2) = read_scopes(scope);
     let facts: Vec<Fact> = stmt
-        .query_map((scope, k as i64), |r| {
+        .query_map((s0, s1, s2), |r| {
             Ok(Fact {
                 id: r.get(0)?,
                 scope: r.get(1)?,
@@ -73,6 +93,8 @@ pub fn top(c: &Connection, scope: i64, k: usize) -> Result<Vec<Fact>> {
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
+    let mut facts = dedup_text(facts);
+    facts.truncate(k);
 
     let now = now_ms();
     for f in &facts {
@@ -154,11 +176,12 @@ pub fn relevant_with(
         return top(c, scope, k);
     }
     let mut stmt = c.prepare(
-        "SELECT id, scope, text, pinned, hits FROM fact WHERE scope = ?1
+        "SELECT id, scope, text, pinned, hits FROM fact WHERE scope IN (?1, ?2, ?3)
          ORDER BY pinned DESC, hits DESC, created_ms DESC",
     )?;
+    let (s0, s1, s2) = read_scopes(scope);
     let all: Vec<Fact> = stmt
-        .query_map([scope], |r| {
+        .query_map([s0, s1, s2], |r| {
             Ok(Fact {
                 id: r.get(0)?,
                 scope: r.get(1)?,
@@ -168,6 +191,7 @@ pub fn relevant_with(
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
+    let all = dedup_text(all);
 
     let semantic = embedder.and_then(|e| {
         let stored = stored_vectors(c, scope, &e.id()).ok().filter(|m| !m.is_empty())?;
@@ -223,10 +247,11 @@ pub fn relevant_with(
 fn stored_vectors(c: &Connection, scope: i64, model: &str) -> Result<std::collections::HashMap<i64, Vec<f32>>> {
     let mut stmt = c.prepare(
         "SELECT e.fact, e.vec FROM fact_embedding e JOIN fact f ON f.id = e.fact
-         WHERE f.scope = ?1 AND e.model = ?2",
+         WHERE f.scope IN (?1, ?2, ?3) AND e.model = ?4",
     )?;
+    let (s0, s1, s2) = read_scopes(scope);
     let rows = stmt
-        .query_map((scope, model), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
+        .query_map((s0, s1, s2, model), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows.into_iter().map(|(id, b)| (id, embedding::decode(&b))).collect())
 }

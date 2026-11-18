@@ -1364,6 +1364,8 @@ impl Session {
             std::fs::create_dir_all(dir).context("create project memory dir")?;
         }
         let shared = Store::open(path).context("open project memory")?;
+        // Every scope this folder's reader can see (project, global, legacy
+        // session rows) moves along under its own scope.
         for f in memory::top(self.store.conn(), 1, 1000)? {
             memory::add(shared.conn(), f.scope, &f.text)?;
         }
@@ -1476,7 +1478,7 @@ impl Session {
                  ledger. Continue from here.\n\nNew instruction:\n{user_text}"
             )
         } else {
-            user_text.to_string()
+            self.first_turn_prompt(user_text)
         };
 
         let event = NewEvent::new(self.sess, EventKind::Msg, self.user, user_text);
@@ -1955,6 +1957,43 @@ impl Session {
         Ok((String::new(), agent))
     }
 
+    /// The prompt for the first turn of a session with no history: the raw
+    /// instruction, preceded by this project's earlier sessions when there are
+    /// any. Without it a brand-new session starts blind to the work before it.
+    /// Read-only and not written to the ledger.
+    fn first_turn_prompt(&self, user_text: &str) -> String {
+        let prev = chorus_core::history::previous_sessions(self.store.conn(), self.sess, 3)
+            .unwrap_or_default();
+        if prev.is_empty() {
+            return user_text.to_string();
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        format!(
+            "{}\n---\nThe lines above are earlier sessions of this project, from the shared \
+             ledger. Search them with chorus_search_history if relevant.\n\nNew instruction:\n{user_text}",
+            chorus_core::history::render_previous(&prev, now)
+        )
+    }
+
+    /// `task_state()` rendered, plus a few lines about this project's earlier
+    /// sessions so a fresh session does not start from nothing. Read-only
+    /// (ledger + stored `summary` rows), and kept out of `task_state()` itself
+    /// so the handoff brief and the projected agent files don't carry it.
+    fn task_state_with_previous(&self) -> Result<String> {
+        let mut text = self.task_state()?.render();
+        let prev = chorus_core::history::previous_sessions(self.store.conn(), self.sess, 3)
+            .unwrap_or_default();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        text.push_str(&chorus_core::history::render_previous(&prev, now));
+        Ok(text)
+    }
+
     pub fn task_state(&self) -> Result<TaskState> {
         let c = self.store.conn();
         let events = ledger::history(c, self.sess, 400)?;
@@ -2227,7 +2266,7 @@ impl Session {
             system: "You are one of several agents sharing this session. The context below \
                      was assembled by Chorus from the shared ledger."
                 .into(),
-            task_state: self.task_state()?.render(),
+            task_state: self.task_state_with_previous()?,
             memory: memory_items,
             turns,
             code,
@@ -2830,7 +2869,7 @@ impl Session {
                  ledger. Continue from here.\n\nNew instruction:\n{user_text}"
             )
         } else {
-            user_text.to_string()
+            self.first_turn_prompt(user_text)
         };
         let event = NewEvent::new(self.sess, EventKind::Msg, self.user, user_text);
         let user_seq = if attachment_ids.is_empty() {

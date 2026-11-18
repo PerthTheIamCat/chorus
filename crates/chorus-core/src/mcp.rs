@@ -410,6 +410,7 @@ fn dispatch(req: &Value, conn: &rusqlite::Connection, caller: &Caller) -> Value 
                     update_checklist_schema(),
                     jump_to_file_schema(),
                     request_review_schema(),
+                    search_history_schema(),
                 ]);
                 // Listed only for a session whose user turned it on: an agent
                 // that never sees the tool never tries it.
@@ -438,6 +439,24 @@ for later, or states a durable fact about the project (a convention, a decision,
 call `memory_propose` with that fact in one short sentence. Do this instead of your own memory \
 notes: Chorus shares this memory with every agent in the session. A person approves it afterwards.";
 
+fn search_history_schema() -> Value {
+    json!({
+        "name": "chorus_search_history",
+        "description": "Search what was said and decided in this project's earlier sessions \
+                        (every agent, not just you). Use it when the user refers to past work you \
+                        have no context for, e.g. \"like we did last time\". Returns short lines: \
+                        session id, event seq, agent, snippet.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "words to look for" },
+                "limit": { "type": "integer", "description": "max results (default 5, max 20)", "default": 5 }
+            },
+            "required": ["query"]
+        }
+    })
+}
+
 fn propose_tool_schema() -> Value {
     json!({
         "name": "memory_propose",
@@ -451,7 +470,7 @@ fn propose_tool_schema() -> Value {
                 "text": { "type": "string", "description": "the fact, ≤140 chars" },
                 "scope": {
                     "type": "integer",
-                    "description": "0 global · 1 project (default) · 2 session",
+                    "description": "0 about the user rather than this project · 1 project (default); both are stored in this project's memory",
                     "default": 1
                 }
             },
@@ -565,12 +584,28 @@ fn call_tool(
         let sess = session_scope.ok_or("computer use is only available in a session")?;
         return computer::call(conn, sess, &args, computer::system());
     }
+    if name == "chorus_search_history" {
+        let sess = session_scope.ok_or("history search is only available in a session")?;
+        let query = args.get("query").and_then(Value::as_str).ok_or("query is required")?;
+        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(5) as usize;
+        return match crate::history::search(conn, sess, query, limit) {
+            Ok(hits) => Ok(json!({
+                "content": [{ "type": "text", "text": crate::history::render_hits(&hits) }]
+            })),
+            Err(e) => Err(e.to_string()),
+        };
+    }
     if name == "memory_propose" {
         let text = args
             .get("text")
             .and_then(Value::as_str)
             .ok_or("text is required")?;
-        let scope = args.get("scope").and_then(Value::as_i64).unwrap_or(1);
+        // 0 global, 1 project. A session has no id to scope a fact by, so the
+        // old 2 (and anything else) is a project fact.
+        let scope = match args.get("scope").and_then(Value::as_i64) {
+            Some(0) => 0,
+            _ => 1,
+        };
         // Memory is projected into CLAUDE.md/AGENTS.md on disk: never a value.
         let masked = crate::secrets::user_vault().mask(text).text;
         let text = masked.as_str();
