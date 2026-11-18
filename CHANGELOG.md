@@ -21,6 +21,11 @@
 - **skill ของ Codex และ Antigravity ฉายเป็นไฟล์จริงที่ `.agents/skills/<name>/SKILL.md`:** ทั้งสองเจ้าอ่านโฟลเดอร์นี้เองแล้ว (Codex ไล่จาก cwd ขึ้นไปถึง repo root · Antigravity อ่าน workspace root และโฟลเดอร์แม่) · ใช้กลไกเดียวกับฝั่ง Claude: marker ท้ายไฟล์ ไม่ทับไฟล์ที่ผู้ใช้เขียนเอง · เลิกเขียน index ของ skill ลง `AGENTS.md` (เดิมจ่าย token ซ้ำสองรอบ) · ยังไม่ได้ทดสอบการโหลดผ่าน bridge codex-acp บน Mac
 - **prompt ทุกเทิร์นเพิ่มข้อความสั้น ๆ:** ถ้าขาดข้อมูลให้ถามผู้ใช้ก่อนเริ่ม (เอ่ยชื่อ `chorus_ask_user` เฉพาะตอนมีคนตอบได้) · ถ้าทำตาม spec ไม่ได้ให้บอกตรง ๆ ห้ามแก้/ข้ามเทสต์เพื่อให้ผ่าน (ไม่ลง ledger) · คำอธิบายของ `chorus_ask_user` ปรับให้ตรงกัน
 
+### Removed
+
+- **ถอด Graft, RTK และ Headroom ออกจากรายการ extension:** ผลวัดอิสระบน SWE-bench Verified 100 งาน (Dasein code-compression-bench) พบว่า Headroom ทำให้ค่าใช้จ่ายเพิ่ม 44% และ RTK เพิ่ม 13% โดยแก้งานได้ไม่มากขึ้น (RTK แก้ได้ 54 งาน เทียบกับ 57 เมื่อไม่ใช้) · ตัวเลขของ Graft มาจากผู้ทำเองเท่านั้น และงานซ้ำกับ repo map ที่ Chorus มีอยู่แล้ว · ที่เหลือคือ Serena, Chrome DevTools และ Chorus Review
+- ของที่เคยติดตั้งไว้ถูกล้างให้เองตอนเปิดรายการ extension: Chorus เลิกส่งให้ agent และลบไฟล์ที่ Chorus ติดตั้งเองใน `~/.chorus/tools/` · ตัวที่ติดตั้งด้วย Homebrew หรือติดตั้งเองไม่ถูกลบ ถ้าไม่ใช้แล้วให้รัน `brew uninstall rtk`
+
 ## [0.2.6] - 2026-10-26
 
 ### Added
