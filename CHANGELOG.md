@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **skill ของ Codex และ Antigravity ฉายเป็นไฟล์จริงที่ `.agents/skills/<name>/SKILL.md`:** ทั้งสองเจ้าอ่านโฟลเดอร์นี้เองแล้ว (Codex ไล่จาก cwd ขึ้นไปถึง repo root · Antigravity อ่าน workspace root และโฟลเดอร์แม่) · ใช้กลไกเดียวกับฝั่ง Claude: marker ท้ายไฟล์ ไม่ทับไฟล์ที่ผู้ใช้เขียนเอง · เลิกเขียน index ของ skill ลง `AGENTS.md` (เดิมจ่าย token ซ้ำสองรอบ) · ยังไม่ได้ทดสอบการโหลดผ่าน bridge codex-acp บน Mac
+
 ## [0.2.6] - 2026-10-26
 
 ### Added
