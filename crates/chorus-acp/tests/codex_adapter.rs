@@ -4,16 +4,9 @@
 
 use chorus_acp::codex::{AgentEvent, CodexAgent, CodexConfig, Permission, PermissionAsk};
 
-/// `target/debug/deps/<test>` → `target/debug/acp-probe` (which serves the
-/// mock via `--serve-mock`).
+/// `acp-probe` serves the mock via `--serve-mock`; Cargo supplies its path.
 fn mock_command() -> Vec<String> {
-    let mut p = std::env::current_exe().expect("test exe");
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    let probe = p.join("acp-probe");
-    vec![probe.to_string_lossy().into_owned(), "--serve-mock".into()]
+    vec![env!("CARGO_BIN_EXE_acp-probe").to_string(), "--serve-mock".into()]
 }
 
 fn config() -> CodexConfig {
