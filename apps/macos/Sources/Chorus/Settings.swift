@@ -380,8 +380,38 @@ struct GeneralSettings: View {
     @AppStorage("chorus.explorerWidth") private var explorerWidth: Double = 260
     @AppStorage("chorus.inspectorWidth") private var inspectorWidth: Double = 330
     @AppStorage("chorus.codeViewerShare") private var codeViewerShare: Double = WorkbenchLayout.defaultViewerShare
+    @AppStorage(MetricsKey.tokPerS) private var showTokPerS = true
+    @AppStorage(MetricsKey.cache) private var showCache = true
+    @AppStorage(MetricsKey.cost) private var showCost = true
+    @AppStorage(MetricsKey.context) private var showContext = true
+    @AppStorage(MetricsKey.limit) private var showLimit = true
 
     var body: some View {
+        SettingsGroup(title: "แถบตัวชี้วัด") {
+            SettingsRow(title: "ความเร็ว (tok/s)",
+                        info: "ประมาณจากข้อความที่ agent ส่งออกมา ไม่ใช่ตัวเลขจาก provider") {
+                Toggle("ความเร็ว", isOn: $showTokPerS).labelsHidden().toggleStyle(.switch)
+            }
+            RowDivider()
+            SettingsRow(title: "Cache hit",
+                        info: "ขึ้นเมื่อ provider รายงานเท่านั้น ตอนนี้ยังไม่มีเจ้าไหนส่งมา") {
+                Toggle("Cache hit", isOn: $showCache).labelsHidden().toggleStyle(.switch)
+            }
+            RowDivider()
+            SettingsRow(title: "ค่าใช้จ่าย",
+                        info: "ตามที่ provider รายงาน เจ้าที่ไม่รายงาน (เช่น Codex) จะไม่ขึ้น ไม่เดาราคาเอง") {
+                Toggle("ค่าใช้จ่าย", isOn: $showCost).labelsHidden().toggleStyle(.switch)
+            }
+            RowDivider()
+            SettingsRow(title: "หน้าต่างบริบท", info: "สัดส่วนบริบทที่ใช้ไปของ session นี้") {
+                Toggle("หน้าต่างบริบท", isOn: $showContext).labelsHidden().toggleStyle(.switch)
+            }
+            RowDivider()
+            SettingsRow(title: "% ของโควตา",
+                        info: "โควตา 5 ชั่วโมงหรือรายสัปดาห์ อันที่ใกล้เต็มกว่า · ขึ้นเมื่ออ่านโควตาของบัญชีนั้นได้") {
+                Toggle("% ของโควตา", isOn: $showLimit).labelsHidden().toggleStyle(.switch)
+            }
+        }
         SettingsGroup(title: "การพิมพ์") {
             SettingsRow(title: "Enter เพื่อส่ง",
                         info: enterSends ? "Shift+Enter ขึ้นบรรทัดใหม่" : "⌘Enter ส่ง · Enter ขึ้นบรรทัดใหม่") {
