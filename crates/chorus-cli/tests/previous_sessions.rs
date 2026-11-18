@@ -4,13 +4,10 @@
 use chorus_cli::session::{Policy, Session};
 use chorus_core::memory;
 
+mod common;
+
 fn mock_bridge() -> Vec<String> {
-    let mut p = std::env::current_exe().expect("test exe");
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    vec![p.join("acp-probe").to_string_lossy().into_owned(), "--serve-mock".into()]
+    vec![common::probe_bin().to_string_lossy().into_owned(), "--serve-mock".into()]
 }
 
 #[test]

@@ -25,7 +25,7 @@
 
 ### Fixed
 
-- **ความจำที่ agent เสนอด้วย scope 0 (global) หรือ 2 ถูกอนุมัติแล้วไม่โผล่ที่ไหนเลย:** ทุกที่ที่อ่านความจำ (context, แท็บ Memory, ไฟล์ที่ฉายให้ agent) อ่าน scope 0 ด้วยแล้ว และ scope 2 (session ซึ่งไม่มี id ให้ผูก) ถูกนับเป็นความจำของโปรเจกต์ · tool `memory_propose` รับแค่ 0/1
+- **ความจำที่ agent เสนอด้วย scope 0 (user-level; stored in the same per-project memory, not shared across projects) หรือ 2 ถูกอนุมัติแล้วไม่โผล่ที่ไหนเลย:** ทุกที่ที่อ่านความจำ (context, แท็บ Memory, ไฟล์ที่ฉายให้ agent) อ่าน scope 0 ด้วยแล้ว และ scope 2 (session ซึ่งไม่มี id ให้ผูก) ถูกนับเป็นความจำของโปรเจกต์ · tool `memory_propose` รับแค่ 0/1
 
 ## [0.2.6] - 2026-10-26
 

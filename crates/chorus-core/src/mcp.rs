@@ -470,7 +470,7 @@ fn propose_tool_schema() -> Value {
                 "text": { "type": "string", "description": "the fact, ≤140 chars" },
                 "scope": {
                     "type": "integer",
-                    "description": "0 global (every project) · 1 project (default)",
+                    "description": "0 about the user rather than this project · 1 project (default); both are stored in this project's memory",
                     "default": 1
                 }
             },
