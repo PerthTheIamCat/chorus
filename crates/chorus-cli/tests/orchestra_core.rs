@@ -13,13 +13,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
 fn probe_bin() -> PathBuf {
-    let mut p = std::env::current_exe().expect("test exe");
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.join("acp-probe")
+    common::probe_bin()
 }
 
 fn mock_bridge() -> Vec<String> {
