@@ -39,12 +39,10 @@ pub mod mcp_host;
 pub mod embedding;
 pub mod memory;
 pub mod merge_specialist;
-pub mod merkle;
 pub mod mlx_runtime;
 pub mod model_manager;
 pub mod notify;
 pub mod permissions;
-pub mod pipeline;
 pub mod projector;
 pub mod render;
 pub mod repo_map;
@@ -78,12 +76,10 @@ pub use checkpoint_dag::{CheckpointDag, RewindMode, RewindSummary, TurnCheckpoin
 pub use darwin_qos::DarwinQoS;
 pub use error::{ChorusError, Result};
 pub use merge_specialist::{ConflictHunk, MergeSpecialist, MergeStrategy};
-pub use merkle::{MerkleDiff, MerkleNode, MerkleTree};
 pub use mlx_runtime::{
     AppleSiliconHardwareInfo, AppleSiliconMlxEngine, MlxInferenceStats, MlxModelConfig,
     QuantizationType,
 };
-pub use pipeline::{ArchitectEditorPipeline, BudgetPolicy, PipelineCostSummary};
 pub use repo_map::{RepoMapEngine, SymbolDef, SymbolExtractor, SymbolGraph};
 pub use roles::AgentRole;
 pub use store::Store;
