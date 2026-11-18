@@ -61,3 +61,44 @@ fn approved_facts_of_every_scope_are_assembled_and_listed() {
     let (facts, _) = s.memory_state().unwrap();
     assert_eq!(facts.len(), 3, "{facts:?}");
 }
+
+#[test]
+fn the_first_turn_of_a_new_session_already_carries_the_earlier_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("s.db");
+    let cwd = dir.path().join("w");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let mut first = Session::create(&db, &cwd, "first").unwrap().with_bridge(mock_bridge());
+    first.run_turn("codex", "openai", "ย้าย auth ไป OAuth ให้เสร็จ", Policy::AllowAll).unwrap();
+    let first_id = first.session_id();
+    drop(first);
+
+    // The mock writes what reached it to mock-saw.txt when asked to.
+    let mut second = Session::create(&db, &cwd, "second").unwrap().with_bridge(mock_bridge());
+    second.run_turn("codex", "openai", "MOCK_ECHO_SECRETS ต่อจากเมื่อวาน", Policy::AllowAll).unwrap();
+    let saw = std::fs::read_to_string(cwd.join("mock-saw.txt")).unwrap();
+    assert!(saw.contains("previous sessions:"), "{saw}");
+    assert!(saw.contains(&format!("#{first_id}")) && saw.contains("ย้าย auth ไป OAuth"), "{saw}");
+    assert!(saw.contains("ต่อจากเมื่อวาน"), "{saw}");
+
+    // Read-only: the ledger holds the person's words, not the block.
+    let stored: i64 = second
+        .store()
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM event WHERE sess = ?1 AND body LIKE '%previous sessions%'",
+            [second.session_id()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, 0, "the previous-sessions block leaked into the ledger");
+
+    // The very first session of a folder is sent untouched.
+    let cwd2 = dir.path().join("w2");
+    std::fs::create_dir_all(&cwd2).unwrap();
+    let mut alone = Session::create(&dir.path().join("t.db"), &cwd2, "alone").unwrap().with_bridge(mock_bridge());
+    alone.run_turn("codex", "openai", "MOCK_ECHO_SECRETS hello", Policy::AllowAll).unwrap();
+    let saw = std::fs::read_to_string(cwd2.join("mock-saw.txt")).unwrap();
+    assert!(!saw.contains("previous sessions"), "{saw}");
+}

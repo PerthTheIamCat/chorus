@@ -1478,7 +1478,7 @@ impl Session {
                  ledger. Continue from here.\n\nNew instruction:\n{user_text}"
             )
         } else {
-            user_text.to_string()
+            self.first_turn_prompt(user_text)
         };
 
         let event = NewEvent::new(self.sess, EventKind::Msg, self.user, user_text);
@@ -1955,6 +1955,27 @@ impl Session {
             }
         }
         Ok((String::new(), agent))
+    }
+
+    /// The prompt for the first turn of a session with no history: the raw
+    /// instruction, preceded by this project's earlier sessions when there are
+    /// any. Without it a brand-new session starts blind to the work before it.
+    /// Read-only and not written to the ledger.
+    fn first_turn_prompt(&self, user_text: &str) -> String {
+        let prev = chorus_core::history::previous_sessions(self.store.conn(), self.sess, 3)
+            .unwrap_or_default();
+        if prev.is_empty() {
+            return user_text.to_string();
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        format!(
+            "{}\n---\nThe lines above are earlier sessions of this project, from the shared \
+             ledger. Search them with chorus_search_history if relevant.\n\nNew instruction:\n{user_text}",
+            chorus_core::history::render_previous(&prev, now)
+        )
     }
 
     /// `task_state()` rendered, plus a few lines about this project's earlier
@@ -2848,7 +2869,7 @@ impl Session {
                  ledger. Continue from here.\n\nNew instruction:\n{user_text}"
             )
         } else {
-            user_text.to_string()
+            self.first_turn_prompt(user_text)
         };
         let event = NewEvent::new(self.sess, EventKind::Msg, self.user, user_text);
         let user_seq = if attachment_ids.is_empty() {
