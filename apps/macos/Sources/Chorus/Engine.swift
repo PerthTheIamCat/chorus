@@ -164,6 +164,20 @@ final class Engine: ObservableObject {
     /// goal / done / pending for this session — the context tier the design
     /// never trims. Empty only before the first turn.
     @Published var taskState = ""
+    /// Turns that read something from outside the project (E2), computed in
+    /// Rust from the ledger; views only look a label up.
+    @Published var turnTaints: [TurnTaint] = []
+    struct TurnTaint: Decodable {
+        let user_seq: Int64
+        let last_seq: Int64
+        let label: String
+    }
+    private struct TurnTaintsResult: Decodable { let turns: [TurnTaint]? }
+
+    /// The label of the tainted turn that contains ledger row `seq`, if any.
+    func taintLabel(forSeq seq: Int64) -> String? {
+        turnTaints.first { seq >= $0.user_seq && seq <= $0.last_seq }?.label
+    }
     /// Events with no stored summary rungs yet. Non-zero just means the next
     /// compaction pass has work, not that anything is wrong.
     @Published var uncompacted: Int64 = 0
@@ -537,6 +551,9 @@ final class Engine: ObservableObject {
         let tool: String
         let kind: String
         let detail: String
+        /// Why this ask is stricter than usual (the turn read something from
+        /// outside the project); from Rust, nil for an ordinary ask.
+        var tainted: String? = nil
     }
     @Published var pendingAsk: PermissionAsk?
     private let permGate = DispatchSemaphore(value: 0)
@@ -548,12 +565,13 @@ final class Engine: ObservableObject {
     /// Called from the C callback on the engine's background thread. Publishes
     /// the ask to the UI and blocks until `answerPermission` is called.
     fileprivate func askPermissionBlocking(_ json: String) -> Int32 {
-        struct Raw: Codable { let agent: String?; let tool: String?; let kind: String?; let detail: String? }
+        struct Raw: Codable { let agent: String?; let tool: String?; let kind: String?; let detail: String?; let tainted: String? }
         let raw = (try? JSONDecoder().decode(Raw.self, from: Data(json.utf8)))
         DispatchQueue.main.async {
             self.pendingAsk = PermissionAsk(
                 agent: raw?.agent ?? self.liveAgent ?? "agent",
-                tool: raw?.tool ?? "action", kind: raw?.kind ?? "", detail: raw?.detail ?? "")
+                tool: raw?.tool ?? "action", kind: raw?.kind ?? "", detail: raw?.detail ?? "",
+                tainted: raw?.tainted)
         }
         permGate.wait()
         return permAnswer
@@ -1859,8 +1877,12 @@ final class Engine: ObservableObject {
             let memJSON = Self.string(from: chorus_memory_state(h.raw))
             let taskJSON = Self.string(from: chorus_task_state(h.raw))
             let warmJSON = Self.string(from: chorus_uncompacted(h.raw))
+            let taintJSON = Self.string(from: chorus_turn_taints_json(h.raw))
             DispatchQueue.main.async {
                 guard let self else { return }
+                if let t = Self.decode(TurnTaintsResult.self, taintJSON)?.turns, t.map(\.last_seq) != self.turnTaints.map(\.last_seq) {
+                    self.turnTaints = t
+                }
                 if full, let rows = Self.decode([LedgerEvent].self, eventsJSON) {
                     self.events = rows
                     self.lastSeq = rows.last(where: { $0.seq > 0 })?.seq ?? 0
@@ -1992,7 +2014,16 @@ final class Engine: ObservableObject {
         let description: String
         let path: String
         let source: String      // "chorus" | "project" | "agents" | "user" (Claude) | "codex" | "gemini"
+        /// From the script scan in Rust (G4): nil when the skill has no scripts.
+        var badge: String? = nil
+        var findings: [SkillFinding]? = nil
         var id: String { source + path }
+    }
+    struct SkillFinding: Codable, Hashable {
+        let file: String
+        let line: Int
+        let label: String
+        let text: String
     }
     @Published var skills: [SkillInfo] = []
 

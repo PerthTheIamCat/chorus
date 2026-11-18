@@ -1170,6 +1170,18 @@ struct SkillsSettings: View {
     let workspace: String
     @State private var query = ""
 
+    /// The description, then the script badge and the first findings (the
+    /// scan itself is Rust's: crates/chorus-core/src/skill_scan.rs).
+    private func skillDetail(_ sk: Engine.SkillInfo) -> String {
+        guard let badge = sk.badge else { return sk.description }
+        var lines = [sk.description, "⚠︎ \(badge)"]
+        for f in (sk.findings ?? []).prefix(3) {
+            lines.append("\(f.label): \(f.file):\(f.line) — \(f.text)")
+        }
+        if let n = sk.findings?.count, n > 3 { lines.append("…และอีก \(n - 3) จุด · เปิดไฟล์เพื่อดูทั้งหมด") }
+        return lines.joined(separator: "\n")
+    }
+
     var body: some View {
         let q = query.trimmingCharacters(in: .whitespaces)
         let shown = engine.skills.filter {
@@ -1192,7 +1204,7 @@ struct SkillsSettings: View {
                 SettingsGroup(title: titles[src] ?? src) {
                     ForEach(Array(group.enumerated()), id: \.element.id) { i, sk in
                         if i > 0 { Divider().padding(.leading, 12) }
-                        SettingsRow(title: sk.name, detail: sk.description) {
+                        SettingsRow(title: sk.name, detail: skillDetail(sk)) {
                             Button { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: sk.path)]) } label: {
                                 Image(systemName: "arrow.up.forward.square")
                             }

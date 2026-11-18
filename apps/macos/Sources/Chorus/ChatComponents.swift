@@ -176,6 +176,8 @@ func chatBubbleShape(isUser: Bool) -> UnevenRoundedRectangle {
 /// A run of finished tool calls from the ledger, collapsed to one line.
 struct ToolGroupRow: View {
     let events: [LedgerEvent]
+    /// "อ่านของภายนอกแล้ว · …" when this turn read from outside the project.
+    var taint: String? = nil
     @State private var open = false
 
     private var calls: Int {
@@ -197,6 +199,11 @@ struct ToolGroupRow: View {
                 HStack(spacing: 7) {
                     Image(systemName: "wrench.and.screwdriver").font(.caption2).foregroundStyle(.secondary)
                     Text("ใช้เครื่องมือ \(calls) ครั้ง").font(.caption.weight(.medium))
+                    if let taint {
+                        Label(taint, systemImage: "exclamationmark.shield")
+                            .font(.caption2).foregroundStyle(.orange)
+                            .lineLimit(1)
+                    }
                     if !open, !preview.isEmpty {
                         Text(preview)
                             .font(.caption2).foregroundStyle(.tertiary)

@@ -63,7 +63,8 @@ pub fn available(conn: &Connection, sess: i64) -> bool {
     asker(conn, sess).is_some()
 }
 
-fn asker(conn: &Connection, sess: i64) -> Option<Asker> {
+/// Who answers questions for `sess` right now, if anyone.
+pub fn asker(conn: &Connection, sess: i64) -> Option<Asker> {
     let guard = ASKERS.lock().unwrap_or_else(|p| p.into_inner());
     guard.as_ref()?.get(&(db_key(conn), sess)).cloned()
 }

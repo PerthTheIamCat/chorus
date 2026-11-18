@@ -1300,6 +1300,10 @@ struct ContentView: View {
                 if !ask.detail.isEmpty {
                     Text(ask.detail).font(.callout).textSelection(.enabled)
                 }
+                if let why = ask.tainted {
+                    Label("\(why) — ข้อความที่อ่านมาอาจแอบสั่ง agent", systemImage: "exclamationmark.shield")
+                        .font(.caption).foregroundStyle(.orange)
+                }
                 HStack {
                     Button("ไม่อนุญาต", role: .destructive) { engine.answerPermission(.deny) }
                         .keyboardShortcut(.cancelAction)
@@ -1834,7 +1838,7 @@ struct ContentView: View {
         case .event(let ev):
             rowForEvent(ev, atts: snap.attachments[ev.seq] ?? [], lastAgentMsg: snap.lastAgentMsg)
         case .tools(let evs):
-            ToolGroupRow(events: evs).id(item.id)
+            ToolGroupRow(events: evs, taint: evs.first.flatMap { engine.taintLabel(forSeq: $0.seq) }).id(item.id)
         }
     }
 

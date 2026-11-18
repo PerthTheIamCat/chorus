@@ -395,6 +395,8 @@ char *chorus_compact(const ChorusEngine *e, int limit);
 
 /* goal / done / pending / constraints for this session. */
 char *chorus_task_state(const ChorusEngine *e);
+/* Turns that read something from outside the project (E2): {"ok","turns":[{"user_seq","last_seq","label","sources"}]} */
+char *chorus_turn_taints_json(const ChorusEngine *e);
 
 /* Last stored usage for this session (seeds the context meter on reopen).
  * JSON: {"ok":true,"usage":null|{"context_used":N|null,"context_window":N|null,

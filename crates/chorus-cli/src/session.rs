@@ -747,12 +747,26 @@ impl PermissionGrants {
     }
 
     pub fn allows(&self, ask: &PermissionAsk) -> bool {
-        self.0.contains(&Self::key(ask))
+        // An earlier "always" does not cover an action that leaves the machine
+        // in a turn that has read something from outside (E2): it asks again.
+        ask.tainted_by.is_none() && self.0.contains(&Self::key(ask))
     }
 
     pub fn grant(&mut self, ask: &PermissionAsk) {
         self.0.insert(Self::key(ask));
     }
+}
+
+/// A turn that read something from outside the project (E2), for the label
+/// the shell draws on it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TurnTaint {
+    /// The user message that started the turn.
+    pub user_seq: i64,
+    /// The last ledger row of the turn.
+    pub last_seq: i64,
+    pub label: String,
+    pub sources: Vec<chorus_core::taint::Source>,
 }
 
 pub struct Session {
@@ -2571,6 +2585,9 @@ impl Session {
         // ran died. When ours is the wall around the bridge, ask Codex not to
         // build a second one; ours still confines writes.
         let sandboxed = command.as_slice() != bridge;
+        // "ให้ทำเลย" is the one mode where nobody answers the agent's asks;
+        // a turn that reads something from outside gets asked anyway (E2).
+        let free_hand = mode == "agent";
         let mode = if sandboxed && crate::accounts::split(agent_name).0 == "codex" {
             "agent-full-access"
         } else if crate::accounts::split(agent_name).0.contains("claude") {
@@ -2809,7 +2826,31 @@ impl Session {
             }) as chorus_acp::ToolObserver
         });
         let previous_tool = chorus_acp::set_tool_observer(tool_observer);
-        let out = agent.prompt_blocks(blocks, decide).context("agent turn");
+        // E2: once a call reads from outside the project, computer use stops
+        // acting freely, and an outbound ask (push, PR, MCP write) goes back
+        // to the person. See `taint_gate`.
+        let gate = crate::taint_gate::Gate {
+            judge: self.taint_judge(),
+            free_hand,
+            asker: chorus_core::ask_user::asker(self.store.conn(), self.sess),
+            agent: agent_name.to_string(),
+            log: self.log_permissions,
+        };
+        if let Some(asker) = gate.computer_asker() {
+            computer::set_asker_default(self.store.conn(), self.sess, asker);
+        }
+        let taint_judge = gate.judge.clone();
+        let (gate_db, gate_sess) = (computer::gate_key(self.store.conn()), self.sess);
+        let previous_kind = chorus_acp::set_tool_kind_observer(Some(Box::new(
+            move |title: &str, kind: &str| {
+                if taint_judge.source_of(title, kind).is_some() {
+                    computer::taint(&gate_db, gate_sess);
+                }
+            },
+        )));
+        let mut gated = |ask: &PermissionAsk| gate.decide(ask, &mut *decide);
+        let out = agent.prompt_blocks(blocks, &mut gated).context("agent turn");
+        chorus_acp::set_tool_kind_observer(previous_kind);
         chorus_acp::set_tool_observer(previous_tool);
         chorus_acp::set_usage_observer(previous);
         if let Ok(mut held) = self.loop_notes.lock() {
@@ -3248,6 +3289,51 @@ impl Session {
     /// Who answers "may the agent click here?" during an interactive turn.
     pub fn set_computer_asker(&self, asker: Option<computer::Asker>) {
         computer::set_asker(self.store.conn(), self.sess, asker);
+    }
+
+    /// What counts as "outside" for this session: anything but its own folders.
+    fn taint_judge(&self) -> chorus_core::taint::Judge {
+        let mut roots = vec![self.cwd.clone()];
+        roots.extend(self.project_folders.iter().cloned());
+        let imported = chorus_core::taint::imported_sessions_exist(self.store.conn()).unwrap_or(false);
+        chorus_core::taint::Judge::new(roots, imported)
+    }
+
+    /// Which turns of this session read something from outside, derived from
+    /// their tool calls in the ledger (`[{"user_seq","last_seq","label"}]`).
+    /// A turn runs from a user message to the next one.
+    pub fn turn_taints(&self) -> Result<Vec<TurnTaint>> {
+        let judge = self.taint_judge();
+        let mut out = Vec::new();
+        let mut open: Option<(i64, Vec<String>, i64)> = None;
+        let flush = |open: Option<(i64, Vec<String>, i64)>, out: &mut Vec<TurnTaint>| {
+            if let Some((user_seq, calls, last_seq)) = open {
+                if let Some(t) = judge.taint_of_bodies(calls.iter().map(String::as_str)) {
+                    out.push(TurnTaint { user_seq, last_seq, label: t.label(), sources: t.sources });
+                }
+            }
+        };
+        // Bodies only for tool calls: the rest of a long session is not read.
+        let c = self.store.conn();
+        let own_only = is_chorus_child(&self.store, self.sess);
+        for e in ledger::history(c, self.sess, 10_000)? {
+            if own_only && e.sess != self.sess {
+                continue;
+            }
+            if e.kind == EventKind::Msg && e.actor == self.user {
+                flush(open.take(), &mut out);
+                open = Some((e.seq, Vec::new(), e.seq));
+                continue;
+            }
+            if let Some((_, calls, last)) = open.as_mut() {
+                *last = e.seq;
+                if e.kind == EventKind::ToolCall {
+                    calls.push(ledger::body(c, &e)?);
+                }
+            }
+        }
+        flush(open.take(), &mut out);
+        Ok(out)
     }
 
     /// A turn that promises not to change anything (plan mode, read-only,
@@ -3771,6 +3857,8 @@ mod policy_tests {
             tool: tool.into(),
             kind: kind.into(),
             detail: String::new(),
+            prior_tools: Vec::new(),
+            tainted_by: None,
         };
         let mut g = PermissionGrants::default();
         assert!(!g.allows(&ask("`git status`", "execute")));
@@ -3795,6 +3883,8 @@ mod policy_tests {
                 tool: "fixture".into(),
                 kind: kind.into(),
                 detail: "synthetic request".into(),
+                prior_tools: Vec::new(),
+                tainted_by: None,
             };
             assert_eq!(
                 Policy::ReadOnly.decide(&ask),
@@ -3807,6 +3897,8 @@ mod policy_tests {
                 tool: "fixture".into(),
                 kind: kind.into(),
                 detail: "synthetic request".into(),
+                prior_tools: Vec::new(),
+                tainted_by: None,
             };
             assert_eq!(
                 Policy::ReadOnly.decide(&ask),

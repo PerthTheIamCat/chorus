@@ -8,4 +8,5 @@ pub mod limits;
 pub mod metrics;
 pub mod orchestra;
 pub mod session;
+pub mod taint_gate;
 pub use chorus_acp::{cancel_active, sandbox, set_push_sink, shutdown, Push};

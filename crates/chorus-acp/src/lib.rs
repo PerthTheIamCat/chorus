@@ -220,6 +220,29 @@ pub(crate) fn observe_tool(title: &str, args: Option<u64>) {
     });
 }
 
+/// Called with `(title, kind)` of every top-level tool call as the agent
+/// starts it, on the thread running the turn. [`ToolObserver`] has the digest
+/// the loop guard needs; this has the ACP `kind` (`read`, `fetch`, `execute`…)
+/// that the turn-taint check (E2) needs. Thread-local for the same reason.
+pub type ToolKindObserver = Box<dyn FnMut(&str, &str)>;
+
+thread_local! {
+    static TOOL_KIND: std::cell::RefCell<Option<ToolKindObserver>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Install (or clear) this thread's tool-kind observer; returns the previous one.
+pub fn set_tool_kind_observer(observer: Option<ToolKindObserver>) -> Option<ToolKindObserver> {
+    TOOL_KIND.with(|t| std::mem::replace(&mut *t.borrow_mut(), observer))
+}
+
+pub(crate) fn observe_tool_kind(title: &str, kind: &str) {
+    TOOL_KIND.with(|t| {
+        if let Some(f) = t.borrow_mut().as_mut() {
+            f(title, kind);
+        }
+    });
+}
+
 pub(crate) fn observe_usage(used: Option<i64>, size: Option<i64>) {
     USAGE.with(|u| {
         if let Some(f) = u.borrow_mut().as_mut() {
