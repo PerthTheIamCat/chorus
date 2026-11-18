@@ -16,6 +16,7 @@ pub mod compaction;
 pub mod composer;
 pub mod computer;
 pub mod context;
+pub mod context_report;
 pub mod darwin_qos;
 pub mod diff_align;
 pub mod error;

@@ -4,6 +4,7 @@
 pub mod accounts;
 pub mod agents;
 pub mod drafts;
+pub mod inspector;
 pub mod limits;
 pub mod metrics;
 pub mod orchestra;

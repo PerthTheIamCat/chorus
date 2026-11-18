@@ -109,6 +109,7 @@ struct ContentView: View {
     @AppStorage("chorus.autoCatalogUpdates") private var autoCatalogUpdates = true
     @AppStorage("chorus.dismissedSetupCards") private var dismissedSetupCards = ""
     @AppStorage(SettingsKey.thbRate) private var thbRate = ""
+    @AppStorage(DisplayKey.currency) private var displayCurrency = "auto"
     @State private var routingInProgress = false
     @State private var routerAutoInstallAttempted = false
     @State private var pendingRoute: PendingRoute?
@@ -3394,12 +3395,8 @@ struct ContentView: View {
                         }
 
                         if let cost = totalCost {
-                            let costText: String = {
-                                if let rate = Double(thbRate.trimmingCharacters(in: .whitespaces)), rate > 0 {
-                                    return String(format: "฿%.1f", cost * rate)
-                                }
-                                return String(format: "$%.3f", cost)
-                            }()
+                            let costText = Money.format(usd: cost, currency: displayCurrency,
+                                                        thbRate: Money.rate(thbRate))
                             Text(costText)
                                 .font(.system(size: 9.5, weight: .medium, design: .monospaced))
                                 .foregroundStyle(.secondary)
@@ -3826,6 +3823,8 @@ struct ContentView: View {
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                    ContextInspectorSection(engine: engine) { text, tokens in inspected = (text, tokens) }
 
                     Button {
                         engine.assembledContext { text, tokens in inspected = (text, tokens) }
@@ -4913,6 +4912,7 @@ struct ThinkingBlock: View {
     let running: Bool
     @State private var open: Bool?
     @AppStorage("chorus.thinkingOpen") private var thinkingOpen = false
+    @AppStorage(DisplayKey.detail) private var detail = DetailLevel.normal.rawValue
 
     /// The last non-empty line, read from the tail only — the text grows by a
     /// token at a time and scanning all of it each time would be O(n²).
@@ -4925,7 +4925,8 @@ struct ThinkingBlock: View {
     }
 
     var body: some View {
-        let isOpen = open ?? (running && thinkingOpen)
+        let level = DetailLevel.from(detail)
+        let isOpen = open ?? level.thinkingOpenByDefault(userPref: running && thinkingOpen)
         VStack(alignment: .leading, spacing: 6) {
             Button {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
@@ -4939,7 +4940,7 @@ struct ThinkingBlock: View {
                     Text(running ? "กำลังคิด…" : "กระบวนการคิด")
                         .font(.caption.weight(.semibold))
                         .shimmer(running && !isOpen)
-                    if running, !isOpen, !latestLine.isEmpty {
+                    if running, !isOpen, level.showsPreviews, !latestLine.isEmpty {
                         Text(latestLine)
                             .font(.caption2).foregroundStyle(.tertiary)
                             .lineLimit(1).truncationMode(.head)

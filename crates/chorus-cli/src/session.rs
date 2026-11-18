@@ -1524,6 +1524,47 @@ impl Session {
         diff: String,
         policy: Policy,
     ) -> Result<HandoffResult> {
+        let (brief, from) = self.brief_for(to, reason, goal, done, pending, constraints, diff)?;
+
+        let c = self.store.conn();
+        let to_actor = actor::intern(c, to, to_provider)?;
+        let handoff_seq = ledger::append(
+            c,
+            &NewEvent::new(self.sess, EventKind::Handoff, to_actor, brief.to_json()),
+        )?;
+        self.announce(handoff_seq);
+
+        // Verify + Resume: the incoming agent's first turn is the brief.
+        let bridge = self.resolve_bridge(to, &[]);
+        let outcome = self.one_turn(to, &bridge, &brief.render_markdown(), policy, &[])?;
+        let agent_seqs = self.persist_outcome(&outcome, to_actor, handoff_seq)?;
+
+        Ok(HandoffResult {
+            handoff_seq,
+            from,
+            to: to.to_string(),
+            brief,
+            echo_back: outcome.message,
+            agent_seqs,
+            stop_reason: outcome.stop_reason,
+        })
+    }
+
+    /// The brief a handoff to `to` would carry, and the agent it is from.
+    /// Pure of ledger writes: [`Self::handoff`] stores and sends it, the
+    /// context inspector only previews it — one builder so the preview cannot
+    /// drift from what is really sent.
+    #[allow(clippy::too_many_arguments)]
+    fn brief_for(
+        &self,
+        to: &str,
+        reason: HandoffReason,
+        goal: &str,
+        done: Vec<String>,
+        pending: Vec<String>,
+        constraints: Vec<String>,
+        diff: String,
+    ) -> Result<(Brief, String)> {
         let from = self.last_agent().unwrap_or_else(|| "unknown".into());
         let events = self.transcript()?;
         let at = events.last().map(|(e, _)| e.t).unwrap_or(0);
@@ -1567,29 +1608,24 @@ impl Session {
                 at,
             },
         });
+        Ok((brief, from))
+    }
 
-        let c = self.store.conn();
-        let to_actor = actor::intern(c, to, to_provider)?;
-        let handoff_seq = ledger::append(
-            c,
-            &NewEvent::new(self.sess, EventKind::Handoff, to_actor, brief.to_json()),
+    /// The first message `to` would get if the user pressed hand-off now —
+    /// the Verify brief, exactly as [`Self::handoff_auto`] would send it —
+    /// without writing a `Handoff` event or starting a turn.
+    pub fn handoff_preview(&self, to: &str) -> Result<(String, String)> {
+        let ts = self.task_state()?;
+        let (brief, from) = self.brief_for(
+            to,
+            HandoffReason::Manual,
+            &ts.goal,
+            ts.done,
+            ts.pending,
+            ts.constraints,
+            String::new(),
         )?;
-        self.announce(handoff_seq);
-
-        // Verify + Resume: the incoming agent's first turn is the brief.
-        let bridge = self.resolve_bridge(to, &[]);
-        let outcome = self.one_turn(to, &bridge, &brief.render_markdown(), policy, &[])?;
-        let agent_seqs = self.persist_outcome(&outcome, to_actor, handoff_seq)?;
-
-        Ok(HandoffResult {
-            handoff_seq,
-            from,
-            to: to.to_string(),
-            brief,
-            echo_back: outcome.message,
-            agent_seqs,
-            stop_reason: outcome.stop_reason,
-        })
+        Ok((from, brief.render_markdown()))
     }
 
     /// Compare mode (design §7): fork the session once per agent, run the
@@ -2161,6 +2197,21 @@ impl Session {
     }
 
     pub fn assemble_context(&self, budget: i64) -> Result<String> {
+        Ok(self.assemble_inner(budget, true)?.text)
+    }
+
+    /// The context a turn would get right now plus the assembler's account of
+    /// it (tokens per tier, what was demoted/dropped and why, memory facts
+    /// with their relevance score). For the inspector: unlike a real turn it
+    /// writes nothing — looking must not change the `hits` that rank memory
+    /// next time — and it makes no model or network call (7.2b).
+    pub fn assemble_report(&self, budget: i64) -> Result<(String, chorus_core::context_report::ContextReport)> {
+        let a = self.assemble_inner(budget, false)?;
+        Ok((a.text, a.report))
+    }
+
+    /// `touch`: bump the facts' usage counters like a real turn does.
+    fn assemble_inner(&self, budget: i64, touch: bool) -> Result<chorus_core::context::Assembled> {
         let c = self.store.conn();
         let events = ledger::history(c, self.sess, 400)?;
         let bodies: Vec<(Event, String)> = events
@@ -2251,7 +2302,16 @@ impl Session {
             .map(|(_, b)| b.as_str())
             .unwrap_or("");
         let embedder = chorus_core::embedding::from_env();
-        let facts = memory::relevant_with(self.mem_store().conn(), 1, query, 12, embedder.as_deref())?;
+        // A real turn counts the facts it used; the inspector only looks.
+        let ranked: Vec<(memory::Fact, Option<f32>)> = if touch {
+            memory::relevant_with(self.mem_store().conn(), 1, query, 12, embedder.as_deref())?
+                .into_iter()
+                .map(|f| (f, None))
+                .collect()
+        } else {
+            memory::ranked_with(self.mem_store().conn(), 1, query, 12, embedder.as_deref())?
+        };
+        let facts: Vec<memory::Fact> = ranked.iter().map(|(f, _)| f.clone()).collect();
         let memory_items: Vec<ContextItem> = memory::render(&facts)
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -2272,7 +2332,16 @@ impl Session {
             code,
         };
         let assembler = Assembler::new(Budget::new(budget), CachedCounter::new(HeuristicCounter));
-        Ok(assembler.assemble(&input).text)
+        let mut assembled = assembler.assemble(&input);
+        for note in &mut assembled.report.memory {
+            if let Some((f, score)) = ranked.iter().find(|(f, _)| format!("- {}", f.text) == note.text) {
+                note.score = score.map(f64::from);
+                note.pinned = f.pinned;
+            }
+            // The bullet is how it is sent; the inspector shows the fact.
+            note.text = note.text.trim_start_matches("- ").to_string();
+        }
+        Ok(assembled)
     }
 
     /// The workspace's symbols, ranked towards the files this session has
@@ -3090,6 +3159,7 @@ impl Session {
             .collect::<Vec<_>>()
             .join("\n");
         crate::metrics::record_speed(self.sess, &streamed, outcome.stream_ms);
+        crate::metrics::record_timing(self.sess, outcome.ttft_ms, outcome.prompt_usage.as_ref());
         if let Some(&last) = seqs.last() {
             self.announce(last);
         }

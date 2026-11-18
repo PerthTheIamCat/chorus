@@ -26,6 +26,7 @@ struct ChorusApp: App {
         WindowGroup("Chorus") {
             ContentView()
                 .environmentObject(engine)
+                .chorusAppearance()
                 .frame(minWidth: 820, minHeight: 560)
                 .onAppear {
                     // A bare `swift build` executable has no app bundle, so

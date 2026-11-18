@@ -545,6 +545,9 @@ cache ใน `RepoMapCache` (หน่วยความจำ ไม่ลง�
 - เทสต์ตั้ง `CHORUS_SECRETS_BACKEND=memory` — `user_vault()` เช็คทุกครั้ง ไม่งั้น `cargo test` บน Mac จะเขียนค่าปลอมลง Keychain จริงของคนรัน · Keychain ล็อก (CI) → เก็บในหน่วยความจำรอบนี้แทน (`fallback`) ยัง mask และ inject ได้
 - เทสต์สร้าง key ปลอมตอนรัน (`fake()`) ห้ามเขียนเป็น literal — GitHub push protection จะบล็อก push
 
+### 7.2c ตัวตรวจ context ต้องอ่านอย่างเดียว (21 ต.ค. 2026 → 18 พ.ย. 2026)
+`Session::assemble_report` / `inspector::inspect` ประกอบ context เหมือนเทิร์นจริงแต่ **ไม่นับ `hits` ของความจำ** (`memory::ranked_with` แยกจาก `relevant_with` ที่นับ) — ถ้านับ ทุกครั้งที่เปิดแผงจะเปลี่ยนอันดับความจำของเทิร์นถัดไป · ผล `ContextReport` มาจาก bookkeeping ของ assembler เอง ไม่มี model call · ตัวเลข cache hit มาจาก `usage` ใน reply ของ `session/prompt` (bridge ทั้งสอง `inputTokens` **ไม่รวม** cache) ไม่ใช่ `usage_update` · preview "ถ้าส่งให้ agent อื่น" ใช้ `brief_for` ตัวเดียวกับ `handoff()` จึงเพี้ยนจากของจริงไม่ได้ · ขนาดหน้าต่างของ agent ที่ยังไม่เคยรันไม่มีทางรู้ (ACP ไม่ให้ถามก่อนเปิด session) → ใช้ budget เดิมและบอกผู้ใช้ ห้ามเดาเลข
+
 ### 7.3 repo เงาสำหรับ checkpoint
 ต้องยึด `.gitignore` ของผู้ใช้ ไม่งั้น `.chorus/` จะโตกว่าโปรเจกต์จริง
 
