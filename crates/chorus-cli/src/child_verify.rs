@@ -323,8 +323,27 @@ mod tests {
     fn done_when_runs_in_the_worktree_for_a_trusted_project() {
         let home = tempfile::tempdir().unwrap();
         let ws = tempfile::tempdir().unwrap();
-        let wt = tempfile::tempdir().unwrap();
-        std::fs::write(wt.path().join("ok.txt"), "x").unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git").args(args).current_dir(ws.path()).output().unwrap().status.success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "t@test.local"]);
+        git(&["config", "user.name", "T"]);
+        std::fs::write(ws.path().join("a"), "x").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "i"]);
+        let wt_path = elsewhere.path().join("wt");
+        git(&["worktree", "add", "-b", "b1", wt_path.to_str().unwrap()]);
+        std::fs::write(wt_path.join("ok.txt"), "x").unwrap();
+        struct Wt(std::path::PathBuf);
+        impl Wt {
+            fn path(&self) -> &Path {
+                &self.0
+            }
+        }
+        let wt = Wt(wt_path);
         let trust = TrustStore::at(home.path().join("trust.json"));
         let confine = |argv: &[String], _: &Path| Ok(argv.to_vec());
 
