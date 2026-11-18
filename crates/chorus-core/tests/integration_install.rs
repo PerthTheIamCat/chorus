@@ -48,14 +48,14 @@ fn bundled_skill_plan_install_remove_round_trip() {
 
 #[test]
 fn unknown_action_is_rejected_by_plan() {
-    assert!(cat::plan("rtk", "explode", Path::new("/tmp")).is_err());
+    assert!(cat::plan("serena", "explode", Path::new("/tmp")).is_err());
 }
 
 /// PATH without any directory that already holds one of the tools under test,
 /// so the developer's own copies are not adopted instead of installed.
 fn path_without_tools() {
     let cleaned: Vec<_> = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .filter(|d| !["serena", "graft", "headroom"].iter().any(|t| d.join(t).exists()))
+        .filter(|d| !["serena", "chrome-devtools-mcp"].iter().any(|t| d.join(t).exists()))
         .collect();
     std::env::set_var("PATH", std::env::join_paths(cleaned).unwrap());
 }
@@ -72,11 +72,11 @@ fn npm_install_remove_leaves_nothing() {
     path_without_tools();
     let project = home.path().join("demo");
     std::fs::create_dir_all(&project).unwrap();
-    cat::perform("install_enable", "graft", &project).unwrap();
-    assert!(home.path().join(".chorus/tools/graft/0.18.0/node_modules/.bin/graft").exists());
+    cat::perform("install_enable", "chrome-devtools", &project).unwrap();
+    assert!(home.path().join(".chorus/tools/chrome-devtools/1.11.0/node_modules/.bin/chrome-devtools-mcp").exists());
     assert!(!home.path().join(".npm").exists(), "npm cache must stay inside the tool dir");
-    cat::perform("remove", "graft", &project).unwrap();
-    assert!(!home.path().join(".chorus/tools/graft").exists());
+    cat::perform("remove", "chrome-devtools", &project).unwrap();
+    assert!(!home.path().join(".chorus/tools/chrome-devtools").exists());
     assert!(!home.path().join(".npm").exists());
     assert!(cat::load_state().unwrap().installed.is_empty());
 }
@@ -151,23 +151,66 @@ fn tool_buttons_warn_and_only_touch_what_they_say() {
     std::env::set_var("PATH", "/usr/bin:/bin");
     let bin = home.path().join(".local/bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let graft = bin.join("graft");
-    std::fs::write(&graft, "#!/bin/sh\necho \"graft $@\"\n").unwrap();
-    std::fs::set_permissions(&graft, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let serena = bin.join("serena");
+    std::fs::write(&serena, "#!/bin/sh\necho \"serena $@\"\n").unwrap();
+    std::fs::set_permissions(&serena, std::fs::Permissions::from_mode(0o755)).unwrap();
     let project = home.path().join("demo");
-    std::fs::create_dir_all(project.join("graft")).unwrap();
-    std::fs::write(project.join("graft/a.md"), "x").unwrap();
+    std::fs::create_dir_all(&project).unwrap();
     std::fs::write(project.join("main.rs"), "fn main(){}").unwrap();
 
-    let actions = cat::tool_actions("graft", &project);
+    let actions = cat::tool_actions("serena", &project);
     assert!(actions.iter().all(|a| !a.effects.is_empty()), "every button carries a warning");
-    assert!(actions.iter().find(|a| a.key == "clear").unwrap().danger);
 
-    let out = cat::run_action("graft", "telemetry", &project).unwrap();
-    assert!(out.ok && out.output.contains("telemetry status"));
-    assert!(cat::run_action("graft", "format-disk", &project).is_err());
-
-    cat::run_action("graft", "clear", &project).unwrap();
-    assert!(!project.join("graft").exists());
+    let out = cat::run_action("serena", "index", &project).unwrap();
+    assert!(out.ok && out.output.contains("project index"));
+    assert!(cat::run_action("serena", "format-disk", &project).is_err());
+    assert!(cat::run_action("serena", "dashboard", &project).is_err(), "a url button is not a command");
     assert!(project.join("main.rs").exists(), "source files stay");
+}
+
+/// Entries pulled from the catalog: their records and Chorus-owned files go,
+/// a copy the user installed stays, and a second pass has nothing to do.
+#[test]
+fn retired_entries_are_forgotten_without_touching_user_installs() {
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("HOME", home.path());
+    let project = home.path().join("demo");
+    std::fs::create_dir_all(&project).unwrap();
+    let project_key = std::fs::canonicalize(&project).unwrap().to_string_lossy().into_owned();
+
+    let owned = home.path().join(".chorus/tools/headroom/0.39.1");
+    std::fs::create_dir_all(&owned).unwrap();
+    let user_bin = home.path().join("bin/rtk");
+    std::fs::create_dir_all(user_bin.parent().unwrap()).unwrap();
+    std::fs::write(&user_bin, "#!/bin/sh\n").unwrap();
+
+    let record = |id: &str, method: cat::InstallMethod, path: &Path, owned: Vec<std::path::PathBuf>| cat::InstallRecord {
+        id: id.into(),
+        version: "old".into(),
+        source: String::new(),
+        license: String::new(),
+        method,
+        runtime_path: path.to_path_buf(),
+        artifact_integrity: None,
+        owned_files: owned,
+        health: cat::Health { healthy: true, detail: String::new() },
+    };
+    let mut state = cat::load_state().unwrap();
+    state.installed.insert("headroom".into(), record("headroom", cat::InstallMethod::Uv, &owned.join("bin/headroom"), vec![owned.clone()]));
+    state.installed.insert("rtk".into(), record("rtk", cat::InstallMethod::Homebrew, &user_bin, Vec::new()));
+    state.adopted.insert("rtk".into());
+    state.projects.entry(project_key).or_default().extend(["headroom".to_string(), "rtk".to_string()]);
+    cat::save_state(&state).unwrap();
+
+    let cleared = cat::forget_retired().unwrap();
+    assert_eq!(cleared, ["rtk", "headroom"]);
+    let after = cat::load_state().unwrap();
+    assert!(after.installed.is_empty() && after.adopted.is_empty() && after.projects.is_empty());
+    assert!(!home.path().join(".chorus/tools/headroom").exists(), "Chorus-owned files go");
+    assert!(user_bin.exists(), "a tool the user installed is never deleted");
+    assert!(cat::enabled_for(&project).unwrap().is_empty());
+    assert!(cat::get("headroom").is_none() && cat::get("rtk").is_none() && cat::get("graft").is_none());
+
+    assert!(cat::forget_retired().unwrap().is_empty(), "second pass has nothing to do");
 }

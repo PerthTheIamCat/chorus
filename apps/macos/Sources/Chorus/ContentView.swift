@@ -301,7 +301,7 @@ struct ContentView: View {
                 let need = SetupNeed.catalogUnavailable
                 if visible(need) { return need }
             }
-            let order = ["serena", "graft", "rtk", "headroom"]
+            let order = ["serena"]
             for id in order {
                 if let entry = engine.catalog.first(where: { $0.id == id && (!$0.isInstalled || ($0.isHealthy == true && !$0.isEnabledForProject)) }) {
                     let need = SetupNeed.integration(entry)
@@ -326,9 +326,6 @@ struct ContentView: View {
     private func integrationDescription(_ id: String) -> String {
         switch id {
         case "serena": "ช่วย agent ค้นหาและแก้โค้ดในโปรเจกต์"
-        case "graft": "ช่วยหาโค้ดและดูความเชื่อมโยงของส่วนต่าง ๆ"
-        case "rtk": "ย่อผลลัพธ์จากคำสั่งให้ agent อ่านง่ายขึ้น"
-        case "headroom": "ช่วยจัดการข้อมูลที่ส่งให้ agent"
         default: "เพิ่มความสามารถให้ agent ในโปรเจกต์นี้"
         }
     }

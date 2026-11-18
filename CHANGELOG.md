@@ -7,7 +7,7 @@
 
 ### Added
 
-- **session ใหม่รู้ว่าเคยทำอะไรไว้:** เมื่อเปิด session ใหม่ในโฟลเดอร์ที่เคยมี session มาก่อน task state จะมีบรรทัด `previous sessions` ไม่เกิน 3 บรรทัด (เลข session · เมื่อไหร่ · agent · เป้าหมาย · ค้าง/ล่าสุด) อ่านจาก ledger กับตาราง `summary` ที่มีอยู่ ไม่เรียกโมเดล ไม่ลงไฟล์ที่ฉายให้ agent
+- **session ใหม่รู้ว่าเคยทำอะไรไว้:** เมื่อเปิด session ใหม่ในโฟลเดอร์ที่เคยมี session มาก่อน task state จะมีบรรทัด `previous sessions` ไม่เกิน 3 บรรทัด (เลข session · เมื่อไหร่ · agent · เป้าหมาย · ค้าง/ล่าสุด) อ่านจาก ledger กับตาราง `summary` ที่มีอยู่ ไม่เรียกโมเดล ไม่ลงไฟล์ที่ฉายให้ agent · เทิร์นแรกของ session ใหม่ก็ได้รับบล็อกนี้ด้วย
 - **เครื่องมือ MCP `chorus_search_history`:** agent ค้นข้อความและการตัดสินใจใน session ก่อน ๆ ของโปรเจกต์ได้เอง (ผลสั้น: session · seq · agent · ข้อความ)
 - **`chorus_spawn_agent` แบบมีโครงสร้าง:** ฟิลด์ `goal` (จำเป็น), `files_owned`, `out_of_scope`, `output`, `done_when` · ยังรับ `task` แบบเดิม · ถ้า `files_owned` ซ้อนกับ agent พี่น้องที่ยังรันอยู่ จะปฏิเสธพร้อมบอกเหตุผล · เก็บในคอลัมน์ `task` เดิม ไม่มีการเปลี่ยน schema
 - **เห็น todo ของ agent เอง:** แผนที่ Codex/Claude ส่งมาผ่าน ACP (`plan`) แสดงเป็นรายการ todo ในเธรดทันที โดย agent ไม่ต้องเรียกเครื่องมือของ Chorus · แผนใหม่แทนแผนเดิมทั้งชุด และแผนล่าสุดถูกเก็บกับ session (เปิดซ้ำก็ยังเห็น) · แผนของ subagent ไม่ปนกับแผนหลัก
@@ -26,6 +26,11 @@
 ### Fixed
 
 - **ความจำที่ agent เสนอด้วย scope 0 (user-level; stored in the same per-project memory, not shared across projects) หรือ 2 ถูกอนุมัติแล้วไม่โผล่ที่ไหนเลย:** ทุกที่ที่อ่านความจำ (context, แท็บ Memory, ไฟล์ที่ฉายให้ agent) อ่าน scope 0 ด้วยแล้ว และ scope 2 (session ซึ่งไม่มี id ให้ผูก) ถูกนับเป็นความจำของโปรเจกต์ · tool `memory_propose` รับแค่ 0/1
+
+### Removed
+
+- **ถอด Graft, RTK และ Headroom ออกจากรายการ extension:** ผลวัดอิสระบน SWE-bench Verified 100 งาน (Dasein code-compression-bench) พบว่า Headroom ทำให้ค่าใช้จ่ายเพิ่ม 44% และ RTK เพิ่ม 13% โดยแก้งานได้ไม่มากขึ้น (RTK แก้ได้ 54 งาน เทียบกับ 57 เมื่อไม่ใช้) · ตัวเลขของ Graft มาจากผู้ทำเองเท่านั้น และงานซ้ำกับ repo map ที่ Chorus มีอยู่แล้ว · ที่เหลือคือ Serena, Chrome DevTools และ Chorus Review
+- ของที่เคยติดตั้งไว้ถูกล้างให้เองตอนเปิดรายการ extension: Chorus เลิกส่งให้ agent และลบไฟล์ที่ Chorus ติดตั้งเองใน `~/.chorus/tools/` · ตัวที่ติดตั้งด้วย Homebrew หรือติดตั้งเองไม่ถูกลบ ถ้าไม่ใช้แล้วให้รัน `brew uninstall rtk`
 
 ## [0.2.6] - 2026-10-26
 
