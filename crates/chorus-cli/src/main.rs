@@ -1013,10 +1013,11 @@ fn skills_cmd(args: &[String]) -> Result<()> {
         println!("      {}", k.description);
         println!("      ต้นฉบับ  {}", k.source_path().display());
         println!("      Claude   {}", k.claude_path().display());
-        println!("      Codex    AGENTS.md § Skills (หนึ่งบรรทัด)");
+        println!("      Codex    {}", k.agents_path().display());
+        println!("      Antigravity  {}", k.agents_path().display());
     }
 
-    rule("หน้าตาที่ agent ที่ไม่มี skill loader จะเห็น");
+    rule("index แบบย่อ (ใช้กับ agent ที่ไม่มี skill loader — Codex/Antigravity อ่านไฟล์ข้างบนเองแล้ว)");
     for line in chorus_core::skills::index(&found).lines() {
         println!("  │ {line}");
     }

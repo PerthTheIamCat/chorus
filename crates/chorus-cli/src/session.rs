@@ -674,7 +674,9 @@ impl chorus_core::agent_control::ChildRunner for SessionChildRunner {
 /// Files Chorus itself writes into a workspace before a turn: the projected
 /// agent files and Claude skills (CLAUDE.md 7.11, 7.16).
 fn is_projected_file(path: &str) -> bool {
-    matches!(path, "CLAUDE.md" | "AGENTS.md" | "GEMINI.md") || path.starts_with(".claude/skills/")
+    matches!(path, "CLAUDE.md" | "AGENTS.md" | "GEMINI.md")
+        || path.starts_with(".claude/skills/")
+        || path.starts_with(".agents/skills/")
 }
 
 /// One agent event as a ledger row. `children` maps a provider subagent's
@@ -2737,16 +2739,14 @@ impl Session {
             .unwrap_or_default();
         let task = self.task_state().map(|t| t.render()).unwrap_or_default();
 
-        // Skills are projected whichever way this agent can read them: real
-        // `.claude/skills/` files for Claude, a one-line-each index in the
-        // instruction file for everyone else.
+        // Skills are projected as real files where each agent's loader looks:
+        // `.claude/skills/` for Claude, `.agents/skills/` for Codex and
+        // Antigravity. No index in the instruction file any more — both
+        // loaders read name + description themselves, so an index would pay
+        // for the same skills twice.
         let found = skills::discover(&self.cwd);
-        let skill_index = if target == AgentFile::Claude {
-            self.project_claude_skills(&found);
-            String::new()
-        } else {
-            skills::index(&found)
-        };
+        self.project_skills(&found, target == AgentFile::Claude);
+        let skill_index = String::new();
 
         if project.trim().is_empty()
             && facts.trim().is_empty()
@@ -2768,16 +2768,17 @@ impl Session {
         let _ = std::fs::write(&path, out);
     }
 
-    /// Write each skill where Claude Code's loader will find it.
+    /// Write each skill where the agent's loader will find it
+    /// (`.claude/skills/` for Claude, `.agents/skills/` for Codex/Antigravity).
     ///
     /// Same contract as the instruction files: our copies carry the generated
     /// marker, and a skill the user wrote (or edited) by hand under
     /// `.claude/skills/` is left exactly as it is. Overwriting someone's own
     /// skill because a file of ours happens to share its name would be the
     /// worst kind of "one set of skills".
-    fn project_claude_skills(&self, found: &[skills::Skill]) {
+    fn project_skills(&self, found: &[skills::Skill], claude: bool) {
         for k in found {
-            let path = self.cwd.join(k.claude_path());
+            let path = self.cwd.join(if claude { k.claude_path() } else { k.agents_path() });
             let existing = std::fs::read_to_string(&path).ok();
             match projector::drift_raw(existing.as_deref()) {
                 Drift::Foreign | Drift::Edited => continue,
