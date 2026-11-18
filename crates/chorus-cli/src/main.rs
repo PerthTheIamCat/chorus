@@ -733,6 +733,36 @@ fn bench_tool_output_and_memory(dir: &Path) -> Result<()> {
             ledger::append(c, &NewEvent::new(sess, EventKind::Msg, agent, format!("ต่อไป {i}")))?;
         }
     }
+    // The cost of keeping output: the same session stored with titles only
+    // (what the ledger held before) next to the one above.
+    let bare_path = dir.join("toolout-bare.db");
+    let _ = std::fs::remove_file(&bare_path);
+    {
+        let bare = Session::create(&bare_path, &cwd, "bench tool output (titles only)")?;
+        let bsess = bare.session_id();
+        let store = Store::open(&bare_path)?;
+        let c = store.conn();
+        let user = actor::intern(c, "user", "human")?;
+        let agent = actor::intern(c, "codex", "openai")?;
+        ledger::append(c, &NewEvent::new(bsess, EventKind::Msg, user, "แก้ N+1 ใน order list"))?;
+        for i in 0..40 {
+            let (title, status) = if i % 4 == 3 { ("cargo test".to_string(), "failed") } else { (format!("read src/order/file{i}.ts"), "completed") };
+            ledger::append(c, &NewEvent::new(bsess, EventKind::ToolCall, agent, format!("execute: {title}")))?;
+            ledger::append(c, &NewEvent::new(bsess, EventKind::ToolResult, agent, chorus_core::render::encode_tool_result(&title, status, None, "")))?;
+        }
+        for i in 0..2 {
+            ledger::append(c, &NewEvent::new(bsess, EventKind::Msg, agent, format!("ต่อไป {i}")))?;
+        }
+    }
+    let kb = |p: &Path| {
+        // WAL mode: fold the log into the main file before measuring it.
+        if let Ok(st) = Store::open(p) {
+            let _ = st.conn().execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+        }
+        std::fs::metadata(p).map(|m| m.len() as f64 / 1024.0).unwrap_or(0.0)
+    };
+    println!("\n── tool output on disk ────────────────────────────────");
+    println!("  store.db, 81 events: titles only {:.1} KB → with output {:.1} KB (blob dedup + zstd)", kb(&bare_path), kb(&db_path));
     let s = Session::open(&db_path, sess)?;
     let counter = HeuristicCounter;
     std::env::set_var("CHORUS_R1_TOOL_REFS", "off");
