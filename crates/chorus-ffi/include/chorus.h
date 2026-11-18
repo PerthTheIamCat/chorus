@@ -184,6 +184,7 @@ char *chorus_set_memory_db(ChorusEngine *e, const char *path);
 /* Live signals from every running turn, one JSON push per call, on the
  * turn's thread: {"session_id":N,"seq":N,"kind":"...","text":"..."}.
  * kind = thought|message|tool|tool_done ("status\ttitle")|usage ("used\tsize")
+ *      |plan (JSON [{text,done,in_progress}] — the agent's whole todo list)
  *      |events (ledger reaches seq: pull the delta)|status (running|idle|failed).
  * `seq` = newest ledger seq known for that session. String valid only during
  * the call. NULL cb clears. Signals only; a dropped push is recovered by the
@@ -541,6 +542,14 @@ char *chorus_resume_subagent(const char *db_path, int64_t subagent_id);
 char *chorus_message_subagent(const char *db_path, int64_t subagent_id, const char *message);
 char *chorus_cancel_orchestration(const char *db_path, int64_t parent_sess);
 char *chorus_get_checklist_json(const char *db_path, int64_t session_id);
+
+/* Metrics strip numbers. Reads the store by path (no engine queue); `account` =
+ * relay name ("codex", "claude@work") for the limit, "" skips it — the limit
+ * lookup may spawn the agent CLI on a cold cache, call off the main thread.
+ * Any field may be null = hide it. tok_per_s is an estimate.
+ * JSON: {"ok":true,"metrics":{"tok_per_s","tok_per_s_estimated","cache_hit_pct",
+ *        "cost_usd","context_pct","limit_pct","limit_window"}} */
+char *chorus_session_metrics(const char *db_path, int64_t session_id, const char *account);
 char *chorus_update_checklist_json(const char *db_path, int64_t session_id, const char *items_json);
 
 /* Integrated terminal (PTY). Callbacks run on a reader thread. */

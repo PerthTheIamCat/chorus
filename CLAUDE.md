@@ -344,14 +344,17 @@ deny กับ read-only ให้ผลเหมือนกันเป๊ะ 
 
 ### 7.16 Skill registry — เขียนที่เดียว ฉายตามที่แต่ละเจ้าอ่านได้
 
-ต้นฉบับอยู่ที่ `.chorus/skills/<name>/SKILL.md` แล้วฉายออกสองแบบ:
+ต้นฉบับอยู่ที่ `.chorus/skills/<name>/SKILL.md` แล้วฉายเป็นไฟล์จริงตามที่ loader ของแต่ละเจ้าหา:
 
-- **Claude** ได้ skill จริง เขียนลง `.claude/skills/<name>/SKILL.md` ตาม path ที่ loader
-  มันหา (ยืนยันจาก code.claude.com/docs/en/skills 12 ก.ย. 2026)
-- **Codex / Gemini** ไม่มีระบบ skill เลย → ได้ index บรรทัดละ skill ใน AGENTS.md
-  (ชื่อ | ใช้เมื่อไหร่ | path) พอให้มันเปิดไฟล์อ่านเองได้ โดยไม่ต้องยัดทั้งเอกสารเข้า prompt
-
-**ห้ามใส่ index ให้ Claude ด้วย** — มันอ่านไฟล์จริงอยู่แล้ว ใส่ซ้ำ = จ่าย token ซ้ำ
+- **Claude** → `.claude/skills/<name>/SKILL.md` (code.claude.com/docs/en/skills, 12 ก.ย. 2026)
+- **Codex / Antigravity** → `.agents/skills/<name>/SKILL.md` (18 พ.ย. 2026: เดิมบันทึกไว้ว่า Codex/Gemini
+  ไม่มีระบบ skill — **ล้าสมัยแล้ว**) · Codex สแกน `.agents/skills` จาก cwd ขึ้นไปถึง repo root + `~/.agents/skills`
+  โหลด name+description ก่อน, ตาม symlink, ชื่อซ้ำไม่ merge (developers.openai.com/codex/skills → learn.chatgpt.com/docs/build-skills) ·
+  Antigravity อ่าน `<workspace>/.agents/skills` และโฟลเดอร์แม่ถึง repo root, global คือ `~/.gemini/config/skills`
+  ไม่ใช่ `~/.agents/skills` (antigravity.google/docs/skills)
+- **ไม่เขียน index ลง AGENTS.md แล้ว** — ทุกเจ้าอ่านไฟล์จริงเอง ใส่ index ซ้ำ = จ่าย token ซ้ำ
+  (`skills::index` ยังอยู่ให้ `chorus skills` กับ agent ที่ไม่มี loader)
+- ⚠️ ฝั่ง Codex ข้อมูลตารางโฟลเดอร์ได้จากสรุปของโมเดลเพราะหน้าเอกสารยาวเกิน · **การโหลดผ่าน bridge codex-acp ยังไม่เคยทดสอบบน Mac**
 
 marker ของ skill ต้องอยู่ **ท้ายไฟล์** เพราะ frontmatter ต้องเป็นบรรทัดแรกไม่งั้น
 loader ของ Claude parse ไม่ออก → ต้องใช้ `drift_raw()` แยกจาก `drift()` ถ้าใช้ตัวเดิม

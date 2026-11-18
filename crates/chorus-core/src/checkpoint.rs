@@ -23,6 +23,8 @@ pub const PROJECTED_EXCLUDES: &[&str] = &[
     ":(exclude,top)GEMINI.md",
     ":(exclude,top).claude/skills",
     ":(exclude,top).claude/skills/**",
+    ":(exclude,top).agents/skills",
+    ":(exclude,top).agents/skills/**",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -33,6 +35,10 @@ pub struct FileDiffStat {
     pub is_binary: bool,
     pub is_lockfile: bool,
     pub is_projected: bool,
+    /// A test file by path (see [`is_test_path`]). Additive: old JSON without
+    /// the field reads as `false`.
+    #[serde(default)]
+    pub is_test: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +69,78 @@ pub fn is_lockfile(path: &str) -> bool {
     )
 }
 
+/// Is `path` a test file, judged by its name and folders alone?
+///
+/// An agent that makes a failing test pass by editing the test has not done
+/// the task, and the person reviewing wants that flagged. Path conventions
+/// are all the shadow repo can see: a `#[cfg(test)]` module inside a source
+/// file is not found this way, and neither is a test with an unusual name.
+/// Prose (`.md`, `.txt`) inside a test folder is not a test.
+pub fn is_test_path(path: &str) -> bool {
+    let p = path.trim().trim_start_matches("./").replace('\\', "/");
+    let mut parts: Vec<&str> = p.split('/').filter(|c| !c.is_empty()).collect();
+    let Some(name) = parts.pop() else {
+        return false;
+    };
+    let lower = name.to_lowercase();
+    if lower.ends_with(".md") || lower.ends_with(".txt") || lower.ends_with(".lock") {
+        return false;
+    }
+    if parts.iter().any(|d| {
+        matches!(
+            d.to_lowercase().as_str(),
+            "test" | "tests" | "__tests__" | "spec" | "specs"
+        )
+    }) {
+        return true;
+    }
+    if lower == "conftest.py" || lower.starts_with("test_") {
+        return true;
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) => (s, e),
+        None => (name, ""),
+    };
+    let stem_lower = stem.to_lowercase();
+    // foo_test.go · foo_spec.rb · foo.test.ts · foo.spec.js
+    if stem_lower.ends_with("_test")
+        || stem_lower.ends_with("_spec")
+        || stem_lower.ends_with(".test")
+        || stem_lower.ends_with(".spec")
+    {
+        return true;
+    }
+    // FooTest.java · FooTests.swift · FooTest.kt — CamelCase only, so
+    // `Latest.rs` and `Contest.py` stay out.
+    !ext.is_empty()
+        && stem.len() > 4
+        && (stem.ends_with("Test") || stem.ends_with("Tests"))
+}
+
+/// Paths in a unified diff (`+++ b/x`, or `--- a/x` for a deletion) that are
+/// test files, in diff order and without repeats.
+pub fn test_files_in_diff(diff: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut prev_old: Option<&str> = None;
+    for line in diff.lines() {
+        let path = if let Some(p) = line.strip_prefix("+++ b/") {
+            Some(p)
+        } else if line == "+++ /dev/null" {
+            prev_old
+        } else {
+            None
+        };
+        prev_old = line.strip_prefix("--- a/");
+        if let Some(p) = path {
+            let p = p.trim();
+            if is_test_path(p) && !out.iter().any(|o| o == p) {
+                out.push(p.to_string());
+            }
+        }
+    }
+    out
+}
+
 pub fn is_projected_file(path: &str) -> bool {
     let p = path.trim_start_matches("./");
     p == "CLAUDE.md"
@@ -70,6 +148,8 @@ pub fn is_projected_file(path: &str) -> bool {
         || p == "GEMINI.md"
         || p.starts_with(".claude/skills/")
         || p == ".claude/skills"
+        || p.starts_with(".agents/skills/")
+        || p == ".agents/skills"
 }
 
 /// Patterns the shadow repo always ignores, on top of the user's
@@ -331,6 +411,7 @@ impl Checkpoint {
 
             let lock = is_lockfile(&path);
             let proj = is_projected_file(&path);
+            let test = is_test_path(&path);
 
             files.push(FileDiffStat {
                 path,
@@ -339,6 +420,7 @@ impl Checkpoint {
                 is_binary,
                 is_lockfile: lock,
                 is_projected: proj,
+                is_test: test,
             });
         }
 

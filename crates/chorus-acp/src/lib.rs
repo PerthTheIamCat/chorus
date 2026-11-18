@@ -196,6 +196,30 @@ pub fn set_usage_observer(observer: Option<UsageObserver>) -> Option<UsageObserv
     USAGE.with(|u| std::mem::replace(&mut *u.borrow_mut(), observer))
 }
 
+/// Called with the title of every top-level tool call as the agent starts it,
+/// plus a digest of its arguments (`rawInput` and `locations`) when the frame
+/// carried any, on the thread running the turn. A title alone can be generic
+/// ("Read file"), so callers that act on repeats need the digest. Thread-local like [`UsageObserver`]: the
+/// session that owns the turn installs it around its own `prompt` call.
+pub type ToolObserver = Box<dyn FnMut(&str, Option<u64>)>;
+
+thread_local! {
+    static TOOL: std::cell::RefCell<Option<ToolObserver>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Install (or clear) this thread's tool-call observer; returns the previous one.
+pub fn set_tool_observer(observer: Option<ToolObserver>) -> Option<ToolObserver> {
+    TOOL.with(|t| std::mem::replace(&mut *t.borrow_mut(), observer))
+}
+
+pub(crate) fn observe_tool(title: &str, args: Option<u64>) {
+    TOOL.with(|t| {
+        if let Some(f) = t.borrow_mut().as_mut() {
+            f(title, args);
+        }
+    });
+}
+
 pub(crate) fn observe_usage(used: Option<i64>, size: Option<i64>) {
     USAGE.with(|u| {
         if let Some(f) = u.borrow_mut().as_mut() {
@@ -218,7 +242,7 @@ pub mod push {
     //! nothing here is written anywhere.
     //!
     //! Kinds: `thought` · `message` · `tool` · `tool_done` (`status\ttitle`) ·
-    //! `usage` (`used\tsize`) · `events` (new rows up to `seq`) · `status`
+    //! `usage` (`used\tsize`) · `plan` (JSON checklist) · `events` (new rows up to `seq`) · `status`
     //! (`running` | `idle` | `failed`).
 
     use std::cell::Cell;
@@ -800,6 +824,18 @@ pub mod mock {
                 .and_then(|i| a.get(i + 1).cloned())
         };
 
+        // `--serve-mock --repeat-tool <N>` starts the same tool call N times
+        // in a row (50 ms apart) before the normal turn — an agent stuck in a
+        // loop, for the client's repeat guard to catch.
+        let repeat_tool: u32 = {
+            let a: Vec<String> = std::env::args().collect();
+            a.iter()
+                .position(|x| x == "--repeat-tool")
+                .and_then(|i| a.get(i + 1))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
+        };
+
         // `--serve-mock --replay <file.jsonl>` answers every `session/prompt`
         // by replaying a recorded `session/update` stream: one JSON object per
         // line, `{"sessionId": ..., "update": {...}}`. A missing `sessionId`,
@@ -913,6 +949,20 @@ pub mod mock {
                     }
                     if let Some(name) = &rogue {
                         let _ = std::fs::write(std::path::Path::new(&cwd).join(name), "pwned\n");
+                    }
+                    for i in 0..repeat_tool {
+                        update(
+                            session,
+                            json!({
+                                "sessionUpdate": "tool_call",
+                                "toolCallId": format!("loop{i}"),
+                                "title": "Run `cargo test`",
+                                "kind": "execute",
+                                "rawInput": {"command": "cargo test"},
+                                "status": "pending"
+                            }),
+                        )?;
+                        std::thread::sleep(std::time::Duration::from_millis(50));
                     }
                     // Secrets tests: record exactly what reached the agent (its
                     // prompt and its `CHORUS_SECRET_*` environment), then say
