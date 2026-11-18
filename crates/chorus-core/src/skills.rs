@@ -14,10 +14,14 @@
 //! - **Claude** gets real skills: each one written to
 //!   `.claude/skills/<name>/SKILL.md`, where its loader already looks
 //!   (verified against code.claude.com/docs/en/skills, 12 Sep 2026).
-//! - **Codex and Gemini** have nowhere to put a skill, so they get a compact
-//!   index in their instruction file instead: name, one line of description,
-//!   and the path. That is enough for an agent with a file reader to open the
-//!   one it needs, and it costs a line per skill rather than a whole document.
+//! - **Codex and Antigravity** both discover skills natively in
+//!   `.agents/skills/<name>/SKILL.md` (Codex walks from the cwd up to the repo
+//!   root; Antigravity reads the workspace root and its parents), so they get
+//!   the same copy there. Sources: developers.openai.com/codex/skills
+//!   (redirects to learn.chatgpt.com/docs/build-skills) and
+//!   antigravity.google/docs/skills, 18 Nov 2026. This replaces the compact
+//!   index in `AGENTS.md`, which paid for the same skills twice in a prompt.
+//!   [`index`] remains for `chorus skills` and for agents with no loader.
 //!
 //! Pure string and directory work — no ledger, no network.
 
@@ -28,6 +32,9 @@ pub const SKILLS_DIR: &str = ".chorus/skills";
 
 /// Where Claude Code looks for project skills.
 pub const CLAUDE_SKILLS_DIR: &str = ".claude/skills";
+
+/// Where Codex and Antigravity look for project skills.
+pub const AGENTS_SKILLS_DIR: &str = ".agents/skills";
 
 /// One skill as the registry sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +55,11 @@ impl Skill {
     /// Where this skill is written for Claude, relative to the workspace.
     pub fn claude_path(&self) -> PathBuf {
         Path::new(CLAUDE_SKILLS_DIR).join(&self.name).join("SKILL.md")
+    }
+
+    /// Where this skill is written for Codex and Antigravity, relative to the workspace.
+    pub fn agents_path(&self) -> PathBuf {
+        Path::new(AGENTS_SKILLS_DIR).join(&self.name).join("SKILL.md")
     }
 
     /// The path an agent without a skill loader should be told to read.
@@ -125,7 +137,7 @@ pub fn visible_roots(cwd: &Path, home: Option<&Path>) -> Vec<(&'static str, Path
     let mut roots = vec![
         ("chorus", cwd.join(SKILLS_DIR)),
         ("project", cwd.join(CLAUDE_SKILLS_DIR)),
-        ("project", cwd.join(".agents/skills")),
+        ("project", cwd.join(AGENTS_SKILLS_DIR)),
     ];
     if let Some(home) = home {
         roots.push(("agents", home.join(".agents/skills")));
@@ -255,7 +267,7 @@ pub fn index(skills: &[Skill]) -> String {
 /// a projected skill is Chorus's own output, and blaming an agent for it is
 /// the same bug the `CLAUDE.md` filter already fixed once.
 pub fn is_projected(path: &str) -> bool {
-    path.starts_with(CLAUDE_SKILLS_DIR)
+    path.starts_with(CLAUDE_SKILLS_DIR) || path.starts_with(AGENTS_SKILLS_DIR)
 }
 
 #[cfg(test)]
@@ -337,6 +349,17 @@ mod tests {
         assert_eq!(get("graft")[0].source, "gemini");
         assert_eq!(get("review").len(), 1);
         assert_eq!(get("review")[0].description, "project review");
+    }
+
+    #[test]
+    fn agents_path_uses_the_frontmatter_name_and_projected_paths_are_recognised() {
+        let t = tempfile::tempdir().unwrap();
+        write(t.path(), "r", "---\nname: code-review\ndescription: d\n---\n");
+        let k = &discover(t.path())[0];
+        assert_eq!(k.agents_path(), Path::new(".agents/skills/code-review/SKILL.md"));
+        assert!(is_projected(".agents/skills/code-review/SKILL.md"));
+        assert!(is_projected(".claude/skills/code-review/SKILL.md"));
+        assert!(!is_projected(".chorus/skills/code-review/SKILL.md"));
     }
 
     #[test]

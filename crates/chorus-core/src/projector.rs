@@ -60,7 +60,8 @@ pub struct Projection {
     /// The live task state (goal / done / pending), or empty between tasks.
     pub task_state: String,
     /// The skill index from [`crate::skills::index`]. Rendered only for
-    /// agents with no skill loader of their own — Claude gets the real
+    /// agents with no skill loader of their own (the session leaves it empty:
+    /// Codex and Antigravity now load `.agents/skills/` natively) — Claude gets the real
     /// `.claude/skills/` files instead, and duplicating them here would pay
     /// for the same content twice in the same prompt.
     pub skills: String,
