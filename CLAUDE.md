@@ -47,11 +47,11 @@ Swift ทำแค่วาดกับรับ input เพื่อให้�
 **Phase 0–2 ครบ + macOS shell ครบ + warm tier + UX v2 (workbench / orchestra / sub sessions / live updates) ครบ**
 — บน Linux: เทสต์ผ่าน 382 · ล้ม 6 ตัวที่ต้องมี Seatbelt (ดู 7.22) · clippy `-D warnings` สะอาด · build 0 warning · bench invariant ครบ
 — CI (`.github/workflows/ci.yml`, macOS) รัน test/clippy/bench/swift ทุก push+PR — **ยังไม่เคยเห็นมันรันจริง** ดูผลรอบแรกก่อนเชื่อ
-(ตัวเลขนี้ verify บน container Linux 19 ต.ค. — ยังไม่ได้รันซ้ำบน macOS · `SCHEMA_VERSION` = 8)
+(ตัวเลขนี้ verify บน container Linux 19 ต.ค. — ยังไม่ได้รันซ้ำบน macOS · `SCHEMA_VERSION` = 9)
 
 | crate | ทำอะไร |
 |---|---|
-| `chorus-core` | ledger (+ fork-chain `history()`), blob store, memory + approve queue (v2), token counter, render, context assembler, handoff brief, projector, checkpoint (shadow git + `apply_reverse`), compaction (Extractive + **Ollama**) — **รังส์ L1/L2 เก็บลงตาราง `summary` (เพิ่มใน schema v3 · ตอนนี้ `SCHEMA_VERSION` = 8) ไม่ generate ตอน assemble**, **mcp (Streamable-HTTP: `memory_propose` — ทำงานกับ Codex)** |
+| `chorus-core` | ledger (+ fork-chain `history()`), blob store, memory + approve queue (v2), token counter, render, context assembler, handoff brief, projector, checkpoint (shadow git + `apply_reverse`), compaction (Extractive + **Ollama**) — **รังส์ L1/L2 เก็บลงตาราง `summary` (เพิ่มใน schema v3 · ตอนนี้ `SCHEMA_VERSION` = 9) ไม่ generate ตอน assemble**, **mcp (Streamable-HTTP: `memory_propose` — ทำงานกับ Codex)** |
 | `chorus-acp` | ACP client + `acp-probe` + mock (`--fail`) + `CodexAgent` + `bridge_for` (codex/claude/antigravity) · strip `CLAUDECODE` |
 | `chorus-cli` | lib+bin · `bench`/`run`(+`--chain`/`--read-only`)/`handoff`/`memory`/`compare` · `Session` engine |
 | `chorus-ffi` | C ABI (`chorus.h`) — engine/run_turn(+interactive callback)/run_relay/compare/handoff/events_since/working_diff/snapshot/restore/reject_hunks/memory_state+review/**compact/uncompacted/task_state** · JSON ล้วน · panic-guarded |
@@ -150,6 +150,8 @@ crates/chorus-core/src/
   blob.rs       content-addressed: BLAKE3 + zstd + dedup + GC
   ledger.rs     append/get/tail/fork/search + history() (fork-chain walk) — DAG, fork ไม่ copy อะไรเลย
   memory.rs     fact store (≤140 ตัวอักษร) + render ไม่มี metadata + propose/pending/approve/reject
+                + propose_with (ขัดของเดิม = replace #id) + ตัวนับ injected/referenced + suggest_retirements (7.29)
+  lessons.rs    ร่างบทเรียนจาก ledger เข้าคิวอนุมัติ — นอก turn path เท่านั้น (7.29)
   tokens.rs     ตัวประมาณ token ที่รู้จักภาษาไทย + cache
   render.rs     table/manifest/truncate/dedup_window — รูปแบบที่ส่งเข้าโมเดล
   context.rs    budget allocator + rung ladder L0→L1→L2
@@ -209,6 +211,8 @@ evals/handoff/                          สไปก์ที่ 2 (README + เ
 | agent ถาม user | MCP tool `chorus_ask_user` (`chorus-core/src/ask_user.rs`) ไม่ใช่ฟีเจอร์ของ provider · list เฉพาะ session ที่ shell ลงทะเบียนคนตอบ (`chorus_set_question_callback`) · ใช้ได้ทุกโหมดสิทธิ์ · ปิดโดยไม่ตอบ = บอก agent ให้ตัดสินใจเองแล้วบอกสมมติฐาน · คำตอบ mask ก่อนเข้า ledger | ACP มีแค่ `session/request_permission` (yes/no) · ⚠️ Codex ตั้ง MCP tool timeout เอง (ดีฟอลต์ ~60 วิ) คำตอบที่ช้ากว่านั้นอาจไม่ถึง — ยังไม่ได้วัด |
 | อนุญาตตลอด session | callback คืน `2` → `PermissionGrants` (ใน `ChorusEngine`, หน่วยความจำเท่านั้น) key = tool title + kind · Claude ตั้ง title ของ shell เป็นตัวคำสั่ง → คำสั่งใหม่ยังถาม | logic อยู่ Rust ไม่ใช่ Swift (2.3) |
 | syntax highlight | lexer ในตัว (`highlight.rs`) เป็นค่าเริ่มต้น · grammar tree-sitter **ติดตั้ง/ลบได้** จาก Settings › ภาษา (`grammars.rs`): `curl`+`tar` source จาก GitHub (HEAD) → `tree-sitter-loader` compile `parser.c` เป็น dylib ด้วย C compiler ของเครื่อง → `~/.chorus/grammars/<id>/` (marker `installed` เขียนท้ายสุด) · ติดตั้งแล้วแทน lexer เฉพาะภาษานั้น | เพื่อนเลือกทาง ก 26 ต.ค. 2026 (เพิ่ม dep tree-sitter/-highlight/-loader) · catalog มีเฉพาะ repo ที่ commit `src/parser.c` ไว้ (ไม่ต้องมี tree-sitter CLI/Node) — Swift/SQL/Markdown ยังใช้ lexer · ยังไม่เคยติดตั้งจริงบน Mac (`cargo test -- --ignored installs_compiles`) |
+| ความจำที่เรียนรู้ได้ | ทุกอย่างผ่านคิวอนุมัติเดิม (`fact_proposal` + คอลัมน์ `kind` fact/lesson/retire, `replaces`, `evidence`, `suspicious`) · **ไม่มีอะไรกลายเป็นความจำเอง** · บทเรียนมาจากกฎล้วน ๆ บน ledger (Ollama เกลาถ้อยคำได้เฉพาะเมื่อตั้ง `CHORUS_SUMMARY_MODEL`) · ตัวนับ `injected`/`referenced` เขียนหลังเทิร์นใน `persist_outcome` ไม่ใช่ใน `assemble_context` | schema v9 (Perth อนุมัติ 18 พ.ย. 2026) · ข้อที่มาจาก session นำเข้า/เว็บ = `suspicious` ห้ามรับอัตโนมัติ |
+| auto memory ของ Claude Code | ปิดดีฟอลต์ด้วย `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` บน bridge ของ Claude (`provider_memory_env`) · Settings › ความปลอดภัย เปิดกลับได้ | ความจำต้องมีแหล่งเดียว (กฎ 2.2) — ตามเอกสาร env-vars + agent-sdk/claude-code-features 18 พ.ย. 2026 · ⚠ ยังไม่ได้เช็คบน Mac ว่า claude-agent-acp ทำงานกับ auto memory จริงไหม |
 | bridge ของแต่ละเจ้า | override ได้ด้วย env (`CHORUS_CLAUDE_BRIDGE` ฯลฯ) | package ถูก rename มาแล้วครั้งหนึ่ง ไม่ควรต้อง rebuild เพื่อตามชื่อ |
 
 ---
@@ -544,6 +548,15 @@ cache ใน `RepoMapCache` (หน่วยความจำ ไม่ลง�
 - framework ที่อ่าน `.env` จากไฟล์เองโดยไม่ดู env (บางเวอร์ชันของ Next.js) จะเห็นไฟล์อ่านไม่ได้ → ปิดใน Settings › Secret
 - เทสต์ตั้ง `CHORUS_SECRETS_BACKEND=memory` — `user_vault()` เช็คทุกครั้ง ไม่งั้น `cargo test` บน Mac จะเขียนค่าปลอมลง Keychain จริงของคนรัน · Keychain ล็อก (CI) → เก็บในหน่วยความจำรอบนี้แทน (`fallback`) ยัง mask และ inject ได้
 - เทสต์สร้าง key ปลอมตอนรัน (`fake()`) ห้ามเขียนเป็น literal — GitHub push protection จะบล็อก push
+
+### 7.29 ความจำที่เรียนรู้ได้ — กับดักที่ต้องรู้ (18 พ.ย. 2026 · วัดบน Linux เท่านั้น)
+
+- **ตัวนับห้ามขยับใน `assemble_context`** (7.2b) — มันแค่จดว่า fact ไหนเข้า prompt จริง (เช็คว่าข้อความอยู่ในผลที่ประกอบ ไม่ใช่แค่ถูกดึงมา) ลง `injected_facts` แล้ว `account_memory` ใน `persist_outcome` เป็นคนเขียน · เทิร์นที่ล้ม/relay ที่ยังไม่ได้ persist ไม่นับ · assemble ซ้ำระหว่างเทิร์น (ปุ่มดู context) **แทน**ชุดเดิม ไม่สะสม · ไฟล์ที่ฉาย (CLAUDE.md/AGENTS.md) ไม่นับเป็น injected
+- **`referenced` เป็นการเดาแบบหยาบ:** fact ที่มีศัพท์ละติน → path/identifier ยาว ≥10 ตัวปรากฏ หรือคำสำคัญครึ่งหนึ่งขึ้นไปปรากฏ · fact ไทยล้วนใช้ 5-gram ซ้อนกัน ≥50% · fact ที่เป็นแค่ stop word ไม่เคยถูกนับ · ปรับเกณฑ์ที่ `memory::mentions` พร้อมเทสต์ `an_output_mentions…`
+- **เกณฑ์ "ขัดกัน" ของ `propose_with`:** n-gram cosine ≥ 0.55 (วัด: "ใช้ pnpm ไม่ใช่ npm" vs "ใช้ yarn ไม่ใช่ npm" = 0.69, "Postgres 15" vs "16" = 0.92, คำสั่งต่างกัน ≈0.5) · เปิด embedding ใช้ cosine ≥ `DEDUP_COSINE` (0.92) กับ vector ที่เก็บไว้ · ประโยคเดียวกันเป๊ะ = ไม่เพิ่ม · **บทเรียนไม่ผ่านทางนี้** (บทเรียนไม่ใช่ถ้อยคำใหม่ของ fact เดิม ห้ามกลายเป็น "แทนที่")
+- **L1 อ่านต่อจาก watermark** (`session.lessons_seq/lessons_ms`) ที่ขยับหลังคิวสำเร็จเท่านั้น — ข้อที่ถูกปฏิเสธเลยไม่กลับมา · ข้อที่เกินเพดานรอบนั้น (5) ถูกทิ้ง ไม่เลื่อนไปรอบหน้า (ตั้งใจ) · ต้องมี `exit code` จริงถึงจะแม่นกว่านี้: ตอนนี้ ledger เก็บแค่ `title → failed|completed` ของ tool (R5 จะเพิ่มหลักฐาน) · Diff event มีเฉพาะตอน client เป็นคนเขียนไฟล์ (7.11) บทเรียน "ล้มแล้วผ่านหลังแก้ไฟล์…" จึงอาจไม่มีรายชื่อไฟล์
+- **`reject_hunks` เขียน Decision** `ผู้ใช้ปฏิเสธการแก้ไข <ไฟล์>` ลง ledger (ไม่มี event ชนิดใหม่) — มันเข้า `task_state.done` เหมือน Decision อื่น ซึ่งตั้งใจ: agent ถัดไปควรรู้ว่าส่วนนั้นถูกทิ้ง
+- ใช้ `chorus_core::lessons::session_tainted` ตัดสิน `suspicious` ของข้อที่ agent เสนอ: นำเข้า session หรือเรียก tool `fetch` ตั้งแต่ข้อความล่าสุดของผู้ใช้
 
 ### 7.3 repo เงาสำหรับ checkpoint
 ต้องยึด `.gitignore` ของผู้ใช้ ไม่งั้น `.chorus/` จะโตกว่าโปรเจกต์จริง

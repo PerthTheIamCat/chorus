@@ -351,6 +351,7 @@ final class Engine: ObservableObject {
                 chorus_set_question_callback(h, qcb, askCtx.raw)
                 chorus_set_computer_use(h, UserDefaults.standard.bool(forKey: Self.computerUseKey) ? 1 : 0)
                 chorus_set_claude_chrome(h, UserDefaults.standard.bool(forKey: Self.claudeChromeKey) ? 1 : 0)
+                chorus_set_claude_auto_memory(h, UserDefaults.standard.bool(forKey: Self.claudeAutoMemoryKey) ? 1 : 0)
                 chorus_set_hide_secret_files(h, Self.hideSecretFiles ? 1 : 0)
             }
             let eventsJSON = h.map { Self.string(from: chorus_transcript_json($0)) } ?? ""
@@ -1661,6 +1662,9 @@ final class Engine: ObservableObject {
     }
 
     nonisolated static let claudeChromeKey = "chorus.claudeChrome"
+    /// Let Claude Code keep its own auto memory. Off unless the user turns it on:
+    /// Chorus memory is the single source (rust: `provider_memory_env`).
+    nonisolated static let claudeAutoMemoryKey = "chorus.claudeAutoMemory"
 
     nonisolated static let hideSecretFilesKey = "chorus.hideSecretFiles"
     /// On unless the user turned it off (`bool(forKey:)` would read unset as off).
@@ -1695,6 +1699,13 @@ final class Engine: ObservableObject {
         UserDefaults.standard.set(on, forKey: Self.claudeChromeKey)
         guard let h = handle else { return }
         queue.async { chorus_set_claude_chrome(h.raw, on ? 1 : 0) }
+    }
+
+    /// Claude's own auto memory (Settings). Stored and applied like `setClaudeChrome`.
+    func setClaudeAutoMemory(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: Self.claudeAutoMemoryKey)
+        guard let h = handle else { return }
+        queue.async { chorus_set_claude_auto_memory(h.raw, on ? 1 : 0) }
     }
 
     /// Settings switch. Stored for the next sessions and applied to the open one.
@@ -2402,6 +2413,11 @@ final class Engine: ObservableObject {
         let id: Int64
         let scope: Int64
         let text: String
+        /// "fact" | "lesson" | "retire" — decided in Rust; absent from older cores.
+        let kind: String?
+        let replaces: Int64?
+        let evidence: String?
+        let suspicious: Bool?
     }
     private struct MemoryState: Codable {
         let ok: Bool?

@@ -286,6 +286,11 @@ void chorus_set_computer_use(ChorusEngine *e, int on);
  * (sets CLAUDE_CODE_ENABLE_CFC=1 on the Claude bridge). Off by default. */
 void chorus_set_claude_chrome(ChorusEngine *e, int on);
 
+/* Allow Claude Code's own auto memory (~/.claude/projects/<p>/memory) instead
+ * of setting CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 on the Claude bridge. Off by
+ * default so Chorus memory stays the single source. */
+void chorus_set_claude_auto_memory(ChorusEngine *e, int on);
+
 /* Every folder of the session's project as a JSON array of paths; agents see
  * and (outside read-only turns) may edit the others too.
  * {"ok":true,"folders":[kept…]} or {"error":...}. */

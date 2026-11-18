@@ -3005,6 +3005,19 @@ struct ContentView: View {
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
+    /// The small label above a queued entry. What the entry *is* was decided in
+    /// Rust (`kind`, `replaces`, `suspicious`); this only words it.
+    private static func proposalTag(_ p: Engine.Proposal) -> String? {
+        var parts: [String] = []
+        if p.suspicious == true { parts.append("⚠ อาจถูกวางยา — มาจากเว็บหรือ session ที่นำเข้า") }
+        switch p.kind {
+        case "lesson": parts.append("บทเรียนจากที่ผ่านมา")
+        case "retire": parts.append("เสนอให้เลิกจำข้อนี้")
+        default: if p.replaces != nil { parts.append("แทนที่ข้อที่จำไว้เดิม") }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     private var memoryPane: some View {
         VStack(spacing: 0) {
             PaneHeader(title: engine.memoryScope.map { "ความจำร่วม · \($0)" } ?? "ความจำของโฟลเดอร์นี้",
@@ -3016,10 +3029,20 @@ struct ContentView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         if !engine.pending.isEmpty {
-                            SectionLabel("รออนุมัติ", count: engine.pending.count, tint: .orange)
+                            SectionLabel("รอคุณดู \(engine.pending.count) ข้อ", count: nil, tint: .orange)
                             ForEach(engine.pending) { p in
                                 HStack(alignment: .top, spacing: 8) {
-                                    Text(p.text).font(.callout).frame(maxWidth: .infinity, alignment: .leading)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        if let tag = Self.proposalTag(p) {
+                                            Text(tag).font(.caption2.weight(.semibold))
+                                                .foregroundStyle(p.suspicious == true ? Color.red : Color.orange)
+                                        }
+                                        Text(p.text).font(.callout)
+                                        if let why = p.evidence {
+                                            Text(why).font(.caption2).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                                     Button { engine.review(p.id, approve: false) } label: { Image(systemName: "xmark") }
                                         .buttonStyle(InteractiveStyle(cornerRadius: 6, padding: .init(top: 4, leading: 6, bottom: 4, trailing: 6)))
                                         .foregroundStyle(.red).help("ปฏิเสธ")
