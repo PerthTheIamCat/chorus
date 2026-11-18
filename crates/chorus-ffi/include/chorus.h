@@ -495,6 +495,9 @@ char *chorus_lsp_diagnostics_json(const char *ws, const char *files_json);
 /* "Trust this project": checks and hooks run only when true. {"ok","trusted"} */
 char *chorus_project_trusted_json(const char *ws);
 char *chorus_set_project_trusted(const char *ws, bool trusted);
+/* "ล็อกเทสต์": sandbox denies agent writes to test files. {"ok","locked"} */
+char *chorus_lock_tests_json(const char *ws);
+char *chorus_set_lock_tests(const char *ws, bool locked);
 char *chorus_structural_diff_json(const char *old_code, const char *new_code);
 
 /* Syntax spans for the read-only code viewer. `path` picks the language by

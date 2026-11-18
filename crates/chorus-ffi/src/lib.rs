@@ -3843,6 +3843,36 @@ pub unsafe extern "C" fn chorus_set_project_trusted(
     }
 }
 
+/// Whether the user locked this project's tests ("ล็อกเทสต์"): the sandbox
+/// then denies the agent writes to test files. Returns `{"ok":true,"locked":bool}`.
+///
+/// # Safety
+/// `ws` must be null or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_lock_tests_json(ws: *const c_char) -> *mut c_char {
+    let Some(ws) = borrow(ws) else {
+        return err("ws must be valid UTF-8");
+    };
+    let locked = chorus_core::trust::LockedTests::default_location().is_locked(Path::new(ws));
+    out(serde_json::json!({"ok": true, "locked": locked}).to_string())
+}
+
+/// Record the user's "lock tests" choice for a project. Only the UI calls
+/// this; the store is outside the sandbox's writes. Applies from the next turn.
+///
+/// # Safety
+/// `ws` must be null or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_lock_tests(ws: *const c_char, locked: bool) -> *mut c_char {
+    let Some(ws) = borrow(ws) else {
+        return err("ws must be valid UTF-8");
+    };
+    match chorus_core::trust::LockedTests::default_location().set_locked(Path::new(ws), locked) {
+        Ok(()) => out(serde_json::json!({"ok": true, "locked": locked}).to_string()),
+        Err(e) => err(e.to_string()),
+    }
+}
+
 /// Verify workspace via fast linter/compiler checks. Runs only for a project
 /// the user trusted, and only inside the turn's Seatbelt profile.
 ///

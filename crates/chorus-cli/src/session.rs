@@ -2548,6 +2548,8 @@ impl Session {
         let opts = sandbox::Options {
             hide_secret_files: self.hide_secret_files,
             extra_roots: self.project_folders.clone(),
+            // Per project, kept outside the workspace (Settings › ล็อกเทสต์).
+            lock_tests: chorus_core::trust::LockedTests::default_location().is_locked(&self.cwd),
         };
         let command = match sandbox::wrap_with(bridge, &self.cwd, profile, opts) {
             Ok(c) => c,

@@ -670,6 +670,30 @@ struct ComputerUseSettings: View {
     }
 }
 
+/// "ล็อกเทสต์": agents cannot write test files in this project. The rule is
+/// the sandbox's (crates/chorus-acp/src/sandbox.rs); this is only the switch.
+struct TestLockSettings: View {
+    @EnvironmentObject var engine: Engine
+    let workspace: String
+    @State private var locked = false
+
+    var body: some View {
+        SettingsGroup(title: "ล็อกเทสต์",
+                      footer: "กัน agent แก้เทสต์ให้ผ่านแทนที่จะแก้โค้ด · เปิดแล้ว sandbox ไม่ให้ agent เขียน สร้าง ลบ หรือย้ายไฟล์เทสต์ (เช่น tests/, *_test.go, *.spec.ts, test_*.py) ในโปรเจกต์นี้ — ตัดสินจากชื่อไฟล์และโฟลเดอร์เท่านั้น · ไฟล์ .md/.txt ในโฟลเดอร์เทสต์ และ node_modules/target เขียนได้ตามปกติ · มีผลตั้งแต่เทิร์นถัดไป") {
+            SettingsRow(title: "ไม่ให้ agent แก้ไฟล์เทสต์",
+                        detail: workspace.isEmpty ? "เลือก workspace ก่อน" : URL(fileURLWithPath: workspace).lastPathComponent,
+                        info: "ปิดเป็นค่าเริ่มต้น ตั้งแยกรายโปรเจกต์ · ถ้าอยากให้ agent เขียนเทสต์ใหม่ ให้ปิดชั่วคราว") {
+                Toggle("ล็อกเทสต์", isOn: Binding(
+                    get: { locked },
+                    set: { locked = engine.setLockTests(ws: workspace, $0) }))
+                    .labelsHidden().toggleStyle(.switch)
+                    .disabled(workspace.isEmpty)
+            }
+        }
+        .onAppear { locked = engine.lockTests(ws: workspace) }
+    }
+}
+
 struct SafetySettings: View {
     let workspace: String
     @AppStorage("chorus.defaultPermission") private var defaultPermission = Int(PermissionLevel.ask.rawValue)
@@ -702,6 +726,7 @@ struct SafetySettings: View {
                 .pickerStyle(.segmented).labelsHidden().frame(width: 170)
             }
         }
+        TestLockSettings(workspace: workspace)
         ComputerUseSettings()
         ProviderBrowserSettings()
         SecretsSettings()

@@ -3228,6 +3228,24 @@ final class Engine: ObservableObject {
         if !projectTrusted { lastVerification = nil }
     }
 
+    /// "ล็อกเทสต์": the sandbox denies the agent writes to this project's test
+    /// files. The rule and the store live in Rust; this only reads and sets it.
+    private struct LockTestsResponse: Codable { let ok: Bool; let locked: Bool? }
+
+    func lockTests(ws: String) -> Bool {
+        guard !ws.isEmpty else { return false }
+        let json = ws.withCString { Self.string(from: chorus_lock_tests_json($0)) }
+        return Self.decode(LockTestsResponse.self, json)?.locked ?? false
+    }
+
+    @discardableResult
+    func setLockTests(ws: String, _ locked: Bool) -> Bool {
+        guard !ws.isEmpty else { return false }
+        let json = ws.withCString { Self.string(from: chorus_set_lock_tests($0, locked)) }
+        let res = Self.decode(LockTestsResponse.self, json)
+        return res?.ok == true ? (res?.locked ?? false) : lockTests(ws: ws)
+    }
+
     func verifyWorkspace(workspace: String, completion: @escaping (VerificationResult?, String?) -> Void) {
         verifyWorkspace(ws: workspace) { data, err in
             completion(data, err)

@@ -62,6 +62,9 @@ pub struct Options {
     /// `ReadOnly`. A folder that no longer exists is skipped — it cannot be
     /// written either way.
     pub extra_roots: Vec<PathBuf>,
+    /// "ล็อกเทสต์": deny writes to test files in every writable folder (see
+    /// [`test_lock_rules`]). Off unless the user turned it on for the project.
+    pub lock_tests: bool,
 }
 
 /// [`wrap`] with [`Options`].
@@ -90,7 +93,7 @@ pub fn wrap_with(
             .map(PathBuf::as_path)
             .filter(|r| r.is_dir() && !too_broad(r)),
     );
-    let mut profile_text = checked_policy_roots(&roots, profile)?;
+    let mut profile_text = checked_policy_roots_with(&roots, profile, opts.lock_tests)?;
     if opts.hide_secret_files {
         for root in &roots {
             profile_text.push_str(&secret_file_rules(root)?);
@@ -138,6 +141,79 @@ pub fn secret_file_rules(cwd: &Path) -> Result<String, String> {
     ))
 }
 
+/// `foo` as a case-insensitive Seatbelt regex fragment: `[fF][oO][oO]`.
+/// (`.` and `_` are kept literal; `.` is escaped.)
+fn ci(word: &str) -> String {
+    let mut out = String::new();
+    for c in word.chars() {
+        if c.is_ascii_alphabetic() {
+            out.push('[');
+            out.push(c.to_ascii_lowercase());
+            out.push(c.to_ascii_uppercase());
+            out.push(']');
+        } else if c == '.' {
+            out.push_str("\\.");
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Write-deny rules for the test files under `ws` ("ล็อกเทสต์").
+///
+/// An agent that makes a failing test pass by editing the test has not done
+/// the task. The ledger and the Changes pane flag that afterwards; this stops
+/// it before the write, the same way the `.git/hooks` carve-out does, and is
+/// meant to be appended after the workspace allow so the last match wins.
+///
+/// The paths are the ones `chorus_core::checkpoint::is_test_path` calls tests,
+/// written as Seatbelt regexes because this crate cannot link chorus-core
+/// (keep the two in step — the table test below runs both through the same
+/// paths on macOS). Two deliberate differences:
+///
+/// - prose (`.md`, `.txt`, `.lock`) in a test folder stays writable, as in
+///   `is_test_path`: Seatbelt has no look-ahead, so it is re-allowed after
+///   the denies;
+/// - dependency and build folders (`node_modules`, `target`, …) are re-allowed
+///   too. A package's own `test/` folder is not the project's tests, and
+///   `npm install` must keep working.
+///
+/// Only creating, changing, renaming or deleting a *file* is blocked; the
+/// folder itself can still be made.
+pub fn test_lock_rules(ws: &Path) -> Result<String, String> {
+    let root = regex_escape(checked_path(ws)?);
+    let dirs = ["test", "tests", "__tests__", "spec", "specs"]
+        .map(ci)
+        .join("|");
+    let suffix = format!("{}|{}", ci("_test"), ci("_spec"));
+    let dotted = format!("{}|{}", ci(".test"), ci(".spec"));
+    let mut s = String::from("; test lock\n");
+    let mut deny = |pattern: String| {
+        s.push_str(&format!("(deny file-write* (regex #\"^{root}/{pattern}\"))\n"));
+    };
+    // tests/ · __tests__/ · spec/ — any file below such a folder
+    deny(format!("(.*/)?({dirs})/.+$"));
+    // test_foo.py · conftest.py
+    deny(format!("(.*/)?({}[^/]*|{})$", ci("test_"), ci("conftest.py")));
+    // foo_test.go · foo_spec.rb · foo.test.ts · foo.spec.js — judged on the
+    // name up to its *last* dot, as `is_test_path` does
+    deny(format!(
+        "(.*/)?([^./]*({suffix})|[^/]*({suffix})\\.[^./]*|[^/]+({dotted})\\.[^./]*)$"
+    ));
+    // FooTest.java · FooTests.swift (CamelCase only, so `Latest.rs` stays out)
+    deny("(.*/)?([^/]+Test|[^/]*Tests)\\.[^./]+$".to_string());
+    // Prose, then dependency and build folders, are not the project's tests.
+    s.push_str(&format!(
+        "(allow file-write* (regex #\"^{root}/(.*/)?[^/]*\\.({})$\"))\n",
+        ["md", "txt", "lock"].map(ci).join("|")
+    ));
+    s.push_str(&format!(
+        "(allow file-write* (regex #\"^{root}/(.*/)?(node_modules|target|\\.venv|venv|vendor|\\.build|Pods|DerivedData)/.*$\"))\n"
+    ));
+    Ok(s)
+}
+
 /// The Seatbelt profile, as a single `-p` argument.
 ///
 /// `-p` rather than a temp file on purpose: a profile file is one more thing
@@ -156,6 +232,14 @@ fn checked_policy(cwd: &Path, profile: Profile) -> Result<String, String> {
 /// The profile for one or more workspace roots: the session's folder first,
 /// then the other folders of its project.
 fn checked_policy_roots(roots: &[&Path], profile: Profile) -> Result<String, String> {
+    checked_policy_roots_with(roots, profile, false)
+}
+
+fn checked_policy_roots_with(
+    roots: &[&Path],
+    profile: Profile,
+    lock_tests: bool,
+) -> Result<String, String> {
     let mut resolved: Vec<PathBuf> = Vec::new();
     let mut guards = Vec::new();
     for root in roots {
@@ -274,6 +358,14 @@ fn checked_policy_roots(roots: &[&Path], profile: Profile) -> Result<String, Str
             if let Some(p) = ws.to_str().filter(|p| !p.contains('"')) {
                 s.push_str(&format!("(deny file-write* (subpath \"{p}\"))\n"));
             }
+        }
+    }
+    // "ล็อกเทสต์" goes after the workspace allow and before the git guards:
+    // Seatbelt takes the last match, so a guard must still win over the
+    // re-allow of prose files below.
+    if lock_tests && profile == Profile::Workspace {
+        for ws in &resolved {
+            s.push_str(&test_lock_rules(ws)?);
         }
     }
     // Protect routing entries themselves as well as their resolved targets.
@@ -518,6 +610,62 @@ mod tests {
     }
 
     #[test]
+    fn test_lock_is_off_by_default_and_only_for_writable_workspaces() {
+        let d = std::env::temp_dir().join(format!("chorus-lock-off-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let off = checked_policy_roots_with(&[&d], Profile::Workspace, false).unwrap();
+        let ro = checked_policy_roots_with(&[&d], Profile::ReadOnly, true).unwrap();
+        let on = checked_policy_roots_with(&[&d], Profile::Workspace, true).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(!off.contains("; test lock"), "{off}");
+        // Read-only already denies the whole workspace; nothing to add.
+        assert!(!ro.contains("; test lock"), "{ro}");
+        assert!(on.contains("; test lock"), "{on}");
+        assert_eq!(on.matches("; test lock").count(), 1, "one rule per folder");
+    }
+
+    #[test]
+    fn test_lock_comes_after_the_workspace_allow_and_before_the_git_guards() {
+        let d = std::env::temp_dir().join(format!("chorus-lock-order-{}", std::process::id()));
+        std::fs::create_dir_all(d.join(".git/hooks")).unwrap();
+        let p = checked_policy_roots_with(&[&d], Profile::Workspace, true).unwrap();
+        let root = canonical(&d);
+        let root = root.to_str().unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+        let allow = p
+            .find(&format!("(allow file-write* (subpath \"{root}\"))"))
+            .unwrap();
+        let deny = p.find("; test lock").unwrap();
+        let reallow = p.find("node_modules").unwrap();
+        let hooks = p
+            .find(&format!("(deny file-write* (subpath \"{root}/.git/hooks\"))"))
+            .unwrap();
+        // Last match wins: deny after allow, the git guard after the re-allow.
+        assert!(allow < deny && deny < reallow && reallow < hooks, "{p}");
+    }
+
+    #[test]
+    fn test_lock_covers_every_project_folder() {
+        let base = std::env::temp_dir().join(format!("chorus-lock-roots-{}", std::process::id()));
+        let (a, b) = (base.join("one"), base.join("two"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let p = checked_policy_roots_with(&[&a, &b], Profile::Workspace, true).unwrap();
+        let (ca, cb) = (canonical(&a), canonical(&b));
+        let _ = std::fs::remove_dir_all(&base);
+        for r in [ca, cb] {
+            let r = regex_escape(r.to_str().unwrap());
+            assert!(p.contains(&format!("#\"^{r}/(.*/)?")), "{p}");
+        }
+    }
+
+    #[test]
+    fn ci_matches_either_case_and_escapes_the_dot() {
+        assert_eq!(ci("a_b"), "[aA]_[bB]");
+        assert_eq!(ci("x.py"), "[xX]\\.[pP][yY]");
+    }
+
+    #[test]
     fn home_or_root_never_becomes_a_writable_project_folder() {
         assert!(too_broad(Path::new("/")));
         if let Some(home) = std::env::var_os("HOME") {
@@ -622,6 +770,74 @@ mod tests {
             assert!(!out.join("no.txt").exists());
             let _ = std::fs::remove_dir_all(&ws);
             let _ = std::fs::remove_dir_all(&out);
+        }
+
+        /// The same paths `checkpoint::is_test_path` is tested with, run through
+        /// the real sandbox. `true` = the path is a test and must be locked.
+        #[test]
+        fn locked_tests_cannot_be_written_but_the_rest_can() {
+            let ws = scratch("locktests");
+            let table: &[(&str, bool)] = &[
+                ("tests/helpers.rs", true),
+                ("src/__tests__/a.ts", true),
+                ("spec/models/user_spec.rb", true),
+                ("test_parser.py", true),
+                ("pkg/conftest.py", true),
+                ("pkg/parser_test.go", true),
+                ("web/app.test.ts", true),
+                ("web/app.spec.js", true),
+                ("App/OrderTests.swift", true),
+                ("src/main.rs", false),
+                ("src/latest.rs", false),
+                ("src/Latest.rs", false),
+                ("src/contest.py", false),
+                ("tests/README.md", false),
+                ("tests/notes.txt", false),
+                ("node_modules/pkg/test/x.js", false),
+                ("target/debug/tests/x.o", false),
+            ];
+            let argv_for = |script: &str| {
+                let cmd: Vec<String> = ["/bin/sh", "-c", script].map(String::from).to_vec();
+                wrap_with(
+                    &cmd,
+                    &ws,
+                    Profile::Workspace,
+                    Options { lock_tests: true, ..Default::default() },
+                )
+                .expect("sandbox-exec available")
+            };
+            for (rel, locked) in table {
+                if let Some(dir) = Path::new(rel).parent() {
+                    std::fs::create_dir_all(ws.join(dir)).unwrap();
+                }
+                let argv = argv_for(&format!("echo x > '{rel}'"));
+                let ok = Command::new(&argv[0])
+                    .args(&argv[1..])
+                    .current_dir(&ws)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success();
+                assert_eq!(!ok, *locked, "{rel}: locked={locked} but write ok={ok}");
+            }
+            // Deleting and renaming an existing test is a write too.
+            std::fs::create_dir_all(ws.join("tests")).unwrap();
+            std::fs::write(ws.join("tests/keep.rs"), "fn t() {}").unwrap();
+            for script in ["rm tests/keep.rs", "mv tests/keep.rs src/keep.rs"] {
+                let argv = argv_for(script);
+                let ok = Command::new(&argv[0])
+                    .args(&argv[1..])
+                    .current_dir(&ws)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success();
+                assert!(!ok, "{script} got through");
+            }
+            assert!(ws.join("tests/keep.rs").exists());
+            // Off, the same write passes.
+            assert!(sh(&ws, Profile::Workspace, "echo x > tests/keep.rs"));
+            let _ = std::fs::remove_dir_all(&ws);
         }
 
         #[test]
