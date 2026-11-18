@@ -5,13 +5,13 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn bin(name: &str) -> PathBuf {
-    // target/debug/deps/<test> → target/debug/<bin>
-    let mut p = std::env::current_exe().expect("test exe");
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
+    // Cargo builds the package's own binaries before its integration tests and
+    // tells us where (the executable layout under target/ changed between
+    // Cargo versions, so do not derive it from current_exe).
+    match name {
+        "acp-probe" => PathBuf::from(env!("CARGO_BIN_EXE_acp-probe")),
+        other => panic!("no CARGO_BIN_EXE for {other}"),
     }
-    p.join(name)
 }
 
 #[test]
