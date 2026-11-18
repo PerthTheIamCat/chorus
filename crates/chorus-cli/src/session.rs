@@ -2178,6 +2178,7 @@ impl Session {
         let bodies: Vec<(Event, String)> = bodies
             .into_iter()
             .filter(|(e, body)| e.kind != EventKind::ToolResult || !is_bare_success(body))
+            .filter(|(e, body)| e.kind != EventKind::Decision || !chorus_core::journal::is_marker(body))
             .collect();
 
         let n = bodies.len();

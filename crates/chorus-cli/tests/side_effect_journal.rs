@@ -89,3 +89,10 @@ fn a_push_the_turn_never_finished_reaches_the_next_agent_as_half_done() {
     // And the bookkeeping did not become a "done" decision in the brief.
     assert!(r.brief.done.iter().all(|d| !journal::is_marker(d)));
 }
+
+#[test]
+fn bookkeeping_markers_never_reach_the_model() {
+    let (_dir, _db, s) = run("side_effect_done.jsonl");
+    let ctx = s.assemble_context(50_000).unwrap();
+    assert!(!ctx.contains("chorus:"), "a marker leaked into the assembled context:\n{ctx}");
+}
