@@ -5,13 +5,10 @@
 use chorus_cli::session::{Policy, Session};
 use chorus_core::router::Candidate;
 
+mod common;
+
 fn probe_bin() -> String {
-    let mut p = std::env::current_exe().expect("test exe");
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.join("acp-probe").to_string_lossy().into_owned()
+    common::probe_bin().to_string_lossy().into_owned()
 }
 
 fn cand(agent: &str, id: &str, tier: u8) -> Candidate {
