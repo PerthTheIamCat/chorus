@@ -360,10 +360,7 @@ struct IntegrationIcon: View {
 
     private var symbol: String {
         switch id {
-        case "graft": "point.3.connected.trianglepath.dotted"
         case "serena": "sparkle.magnifyingglass"
-        case "rtk": "terminal"
-        case "headroom": "arrow.up.to.line.compact"
         default: "puzzlepiece.extension"
         }
     }

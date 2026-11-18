@@ -35,6 +35,13 @@ pub unsafe extern "C" fn chorus_catalog_list_json(project: *const c_char) -> *mu
         return err("project must be valid UTF-8");
     };
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
+        // Entries pulled from the catalog are cleared before listing, so an
+        // old install never lingers in a project. A failure here is reported
+        // with the list rather than hiding the whole catalog.
+        let (retired_cleared, retired_error) = match integration_catalog::forget_retired() {
+            Ok(ids) => (ids, None),
+            Err(e) => (Vec::new(), Some(e.to_string())),
+        };
         let state = integration_catalog::load_state().map_err(|e| e.to_string())?;
         let enabled =
             integration_catalog::enabled_for(Path::new(project)).map_err(|e| e.to_string())?;
@@ -57,7 +64,8 @@ pub unsafe extern "C" fn chorus_catalog_list_json(project: *const c_char) -> *mu
                 "can_remove": true,
             })
         }).collect();
-        Ok(serde_json::json!({"ok":true,"entries":entries}))
+        Ok(serde_json::json!({"ok":true,"entries":entries,
+            "retired_cleared":retired_cleared,"retired_error":retired_error}))
     }));
     match result {
         Ok(Ok(value)) => out(value.to_string()),

@@ -5,6 +5,11 @@
 
 ## [Unreleased]
 
+### Removed
+
+- **ถอด Graft, RTK และ Headroom ออกจากรายการ extension:** ผลวัดอิสระบน SWE-bench Verified 100 งาน (Dasein code-compression-bench) พบว่า Headroom ทำให้ค่าใช้จ่ายเพิ่ม 44% และ RTK เพิ่ม 13% โดยแก้งานได้ไม่มากขึ้น (RTK แก้ได้ 54 งาน เทียบกับ 57 เมื่อไม่ใช้) · ตัวเลขของ Graft มาจากผู้ทำเองเท่านั้น และงานซ้ำกับ repo map ที่ Chorus มีอยู่แล้ว · ที่เหลือคือ Serena, Chrome DevTools และ Chorus Review
+- ของที่เคยติดตั้งไว้ถูกล้างให้เองตอนเปิดรายการ extension: Chorus เลิกส่งให้ agent และลบไฟล์ที่ Chorus ติดตั้งเองใน `~/.chorus/tools/` · ตัวที่ติดตั้งด้วย Homebrew หรือติดตั้งเองไม่ถูกลบ ถ้าไม่ใช้แล้วให้รัน `brew uninstall rtk`
+
 ## [0.2.6] - 2026-10-26
 
 ### Added

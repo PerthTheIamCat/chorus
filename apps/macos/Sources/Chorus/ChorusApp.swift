@@ -5,7 +5,7 @@ import UserNotifications
 
 /// Closing the last window quits the app, and quitting reaps the agent tree.
 /// Without this the app lingers windowless and the bridges it spawned
-/// (claude-agent-acp, serena, graft) outlive it.
+/// (claude-agent-acp, serena, chrome-devtools-mcp) outlive it.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         if Bundle.main.bundleIdentifier != nil {
