@@ -282,6 +282,42 @@ pub fn is_refused_configuration(answer: &str) -> bool {
     !a.is_empty() && a.chars().count() <= 400 && KEYS.iter().any(|k| a.contains(k))
 }
 
+/// One `pending:` line for the next agent when the last turn changed test
+/// files and non-test code together, else `None`.
+///
+/// Editing a test along with the code it covers is often right and sometimes
+/// the shortcut: a failing test made to pass by changing the test. The line
+/// does not accuse, it tells the receiving agent to look. Only the first
+/// three test paths are named, so it stays a single short line in the task
+/// state. Chorus's own projected files, lockfiles and prose are not "code".
+pub fn tests_with_code_note(changed: &[String]) -> Option<String> {
+    use crate::checkpoint::{is_lockfile, is_projected_file, is_test_path};
+    let tests: Vec<&str> = changed
+        .iter()
+        .map(String::as_str)
+        .filter(|p| is_test_path(p))
+        .collect();
+    let has_code = changed.iter().any(|p| {
+        let lower = p.to_lowercase();
+        !is_test_path(p)
+            && !is_lockfile(p)
+            && !is_projected_file(p)
+            && !p.starts_with(".chorus/")
+            && !lower.ends_with(".md")
+            && !lower.ends_with(".txt")
+    });
+    if tests.is_empty() || !has_code {
+        return None;
+    }
+    let shown: Vec<&str> = tests.iter().copied().take(3).collect();
+    let more = tests.len() - shown.len();
+    Some(format!(
+        "check the tests edited alongside code last turn ({}{}): confirm the spec changed, not that a test was bent to pass",
+        shown.join(", "),
+        if more > 0 { format!(" +{more}") } else { String::new() },
+    ))
+}
+
 /// The hot form of a stored handoff event: one line for the conversation
 /// tier, or `None` when `stored` is not a brief.
 ///

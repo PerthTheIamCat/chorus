@@ -1065,8 +1065,20 @@ pub unsafe extern "C" fn chorus_events_since(e: *const ChorusEngine, after: i64)
 
 // ---- checkpoints -----------------------------------------------
 
+/// The `{"ok","diff","test_files"}` JSON every working-diff getter returns.
+/// `test_files` is the subset of changed paths that are tests, decided here
+/// so the shell only draws the label (rule 2.3).
+fn diff_json(diff: &str) -> String {
+    serde_json::json!({
+        "ok": true,
+        "diff": diff,
+        "test_files": chorus_core::checkpoint::test_files_in_diff(diff),
+    })
+    .to_string()
+}
+
 /// The workspace diff since the session base checkpoint.
-/// JSON: {"ok":true,"diff":"..."}
+/// JSON: {"ok":true,"diff":"...","test_files":["tests/x.rs"]}
 ///
 /// # Safety
 /// `e` must be a live engine handle.
@@ -1076,7 +1088,7 @@ pub unsafe extern "C" fn chorus_working_diff(e: *const ChorusEngine) -> *mut c_c
         return err("null engine");
     };
     let diff = catch_unwind(AssertUnwindSafe(|| engine.session.working_diff())).unwrap_or_default();
-    out(serde_json::json!({ "ok": true, "diff": diff }).to_string())
+    out(diff_json(&diff))
 }
 
 /// Take a manual checkpoint. JSON: {"ok":true,"sha":"..."}
@@ -2038,7 +2050,7 @@ pub unsafe extern "C" fn chorus_reader_working_diff(r: *const ChorusReader) -> *
         return err("null reader");
     };
     let diff = catch_unwind(AssertUnwindSafe(|| r.reader.working_diff())).unwrap_or_default();
-    out(serde_json::json!({ "ok": true, "diff": diff }).to_string())
+    out(diff_json(&diff))
 }
 
 /// Mark reviewed: snapshot shadow repo as new baseline. JSON: {"ok":true,"base":"..."}
@@ -2096,7 +2108,7 @@ pub unsafe extern "C" fn chorus_working_diff_scoped(
         engine.session.working_diff_scoped(scope_str, inc)
     }))
     .unwrap_or_default();
-    out(serde_json::json!({ "ok": true, "diff": diff }).to_string())
+    out(diff_json(&diff))
 }
 
 /// Scoped working diff on reader handle.
@@ -2120,7 +2132,7 @@ pub unsafe extern "C" fn chorus_reader_working_diff_scoped(
         r.reader.working_diff_scoped(scope_str, inc)
     }))
     .unwrap_or_default();
-    out(serde_json::json!({ "ok": true, "diff": diff }).to_string())
+    out(diff_json(&diff))
 }
 
 /// File diff stats report: fast numstat path on reader.
@@ -3568,6 +3580,42 @@ pub unsafe extern "C" fn chorus_get_checklist_json(
         Ok(Ok(val)) => out(val.to_string()),
         Ok(Err(e)) => err(e),
         Err(_) => err("panic in get_checklist_json"),
+    }
+}
+
+/// Numbers for the metrics strip under the chat. Stateless like
+/// `chorus_get_checklist_json`: reads the store by path, never the engine
+/// queue. `account` is a relay-chain name (`codex`, `claude@work`) whose
+/// limit to show; `""` skips the limit lookup, which can spawn the agent CLI
+/// on a cold cache, so call it from a background thread.
+///
+/// Every field may be null (the shell hides it); `tok_per_s` is an estimate.
+/// JSON: {"ok":true,"metrics":{tok_per_s,tok_per_s_estimated,cache_hit_pct,
+/// cost_usd,context_pct,limit_pct,limit_window}}
+///
+/// # Safety
+/// `db_path` and `account` must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_session_metrics(
+    db_path: *const c_char,
+    session_id: i64,
+    account: *const c_char,
+) -> *mut c_char {
+    let Some(db_path) = borrow(db_path) else {
+        return err("db_path must be valid UTF-8");
+    };
+    let account = borrow(account).unwrap_or("").to_string();
+    let db = PathBuf::from(db_path);
+    let r = catch_unwind(AssertUnwindSafe(|| -> Result<serde_json::Value, String> {
+        let store = chorus_core::store::Store::open(&db).map_err(|e| e.to_string())?;
+        let m = chorus_cli::metrics::session_metrics(&store, session_id, &account)
+            .map_err(|e| format!("{e:#}"))?;
+        Ok(serde_json::json!({ "ok": true, "metrics": m }))
+    }));
+    match r {
+        Ok(Ok(val)) => out(val.to_string()),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in session_metrics"),
     }
 }
 

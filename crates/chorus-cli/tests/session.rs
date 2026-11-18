@@ -5,13 +5,10 @@
 use chorus_cli::session::{AgentSpec, Permission, Policy, Session};
 use chorus_core::handoff::HandoffReason;
 
+mod common;
+
 fn probe_bin() -> std::path::PathBuf {
-    let mut p = std::env::current_exe().expect("test exe");
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.join("acp-probe")
+    common::probe_bin()
 }
 
 fn mock_bridge() -> Vec<String> {
@@ -1428,5 +1425,169 @@ fn a_bridge_crash_relays_to_the_next_agent() {
     ];
     let r = s.run_relay(&chain, "do the work", Policy::AllowAll).expect("relays");
     assert_eq!(r.answered_by, "codex");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+
+fn looping_bridge(times: u32) -> Vec<String> {
+    vec![
+        probe_bin().to_string_lossy().into_owned(),
+        "--serve-mock".into(),
+        "--repeat-tool".into(),
+        times.to_string(),
+    ]
+}
+
+fn chorus_notes(s: &Session) -> Vec<String> {
+    s.events_since(0)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.2 == "chorus")
+        .map(|e| e.3)
+        .collect()
+}
+
+#[test]
+fn a_tool_call_repeated_three_times_in_a_row_is_flagged_in_the_thread() {
+    let tmp = std::env::temp_dir().join(format!("chorus-loop-warn-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let mut s = Session::create(&tmp.join("store.db"), &tmp, "loop")
+        .unwrap()
+        .with_bridge(looping_bridge(4));
+
+    let report = s
+        .run_turn("codex", "openai", "run the tests", Policy::AllowAll)
+        .expect("a warning does not stop the turn");
+    assert_eq!(report.stop_reason, "end_turn");
+
+    let notes = chorus_notes(&s);
+    assert_eq!(notes.len(), 1, "one warning, not one per repeat: {notes:?}");
+    assert!(notes[0].contains("ซ้ำ 3 ครั้งติดกัน") && notes[0].contains("cargo test"), "{notes:?}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn a_tool_call_repeated_six_times_stops_the_turn_and_says_why() {
+    // Stopping is process-wide (the Stop button's mechanism: it kills every
+    // agent this process spawned), so it runs in its own process or it would
+    // kill the other tests' mock agents running in parallel.
+    const CHILD: &str = "CHORUS_TEST_LOOP_STOP_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "a_tool_call_repeated_six_times_stops_the_turn_and_says_why", "--nocapture"])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let tmp = std::env::temp_dir().join(format!("chorus-loop-stop-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let mut s = Session::create(&tmp.join("store.db"), &tmp, "loop")
+        .unwrap()
+        .with_bridge(looping_bridge(40));
+
+    let chain = [AgentSpec::new("codex", "openai")];
+    let err = s
+        .run_relay(&chain, "run the tests", Policy::AllowAll)
+        .err()
+        .expect("the loop is cut off");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("หยุดเทิร์น") && msg.contains("ซ้ำ 6 ครั้ง"), "{msg}");
+    assert!(!msg.contains("หยุดโดยผู้ใช้"), "not the user's Stop: {msg}");
+
+    let notes = chorus_notes(&s);
+    assert!(notes.iter().any(|n| n.contains("ซ้ำ 3 ครั้ง")), "warning kept: {notes:?}");
+    assert!(notes.iter().any(|n| n.contains("หยุดเทิร์น")), "stop kept: {notes:?}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn a_different_call_between_repeats_resets_the_count() {
+    use chorus_cli::session::{LoopVerdict, RepeatGuard};
+    let mut g = RepeatGuard::new(3, 6);
+    let seen: Vec<_> = ["a", "a", "b", "a", "a", "b", "a", "a"].iter().map(|t| g.see(t, Some(1))).collect();
+    assert!(seen.iter().all(|v| *v == LoopVerdict::Fine), "{seen:?}");
+
+    let mut g = RepeatGuard::new(3, 6);
+    let seen: Vec<_> = (0..7).map(|_| g.see(" cargo test ", Some(7))).collect();
+    assert_eq!(seen[2], LoopVerdict::Warn(3));
+    assert_eq!(seen[5], LoopVerdict::Stop(6));
+    assert_eq!(seen[3], LoopVerdict::Fine, "warn once, not on every repeat");
+    assert_eq!(seen[6], LoopVerdict::Fine);
+}
+
+#[test]
+fn the_same_title_with_different_arguments_is_not_a_loop() {
+    use chorus_cli::session::{LoopVerdict, RepeatGuard};
+    let mut g = RepeatGuard::new(3, 6);
+    let seen: Vec<_> = (0..8u64).map(|i| g.see("Read file", Some(i))).collect();
+    assert!(seen.iter().all(|v| *v == LoopVerdict::Fine), "six different reads: {seen:?}");
+}
+
+#[test]
+fn calls_without_arguments_can_warn_but_never_stop() {
+    use chorus_cli::session::{LoopVerdict, RepeatGuard};
+    let mut g = RepeatGuard::new(3, 6);
+    let seen: Vec<_> = (0..10).map(|_| g.see("Search", None)).collect();
+    assert_eq!(seen[2], LoopVerdict::Warn(3));
+    assert!(!seen.iter().any(|v| matches!(v, LoopVerdict::Stop(_))), "{seen:?}");
+}
+
+#[test]
+fn a_handoff_after_a_turn_that_edited_code_and_tests_tells_the_next_agent_to_check_them() {
+    let tmp = std::env::temp_dir().join(format!("chorus-handoff-tests-{}", std::process::id()));
+    std::fs::create_dir_all(tmp.join("tests")).unwrap();
+    let mut s = Session::create(&tmp.join("store.db"), &tmp, "tests")
+        .unwrap()
+        .with_bridge(mock_bridge());
+    s.run_turn("codex", "openai", "fix the bug", Policy::AllowAll).unwrap();
+    // What a shell-driven agent would have done during that turn.
+    std::fs::write(tmp.join("lib.rs"), "fn f() {}\n").unwrap();
+    std::fs::write(tmp.join("tests/api.rs"), "assert!(true);\n").unwrap();
+
+    s.handoff(
+        "claude-opus", "anthropic", HandoffReason::Manual, "fix the bug",
+        vec![], vec!["finish".into()], vec![], String::new(), Policy::AllowAll,
+    )
+    .unwrap();
+
+    let brief = s
+        .transcript()
+        .unwrap()
+        .into_iter()
+        .find(|(e, _)| e.kind == chorus_core::EventKind::Handoff)
+        .map(|(_, b)| b)
+        .expect("handoff event");
+    assert!(brief.contains("finish"), "caller's pending kept: {brief}");
+    assert!(
+        brief.contains("check the tests edited alongside code") && brief.contains("tests/api.rs"),
+        "{brief}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn every_prompt_carries_the_honesty_guidance_but_the_ledger_does_not() {
+    let tmp = std::env::temp_dir().join(format!("chorus-honesty-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let mut s = Session::create(&tmp.join("store.db"), &tmp, "honesty")
+        .unwrap()
+        .with_bridge(mock_bridge());
+    s.run_turn("codex", "openai", "MOCK_ECHO_SECRETS add a feature", Policy::AllowAll).unwrap();
+
+    let saw = std::fs::read_to_string(tmp.join("mock-saw.txt")).expect("mock recorded the prompt");
+    assert!(saw.contains("ask the user before starting") && saw.contains("Do not edit, weaken, skip or delete a test"), "{saw}");
+    assert!(!saw.contains("chorus_ask_user"), "no answerer registered, so no tool named: {saw}");
+    // Rule 2.1: guidance rides with the prompt, it is not something anyone said.
+    for (_, body) in s.transcript().unwrap() {
+        assert!(!body.contains("Do not edit, weaken, skip"), "guidance leaked into the ledger");
+    }
+
+    // With an answerer registered the tool is listed, so the prompt may name it.
+    s.set_question_asker(Some(std::sync::Arc::new(|_| None)));
+    s.run_turn("codex", "openai", "MOCK_ECHO_SECRETS again", Policy::AllowAll).unwrap();
+    let saw = std::fs::read_to_string(tmp.join("mock-saw.txt")).unwrap();
+    assert!(saw.contains("chorus_ask_user"), "{saw}");
     let _ = std::fs::remove_dir_all(&tmp);
 }

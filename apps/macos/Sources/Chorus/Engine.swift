@@ -53,6 +53,8 @@ struct TurnResult: Codable {
 struct DiffResult: Codable {
     let ok: Bool?
     let diff: String?
+    /// Changed paths Rust judged to be tests (drawn as a "แก้เทสต์" label).
+    let test_files: [String]?
 }
 
 struct SimpleResult: Codable {
@@ -693,6 +695,8 @@ final class Engine: ObservableObject {
             || f.turn.tools.map(\.state) != live.tools.map(\.state) || f.turn.tools.count != live.tools.count {
             live = f.turn
         }
+        // The agent's own plan, already in checklist shape (replaces the list).
+        if let plan = f.plan, plan != checklist { checklist = plan }
         if f.contextUsed != contextUsed { contextUsed = f.contextUsed }
         if f.contextWindow != contextWindow { contextWindow = f.contextWindow }
         for (id, status) in f.statuses where sessionStatus[id] != status { sessionStatus[id] = status }
@@ -795,14 +799,16 @@ final class Engine: ObservableObject {
                 let json = scope.withCString { cScope in
                     Self.string(from: chorus_reader_working_diff_scoped(r.raw, cScope, Int32(incProjected)))
                 }
-                let diff = Self.decode(DiffResult.self, json)?.diff
+                let result = Self.decode(DiffResult.self, json)
+                let diff = result?.diff
+                let tests = Set(result?.test_files ?? [])
                 let hunks = diff.map(parseHunks)
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.liveDiffPending = false
                     self.liveDiffAt = Date()
                     if sid == self.sessionID, let diff, let hunks, diff != self.workingDiff {
-                        self.setWorkingDiff(diff, hunks: hunks)
+                        self.setWorkingDiff(diff, hunks: hunks, testFiles: tests)
                     }
                 }
             }
@@ -1846,7 +1852,9 @@ final class Engine: ObservableObject {
             let diffJSON = Self.string(from: chorus_working_diff(h.raw))
             // Parse here, off the main thread, once per refresh — views read
             // `diffHunks` instead of re-parsing the diff on every render.
-            let diff = Self.decode(DiffResult.self, diffJSON).map { $0.diff ?? "" }
+            let diffResult = Self.decode(DiffResult.self, diffJSON)
+            let diff = diffResult.map { $0.diff ?? "" }
+            let tests = Set(diffResult?.test_files ?? [])
             let hunks = diff.map(parseHunks)
             let memJSON = Self.string(from: chorus_memory_state(h.raw))
             let taskJSON = Self.string(from: chorus_task_state(h.raw))
@@ -1867,7 +1875,7 @@ final class Engine: ObservableObject {
                     self.uncompacted = w.pending ?? 0
                 }
                 if let diff, let hunks, diff != self.workingDiff {
-                    self.setWorkingDiff(diff, hunks: hunks)
+                    self.setWorkingDiff(diff, hunks: hunks, testFiles: tests)
                 }
                 if let s = Self.decode(MemoryState.self, memJSON) {
                     self.facts = s.facts ?? []
@@ -2260,6 +2268,29 @@ final class Engine: ObservableObject {
         }
     }
 
+    /// Numbers for the metrics strip; nil until the first read for this session.
+    @Published var metrics: SessionMetrics?
+    private struct MetricsResult: Codable { let ok: Bool; let metrics: SessionMetrics? }
+
+    /// Ask Rust for the strip's numbers (store read by path, off the main
+    /// thread: the limit lookup may spawn the agent CLI on a cold cache).
+    /// The account is the agent that spoke last; no match = no limit chip.
+    func refreshMetrics(db: String) {
+        let sid = sessionID
+        guard sid >= 0 else { metrics = nil; return }
+        let account = events.last(where: { $0.actor != "user" })?.actor ?? ""
+        ioQueue.async { [weak self] in
+            let json = db.withCString { d in
+                account.withCString { a in Self.string(from: chorus_session_metrics(d, sid, a)) }
+            }
+            let r = Self.decode(MetricsResult.self, json)
+            DispatchQueue.main.async {
+                guard let self, self.sessionID == sid else { return }
+                self.metrics = r?.metrics
+            }
+        }
+    }
+
     /// Hand the session to another agent with nothing typed by the user: the
     /// brief is built from task state the ledger already holds. This is the
     /// difference between "switch agent" being a form and being a button.
@@ -2355,9 +2386,13 @@ final class Engine: ObservableObject {
     /// Files in `diffHunks`, in diff order.
     @Published private(set) var diffFiles: [String] = []
 
-    func setWorkingDiff(_ diff: String, hunks: [DiffHunk]) {
+    /// Changed files Rust classified as tests; the Changes pane labels them.
+    @Published private(set) var testFiles: Set<String> = []
+
+    func setWorkingDiff(_ diff: String, hunks: [DiffHunk], testFiles: Set<String> = []) {
         workingDiff = diff
         diffHunks = hunks
+        self.testFiles = testFiles
         diffFiles = hunks.map(\.file).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
     }
     @Published var facts: [String] = []

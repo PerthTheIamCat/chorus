@@ -1,6 +1,6 @@
 //! Checkpoint tests. These shell out to `git`; skipped cleanly if it's absent.
 
-use chorus_core::checkpoint::Checkpoint;
+use chorus_core::checkpoint::{is_test_path, test_files_in_diff, Checkpoint};
 use std::process::Command;
 
 fn have_git() -> bool {
@@ -171,4 +171,97 @@ fn peek_diff_matches_the_user_diff_without_touching_the_shared_index() {
     assert!(!peek.contains("AGENTS.md"), "{peek}");
     assert_eq!(peek, ck.diff_since_user(&base).unwrap());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_paths_are_recognised_by_name_and_folder() {
+    for p in [
+        "tests/session.rs",
+        "crates/x/tests/a.rs",
+        "src/__tests__/App.tsx",
+        "spec/models/user_spec.rb",
+        "pkg/foo_test.go",
+        "web/app.test.ts",
+        "web/app.spec.js",
+        "tests/test_api.py",
+        "test_utils.py",
+        "conftest.py",
+        "app/src/test/java/com/x/FooTest.java",
+        "Sources/ChorusTests/EngineTests.swift",
+        "Tests/ChorusTests/Helpers.swift",
+        "./tests/a.rs",
+    ] {
+        assert!(is_test_path(p), "{p} should be a test");
+    }
+    for p in [
+        "src/lib.rs",
+        "src/latest.rs",
+        "src/Latest.swift",
+        "src/Contest.py",
+        "README.md",
+        "tests/README.md",
+        "docs/spec/notes.txt",
+        "Cargo.lock",
+        "crates/chorus-core/src/testing_utils.rs",
+        "",
+    ] {
+        assert!(!is_test_path(p), "{p} should not be a test");
+    }
+}
+
+#[test]
+fn test_files_are_picked_out_of_a_unified_diff() {
+    let diff = "\
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1 +1 @@
+-a
++b
+diff --git a/tests/api.rs b/tests/api.rs
+--- a/tests/api.rs
++++ b/tests/api.rs
+@@ -1 +1 @@
+-assert_eq!(1, 1);
++assert_eq!(1, 2);
+diff --git a/tests/gone.rs b/tests/gone.rs
+deleted file mode 100644
+--- a/tests/gone.rs
++++ /dev/null
+@@ -1 +0,0 @@
+-x
+diff --git a/tests/new_test.py b/tests/new_test.py
+new file mode 100644
+--- /dev/null
++++ b/tests/new_test.py
+@@ -0,0 +1 @@
++x
+";
+    assert_eq!(
+        test_files_in_diff(diff),
+        vec!["tests/api.rs", "tests/gone.rs", "tests/new_test.py"]
+    );
+    assert!(test_files_in_diff("").is_empty());
+}
+
+#[test]
+fn diff_stats_flag_the_test_files_a_turn_edited() {
+    if !have_git() {
+        return;
+    }
+    let ws = workspace();
+    std::fs::create_dir_all(ws.join("tests")).unwrap();
+    std::fs::write(ws.join("src.rs"), "fn f() -> i32 { 1 }\n").unwrap();
+    std::fs::write(ws.join("tests/t.rs"), "assert_eq!(f(), 1);\n").unwrap();
+    let ckpt = Checkpoint::open(&ws).unwrap();
+    let base = ckpt.snapshot("base").unwrap();
+
+    std::fs::write(ws.join("src.rs"), "fn f() -> i32 { 2 }\n").unwrap();
+    std::fs::write(ws.join("tests/t.rs"), "assert_eq!(f(), 2);\n").unwrap();
+
+    let report = ckpt.diff_file_stats(&base, false).unwrap();
+    let flag = |p: &str| report.files.iter().find(|f| f.path == p).map(|f| f.is_test);
+    assert_eq!(flag("tests/t.rs"), Some(true));
+    assert_eq!(flag("src.rs"), Some(false));
+    let _ = std::fs::remove_dir_all(&ws);
 }
