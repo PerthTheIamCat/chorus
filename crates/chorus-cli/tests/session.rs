@@ -1468,6 +1468,19 @@ fn a_tool_call_repeated_three_times_in_a_row_is_flagged_in_the_thread() {
 
 #[test]
 fn a_tool_call_repeated_six_times_stops_the_turn_and_says_why() {
+    // Stopping is process-wide (the Stop button's mechanism: it kills every
+    // agent this process spawned), so it runs in its own process or it would
+    // kill the other tests' mock agents running in parallel.
+    const CHILD: &str = "CHORUS_TEST_LOOP_STOP_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "a_tool_call_repeated_six_times_stops_the_turn_and_says_why", "--nocapture"])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
     let tmp = std::env::temp_dir().join(format!("chorus-loop-stop-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
     let mut s = Session::create(&tmp.join("store.db"), &tmp, "loop")
