@@ -2242,6 +2242,19 @@ impl Session {
             );
         }
 
+        // Optional project notes written at idle by a local model (E6). A plain
+        // read of a stored row: off unless CHORUS_SUMMARY_MODEL is set, and
+        // never generated here (7.2b).
+        if let Some(notes) =
+            chorus_core::project_notes::for_context(c, &self.cwd.to_string_lossy())
+        {
+            code.push(ContextItem {
+                text: format!("project notes:\n{notes}"),
+                key: None,
+                label: "project-notes".into(),
+            });
+        }
+
         // Facts relevant to what the user last said come first; with no user
         // message yet this is the plain most-used order.
         let query = bodies

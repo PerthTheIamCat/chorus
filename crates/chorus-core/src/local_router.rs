@@ -131,7 +131,34 @@ pub fn route_task_fast_with_db(
             };
         }
     }
-    route_task_fast(prompt, candidates)
+    let base = route_task_fast(prompt, candidates);
+    match conn {
+        Some(c) => with_outcomes(c, prompt, base),
+        None => base,
+    }
+}
+
+/// Let measured outcomes (tests passed, not rewound, no quality handoff — see
+/// [`crate::outcomes`]) pick a better model than the keyword heuristic, within
+/// the same cost tier and only past the minimum sample size. A person's own
+/// override, handled before this, always wins.
+fn with_outcomes(conn: &Connection, prompt: &str, base: RouteDecision) -> RouteDecision {
+    let task = crate::outcomes::classify(prompt);
+    let Some(s) = crate::outcomes::suggest(
+        conn,
+        task,
+        &base.recommended_agent,
+        &base.recommended_model,
+    ) else {
+        return base;
+    };
+    RouteDecision {
+        estimated_cost_usd: calculate_cost(&s.model, 1500, 500).cost_usd,
+        recommended_model: s.model,
+        recommended_agent: s.agent,
+        reason: s.reason,
+        ..base
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -416,5 +443,39 @@ mod tests {
         assert!(find_learned_route(&conn, "fix typo", RoutePreset::Max)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn measured_outcomes_steer_the_fast_route_but_overrides_still_win() {
+        use crate::{actor, ledger, types::EventKind, types::NewEvent, Store};
+        let st = Store::open_in_memory().unwrap();
+        let c = st.conn();
+        let sess = ledger::new_session(c, "t", "/p").unwrap();
+        let user = actor::intern(c, "user", "human").unwrap();
+        let a = actor::intern(c, "codex", "codex").unwrap();
+        // The heuristic sends a short bug fix to gpt-5.1-codex-mini; the
+        // record says gpt-5.1-codex passes the tests every time.
+        for i in 0..8 {
+            ledger::append(c, &NewEvent::new(sess, EventKind::Msg, user, "fix bug")).unwrap();
+            ledger::append(c, &NewEvent::new(sess, EventKind::ToolResult, a, "cargo test → completed")).unwrap();
+            let model = if i < 6 { "gpt-5.1-codex" } else { "gpt-5.1-codex-mini" };
+            ledger::append(
+                c,
+                &NewEvent::new(sess, EventKind::Msg, a, "done").model(Some(model.into())),
+            )
+            .unwrap();
+        }
+        crate::outcomes::refresh(c, c, "t", 10).unwrap();
+
+        let d = route_task_fast_with_db(Some(c), "fix bug", &[], RoutePreset::Balanced);
+        assert_eq!(d.recommended_model, "gpt-5.1-codex");
+        assert!(d.reason.starts_with("เรียนรู้จากผลจริง"), "{}", d.reason);
+
+        // Without a database, or with a person's own choice on file, nothing changes.
+        let plain = route_task_fast_with_db(None, "fix bug", &[], RoutePreset::Balanced);
+        assert_eq!(plain.recommended_model, "gpt-5.1-codex-mini");
+        record_route_learning(c, "fix bug", "claude-opus-4-6", "claude", "", RoutePreset::Balanced).unwrap();
+        let d = route_task_fast_with_db(Some(c), "fix bug", &[], RoutePreset::Balanced);
+        assert_eq!(d.recommended_model, "claude-opus-4-6");
     }
 }

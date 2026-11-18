@@ -191,6 +191,8 @@ final class Engine: ObservableObject {
     }
 
     private var handle: Handle?
+    /// Ledger of the open session, for the background learn pass (`LearnIdle`).
+    private var learnDB = ""
     private let queue = DispatchQueue(label: "chorus.engine")
     /// The read-only twin of `handle` (`chorus_reader_open`). Used only on
     /// `readQueue`, never on `queue`: SQLite WAL lets it read while a turn on
@@ -239,6 +241,7 @@ final class Engine: ObservableObject {
     /// workspace tree (checkpoint.rs) — slow on a big folder, so it runs on
     /// `queue`, not the main thread.
     func open(db: String, cwd: String, title: String) {
+        learnDB = db
         checklist = []
         loadSubagents(db: db)
         swap { chorus_engine_open(db, cwd, title) }
@@ -246,6 +249,7 @@ final class Engine: ObservableObject {
 
     /// Reopen a session that already exists, without starting a new one.
     func reopen(db: String, sessionID: Int64) {
+        learnDB = db
         loadChecklist(db: db, sessionID: sessionID)
         loadSubagents(db: db)
         swap { chorus_engine_reopen(db, sessionID) }
@@ -2376,6 +2380,7 @@ final class Engine: ObservableObject {
                 if let remaining = r?.remaining {
                     self.uncompacted = Int64(remaining)
                 }
+                LearnIdle.runIfDue(db: self.learnDB)
             }
         }
     }

@@ -545,6 +545,14 @@ cache ใน `RepoMapCache` (หน่วยความจำ ไม่ลง�
 - เทสต์ตั้ง `CHORUS_SECRETS_BACKEND=memory` — `user_vault()` เช็คทุกครั้ง ไม่งั้น `cargo test` บน Mac จะเขียนค่าปลอมลง Keychain จริงของคนรัน · Keychain ล็อก (CI) → เก็บในหน่วยความจำรอบนี้แทน (`fallback`) ยัง mask และ inject ได้
 - เทสต์สร้าง key ปลอมตอนรัน (`fake()`) ห้ามเขียนเป็น literal — GitHub push protection จะบล็อก push
 
+### 7.29 เรียนรู้จากงานที่ผ่านมา — สิ่งที่ต้องรู้ (18 พ.ย. 2026 · ยังไม่เคยรันกับ agent จริงบน Mac)
+
+- **router เรียนรู้จากผลจริง** (`outcomes.rs`): คะแนนเทิร์น = เทสต์ผ่าน ∧ ไม่ถูก rewind (fork ชื่อลงท้าย `(ย้อนกลับ)`) ∧ ไม่มี handoff แบบ context_exhausted/failover · handoff เพราะโควตา/rate limit/ผู้ใช้ขอ = เป็นกลาง ข้ามทั้งเทิร์น · เทิร์นไม่มีหลักฐาน (ไม่รันเทสต์ ไม่ถูก rewind ไม่ถูกส่งต่อ) ไม่ถูกเก็บ · "เทสต์ผ่าน" ดูจาก status `completed` ของคำสั่งทดสอบ ไม่มี exit code (bridge ไม่ส่งมา) — ถ้า bridge ไหนรายงาน completed ทั้งที่ exit≠0 ตัวเลขจะเอนเอียง
+- **ห้ามข้ามระดับราคา**: ข้อเสนอจาก outcome ต้องอยู่ tier เดียวกับตัวที่ router เลือก (`tier_of` = ราคา output ≥ $15/M) — นโยบายเจ้าของ: คิดหนัก→ใหญ่ ตามแผน→เล็ก · ต้อง ≥5 เทิร์น/เซลล์ และ Wilson lower bound ชนะตัวเดิม ≥0.05 และ ≥0.5
+- ledger เป็นรายโปรเจกต์ (`<โปรเจกต์>/.chorus/store.db`) แต่ router เป็น global → idle pass คัดลอกคะแนนไป `~/.chorus/store.db` (`router_outcome`, key มี `src`) · `chorus_route_json` อ่านที่นั่นผ่าน `outcomes::refine_proposal` · `chorus_route_fast_json` ไม่ได้ถูก Swift เรียก
+- **ร่าง skill ไม่เปิดใช้เอง** (`skill_drafts.rs`) อยู่ `.chorus/skill-drafts/` (agent เขียนไม่ได้ — carve-out `.chorus` ของ Seatbelt) · autonomy ไม่มีผลกับ skill
+- idle pass (`chorus_learn_idle_json`) เปิด connection ของตัวเอง รันบน queue แยก ไม่แตะ queue ของ engine (7.7) · โน้ตโปรเจกต์อ่านใน `assemble_context` ได้เฉพาะตอนตั้ง `CHORUS_SUMMARY_MODEL` และเป็นการอ่านแถวที่เก็บไว้เท่านั้น (7.2b)
+
 ### 7.3 repo เงาสำหรับ checkpoint
 ต้องยึด `.gitignore` ของผู้ใช้ ไม่งั้น `.chorus/` จะโตกว่าโปรเจกต์จริง
 
