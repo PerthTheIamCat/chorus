@@ -2958,7 +2958,8 @@ struct ContentView: View {
                     LazyVStack(alignment: .leading, spacing: 6) {
                         ForEach(order, id: \.self) { f in
                             let fileHunks = files[f] ?? []
-                            FileChangesHeader(file: f, hunks: fileHunks, open: !collapsedFiles.contains(f)) {
+                            FileChangesHeader(file: f, hunks: fileHunks, open: !collapsedFiles.contains(f),
+                                              isTest: engine.testFiles.contains(f)) {
                                 if collapsedFiles.contains(f) { collapsedFiles.remove(f) } else { collapsedFiles.insert(f) }
                             }
                             if !collapsedFiles.contains(f) {
@@ -3985,6 +3986,8 @@ struct FileChangesHeader: View {
     let file: String
     let hunks: [DiffHunk]
     let open: Bool
+    /// Rust says this path is a test file: an agent that edits tests deserves a second look.
+    var isTest: Bool = false
     let toggle: () -> Void
 
     var body: some View {
@@ -3994,6 +3997,14 @@ struct FileChangesHeader: View {
                     .rotationEffect(.degrees(open ? 90 : 0)).foregroundStyle(.secondary)
                 Image(systemName: "doc.text").foregroundStyle(.secondary)
                 Text((file as NSString).lastPathComponent).font(.callout.weight(.medium)).lineLimit(1)
+                if isTest {
+                    Text("แก้เทสต์")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Color.orange.opacity(0.15), in: Capsule())
+                        .help("ไฟล์นี้เป็นเทสต์ — ตรวจว่าแก้เพราะ spec เปลี่ยนจริง ไม่ใช่แก้ให้ผ่าน")
+                }
                 Spacer(minLength: 4)
                 Text("+\(hunks.reduce(0) { $0 + $1.addCount })").foregroundStyle(.green)
                 Text("−\(hunks.reduce(0) { $0 + $1.delCount })").foregroundStyle(.red)

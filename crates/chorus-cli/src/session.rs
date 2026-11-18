@@ -803,6 +803,9 @@ pub struct Session {
     /// Set while a plan turn runs (`run_plan_with_attachments`): the prompt
     /// carries `PLAN_MODE_GUIDANCE`, the ledger keeps only what the user typed.
     plan_turn: bool,
+    /// Loop-guard notices from the turn in flight, written to the ledger after
+    /// the agent's own events so the thread reads in the order things happened.
+    loop_notes: std::sync::Mutex<Vec<String>>,
     /// The user's computer-use switch (Settings › off by default).
     computer_use: bool,
     /// Let Claude use the user's own Chrome through the Claude in Chrome
@@ -884,6 +887,112 @@ const PLAN_MODE_GUIDANCE: &str = "\n\n(Chorus plan mode: this turn is read-only 
      not edit files, run commands that change anything, or spawn subagents. Reply with a short \
      numbered plan: what you will change and in which files, the risks, and how you will verify \
      it. The user approves the plan before anything runs.)\n";
+
+/// Rides with every turn's prompt, never stored (rule 2.1). Two failure modes
+/// make an agent look finished while it is not: starting on a task that lacks
+/// what it needs (then guessing), and bending a test or the spec so a check
+/// goes green. Both are cheaper to say out loud than to review afterwards.
+const HONESTY_GUIDANCE: &str = "\n(Chorus: if the task is missing information you need in order \
+     to act (which file, which behaviour, which constraint), ask the user before starting instead \
+     of guessing. If the spec cannot be met, say so plainly. Do not edit, weaken, skip or delete \
+     a test just to make it pass; if a test is wrong, say why and let the user decide.)\n";
+
+/// Added only when someone is registered to answer: an agent is never told to
+/// call a tool it was not given.
+const ASK_USER_HINT: &str = "(Chorus: you can ask with the `chorus_ask_user` tool.)\n";
+
+/// Identical consecutive tool calls in one turn: warn at `warn`, stop at `stop`.
+/// Consecutive on purpose. Running `cargo test` five times in a fix loop is
+/// work (an edit sits between the runs); the same call back to back with
+/// nothing in between is a loop. Off with `CHORUS_LOOP_GUARD=off`.
+const LOOP_WARN_AT: u32 = 3;
+const LOOP_STOP_AT: u32 = 6;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum LoopVerdict {
+    Fine,
+    Warn(u32),
+    Stop(u32),
+}
+
+/// Counts back-to-back repeats of the same tool call: same title and same
+/// arguments. Pure, so the thresholds are testable without an agent.
+///
+/// A title alone can be generic ("Read file"), so six different reads in a row
+/// would look like a loop. A call whose frame carried no arguments can still
+/// count toward the warning, but never toward a Stop: a false Stop throws away
+/// a turn, a missed loop only costs tokens.
+#[derive(Debug)]
+pub struct RepeatGuard {
+    warn_at: u32,
+    stop_at: u32,
+    last: String,
+    last_args: Option<u64>,
+    run: u32,
+}
+
+impl RepeatGuard {
+    pub fn new(warn_at: u32, stop_at: u32) -> Self {
+        Self {
+            warn_at,
+            stop_at,
+            last: String::new(),
+            last_args: None,
+            run: 0,
+        }
+    }
+
+    /// Feed the next tool call. `Warn` is returned once, at the threshold,
+    /// not on every further repeat; `Stop` once, at its own, and only when
+    /// the repeated calls carried arguments to compare.
+    pub fn see(&mut self, title: &str, args: Option<u64>) -> LoopVerdict {
+        let title = title.trim();
+        if title == self.last && args == self.last_args {
+            self.run += 1;
+        } else {
+            self.last = title.to_string();
+            self.last_args = args;
+            self.run = 1;
+        }
+        if self.run == self.stop_at && self.last_args.is_some() {
+            LoopVerdict::Stop(self.run)
+        } else if self.run == self.warn_at {
+            LoopVerdict::Warn(self.run)
+        } else {
+            LoopVerdict::Fine
+        }
+    }
+
+    pub fn last(&self) -> &str {
+        &self.last
+    }
+}
+
+/// The turn was cut off because the agent repeated one call. Carried as a
+/// typed error so the relay can tell it from the user's own Stop press.
+#[derive(Debug)]
+pub struct LoopStopped(pub String);
+
+impl std::fmt::Display for LoopStopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for LoopStopped {}
+
+fn loop_guard_enabled() -> bool {
+    !std::env::var("CHORUS_LOOP_GUARD").is_ok_and(|v| v.eq_ignore_ascii_case("off"))
+}
+
+fn short_title(title: &str) -> String {
+    let t: String = title.chars().filter(|c| !c.is_control()).collect();
+    if t.chars().count() > 80 {
+        format!("{}…", t.chars().take(80).collect::<String>())
+    } else {
+        t
+    }
+}
 
 /// What the user "says" when they press approve on a plan. Stored in the
 /// ledger like any message, so every later agent can see the plan was agreed.
@@ -983,6 +1092,7 @@ impl Session {
             lead_policy: None,
             repo_map: Default::default(),
             plan_turn: false,
+            loop_notes: std::sync::Mutex::new(Vec::new()),
             computer_use: false,
             claude_chrome: false,
             hide_secret_files: true,
@@ -1037,6 +1147,7 @@ impl Session {
             lead_policy: None,
             repo_map: Default::default(),
             plan_turn: false,
+            loop_notes: std::sync::Mutex::new(Vec::new()),
             computer_use: false,
             claude_chrome: false,
             hide_secret_files: true,
@@ -1425,6 +1536,21 @@ impl Session {
             diff
         };
 
+        // The last turn changed tests together with code: tell the next agent
+        // to look. Read from the shadow repo, so it sees shell edits too.
+        let mut pending = pending;
+        let turn_base = self.last_turn_guard.as_deref().unwrap_or(&self.base_ckpt);
+        if let Some(note) = self
+            .checkpoint
+            .as_ref()
+            .and_then(|ck| ck.files_since(turn_base).ok())
+            .and_then(|files| chorus_core::handoff::tests_with_code_note(&files))
+        {
+            if !pending.contains(&note) {
+                pending.push(note);
+            }
+        }
+
         let brief = Brief::build(BriefInput {
             goal: goal.to_string(),
             done,
@@ -1640,6 +1766,11 @@ impl Session {
                     }),
                     Err(e) => Err(e),
                 }
+            }
+            Err(e) if e.downcast_ref::<LoopStopped>().is_some() => {
+                // Chorus cut the turn off for repeating one call. Not a
+                // provider failure either: the next agent would loop too.
+                Err(e)
             }
             Err(_) if chorus_acp::was_cancelled() => {
                 // The user pressed Stop. Not a provider failure — failing
@@ -2493,6 +2624,10 @@ impl Session {
         if self.plan_turn {
             prompt_text.push_str(PLAN_MODE_GUIDANCE);
         }
+        prompt_text.push_str(HONESTY_GUIDANCE);
+        if chorus_core::ask_user::available(self.store.conn(), self.sess) {
+            prompt_text.push_str(ASK_USER_HINT);
+        }
         if !named.is_empty() {
             prompt_text.push_str(secrets::AGENT_GUIDANCE);
         }
@@ -2590,8 +2725,67 @@ impl Session {
                 }) as chorus_acp::UsageObserver)
             });
         let previous = chorus_acp::set_usage_observer(observer);
+        // Same idea for tool calls: count back-to-back repeats as they start.
+        // Warning is a push (live) plus a ledger note after the turn; stopping
+        // kills the agent the way the Stop button does, but scoped to this
+        // turn's tag when it is an orchestra child.
+        let loop_guard = std::rc::Rc::new(std::cell::RefCell::new(RepeatGuard::new(
+            LOOP_WARN_AT,
+            LOOP_STOP_AT,
+        )));
+        let loop_notes = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let loop_stop = std::rc::Rc::new(std::cell::Cell::new(None::<String>));
+        let tool_observer = loop_guard_enabled().then(|| {
+            let guard = loop_guard.clone();
+            let notes = loop_notes.clone();
+            let stop = loop_stop.clone();
+            let tag = chorus_acp::scope::current();
+            Box::new(move |title: &str, args: Option<u64>| {
+                let verdict = guard.borrow_mut().see(title, args);
+                let shown = short_title(guard.borrow().last());
+                let note = match verdict {
+                    LoopVerdict::Fine => return,
+                    LoopVerdict::Warn(n) => {
+                        format!("⚠ agent เรียก `{shown}` ซ้ำ {n} ครั้งติดกัน — อาจกำลังวนลูป")
+                    }
+                    LoopVerdict::Stop(n) => format!(
+                        "⛔ หยุดเทิร์น: agent เรียก `{shown}` ซ้ำ {n} ครั้งติดกัน — Chorus ตัดให้เพื่อไม่ให้วนต่อ"
+                    ),
+                };
+                chorus_acp::emit_progress("warning", &note);
+                notes.borrow_mut().push(note.clone());
+                if matches!(verdict, LoopVerdict::Stop(_)) {
+                    stop.set(Some(note));
+                    match tag {
+                        Some(t) => {
+                            chorus_acp::cancel_tag(t);
+                        }
+                        None => {
+                            chorus_acp::cancel_active();
+                        }
+                    }
+                }
+            }) as chorus_acp::ToolObserver
+        });
+        let previous_tool = chorus_acp::set_tool_observer(tool_observer);
         let out = agent.prompt_blocks(blocks, decide).context("agent turn");
+        chorus_acp::set_tool_observer(previous_tool);
         chorus_acp::set_usage_observer(previous);
+        if let Ok(mut held) = self.loop_notes.lock() {
+            held.extend(loop_notes.borrow_mut().drain(..));
+        }
+        if let Some(why) = loop_stop.take() {
+            if out.is_err() {
+                // The agent's events died with the process, so nothing will
+                // call `persist_outcome`: the notice is what the thread keeps.
+                self.flush_loop_notes();
+                return Err(anyhow::Error::new(LoopStopped(why)));
+            }
+        }
+        if out.is_err() {
+            // A failed turn never reaches `persist_outcome`.
+            self.flush_loop_notes();
+        }
         out
     }
 
@@ -2829,6 +3023,7 @@ impl Session {
             0,
             outcome.cost_usd,
         )?;
+        seqs.extend(self.flush_loop_notes());
         // The agent's own plan is the task list the shell shows (the ACP
         // `plan` frame replaces the whole list each time, so the last one
         // wins). It goes through the same checklist as `chorus_update_checklist`.
@@ -2860,6 +3055,34 @@ impl Session {
             self.announce(last);
         }
         Ok(seqs)
+    }
+
+    /// Write the loop guard's notices to the ledger as messages from
+    /// "chorus", not from the agent: the agent did not say them, and the next
+    /// agent should read them as what the harness observed.
+    fn flush_loop_notes(&self) -> Vec<i64> {
+        let notes: Vec<String> = self
+            .loop_notes
+            .lock()
+            .map(|mut n| std::mem::take(&mut *n))
+            .unwrap_or_default();
+        if notes.is_empty() {
+            return Vec::new();
+        }
+        let c = self.store.conn();
+        let Ok(who) = actor::intern(c, "chorus", "system") else {
+            return Vec::new();
+        };
+        let seqs: Vec<i64> = notes
+            .iter()
+            .filter_map(|n| {
+                ledger::append(c, &NewEvent::new(self.sess, EventKind::Msg, who, n.clone())).ok()
+            })
+            .collect();
+        if let Some(&last) = seqs.last() {
+            self.announce(last);
+        }
+        seqs
     }
 
     /// Store each provider subagent of the turn as its own `kind=provider`

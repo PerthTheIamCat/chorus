@@ -53,6 +53,8 @@ struct TurnResult: Codable {
 struct DiffResult: Codable {
     let ok: Bool?
     let diff: String?
+    /// Changed paths Rust judged to be tests (drawn as a "แก้เทสต์" label).
+    let test_files: [String]?
 }
 
 struct SimpleResult: Codable {
@@ -797,14 +799,16 @@ final class Engine: ObservableObject {
                 let json = scope.withCString { cScope in
                     Self.string(from: chorus_reader_working_diff_scoped(r.raw, cScope, Int32(incProjected)))
                 }
-                let diff = Self.decode(DiffResult.self, json)?.diff
+                let result = Self.decode(DiffResult.self, json)
+                let diff = result?.diff
+                let tests = Set(result?.test_files ?? [])
                 let hunks = diff.map(parseHunks)
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.liveDiffPending = false
                     self.liveDiffAt = Date()
                     if sid == self.sessionID, let diff, let hunks, diff != self.workingDiff {
-                        self.setWorkingDiff(diff, hunks: hunks)
+                        self.setWorkingDiff(diff, hunks: hunks, testFiles: tests)
                     }
                 }
             }
@@ -1848,7 +1852,9 @@ final class Engine: ObservableObject {
             let diffJSON = Self.string(from: chorus_working_diff(h.raw))
             // Parse here, off the main thread, once per refresh — views read
             // `diffHunks` instead of re-parsing the diff on every render.
-            let diff = Self.decode(DiffResult.self, diffJSON).map { $0.diff ?? "" }
+            let diffResult = Self.decode(DiffResult.self, diffJSON)
+            let diff = diffResult.map { $0.diff ?? "" }
+            let tests = Set(diffResult?.test_files ?? [])
             let hunks = diff.map(parseHunks)
             let memJSON = Self.string(from: chorus_memory_state(h.raw))
             let taskJSON = Self.string(from: chorus_task_state(h.raw))
@@ -1869,7 +1875,7 @@ final class Engine: ObservableObject {
                     self.uncompacted = w.pending ?? 0
                 }
                 if let diff, let hunks, diff != self.workingDiff {
-                    self.setWorkingDiff(diff, hunks: hunks)
+                    self.setWorkingDiff(diff, hunks: hunks, testFiles: tests)
                 }
                 if let s = Self.decode(MemoryState.self, memJSON) {
                     self.facts = s.facts ?? []
@@ -2380,9 +2386,13 @@ final class Engine: ObservableObject {
     /// Files in `diffHunks`, in diff order.
     @Published private(set) var diffFiles: [String] = []
 
-    func setWorkingDiff(_ diff: String, hunks: [DiffHunk]) {
+    /// Changed files Rust classified as tests; the Changes pane labels them.
+    @Published private(set) var testFiles: Set<String> = []
+
+    func setWorkingDiff(_ diff: String, hunks: [DiffHunk], testFiles: Set<String> = []) {
         workingDiff = diff
         diffHunks = hunks
+        self.testFiles = testFiles
         diffFiles = hunks.map(\.file).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
     }
     @Published var facts: [String] = []
