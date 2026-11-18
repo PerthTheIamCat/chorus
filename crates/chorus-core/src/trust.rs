@@ -96,6 +96,19 @@ impl TrustStore {
         }
         Ok(Consent { workspace: workspace.to_path_buf(), confine })
     }
+
+    /// Consent to run project code in `worktree`, a checkout of `workspace`
+    /// the orchestrator made for a child: trusting the project covers its own
+    /// worktrees, and nothing else.
+    pub fn consent_for_worktree<'a>(
+        &self,
+        workspace: &Path,
+        worktree: &Path,
+        confine: &'a Confine<'a>,
+    ) -> Result<Consent<'a>> {
+        self.consent(workspace, confine)?;
+        Ok(Consent { workspace: worktree.to_path_buf(), confine })
+    }
 }
 
 /// Proof that the user trusted this workspace, plus the sandbox to run in.

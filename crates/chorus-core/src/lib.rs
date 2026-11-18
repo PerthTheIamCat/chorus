@@ -43,6 +43,7 @@ pub mod merkle;
 pub mod mlx_runtime;
 pub mod model_manager;
 pub mod notify;
+pub mod orchestra_plan;
 pub mod permissions;
 pub mod pipeline;
 pub mod projector;
