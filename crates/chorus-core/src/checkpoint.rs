@@ -23,6 +23,8 @@ pub const PROJECTED_EXCLUDES: &[&str] = &[
     ":(exclude,top)GEMINI.md",
     ":(exclude,top).claude/skills",
     ":(exclude,top).claude/skills/**",
+    ":(exclude,top).agents/skills",
+    ":(exclude,top).agents/skills/**",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -146,6 +148,8 @@ pub fn is_projected_file(path: &str) -> bool {
         || p == "GEMINI.md"
         || p.starts_with(".claude/skills/")
         || p == ".claude/skills"
+        || p.starts_with(".agents/skills/")
+        || p == ".agents/skills"
 }
 
 /// Patterns the shadow repo always ignores, on top of the user's

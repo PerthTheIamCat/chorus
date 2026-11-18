@@ -286,6 +286,106 @@ pub struct SubagentMessage {
     pub created_ms: i64,
 }
 
+/// Marker between a task's plain text and its structured fields. The spec rides
+/// inside the existing `subagent.task` column (no schema change); everything
+/// before the marker is the goal, which is what UIs and briefs show.
+const SPEC_MARK: &str = "\n\u{1e}spec:";
+
+/// Structured brief for a spawned child (`chorus_spawn_agent`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskSpec {
+    pub goal: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files_owned: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub out_of_scope: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub output: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub done_when: String,
+}
+
+impl TaskSpec {
+    /// True when only `goal` is set, so the plain text needs no marker.
+    fn is_plain(&self) -> bool {
+        self.files_owned.is_empty()
+            && self.out_of_scope.is_empty()
+            && self.output.is_empty()
+            && self.done_when.is_empty()
+    }
+
+    /// The text stored in `subagent.task`.
+    pub fn encode(&self) -> String {
+        if self.is_plain() {
+            return self.goal.clone();
+        }
+        match serde_json::to_string(self) {
+            Ok(j) => format!("{}{SPEC_MARK}{j}", self.goal),
+            Err(_) => self.goal.clone(),
+        }
+    }
+
+    /// Split a stored task into its display text and structured fields.
+    /// A task written before this existed has no marker and parses as `None`.
+    pub fn split(task: &str) -> (&str, Option<TaskSpec>) {
+        match task.split_once(SPEC_MARK) {
+            Some((goal, json)) => (goal, serde_json::from_str(json).ok()),
+            None => (task, None),
+        }
+    }
+
+    /// The prompt body a child starts from.
+    pub fn render(&self) -> String {
+        let mut s = format!("Goal: {}", self.goal.trim());
+        if !self.files_owned.is_empty() {
+            s.push_str(&format!(
+                "\nFiles you own (only you may edit these): {}",
+                self.files_owned.join(", ")
+            ));
+        }
+        if !self.out_of_scope.is_empty() {
+            s.push_str(&format!(
+                "\nOut of scope (do not touch): {}",
+                self.out_of_scope.join(", ")
+            ));
+        }
+        if !self.output.is_empty() {
+            s.push_str(&format!("\nReturn: {}", self.output.trim()));
+        }
+        if !self.done_when.is_empty() {
+            s.push_str(&format!(
+                "\nDone when this passes: {}",
+                self.done_when.trim()
+            ));
+        }
+        s
+    }
+}
+
+/// Plain text of a stored task, without the structured tail.
+pub fn task_text(task: &str) -> &str {
+    TaskSpec::split(task).0
+}
+
+fn norm_path(p: &str) -> String {
+    let p = p.trim().trim_start_matches("./");
+    let p = p
+        .trim_end_matches("**")
+        .trim_end_matches('*')
+        .trim_end_matches('/');
+    p.to_string()
+}
+
+/// Two ownership entries clash when equal or one contains the other as a
+/// directory (`src` vs `src/a.rs`). Globs are compared by their literal prefix.
+fn paths_overlap(a: &str, b: &str) -> bool {
+    let (a, b) = (norm_path(a), norm_path(b));
+    if a.is_empty() || b.is_empty() {
+        return true; // "**" or "*" owns everything
+    }
+    a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"))
+}
+
 /// Status summary for waiting on child agents.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaitReport {
@@ -413,6 +513,34 @@ pub fn spawn_agent_with_options(
         }
     }
 
+    // Two writers on one file set is how parallel agents lose work: refuse
+    // while a sibling that is still running owns any of the same paths.
+    if let (Some(parent), (_, Some(spec))) = (parent_sess, TaskSpec::split(task)) {
+        if !spec.files_owned.is_empty() {
+            for sib in list_subagents(conn, Some(parent))? {
+                if sib.kind != SubagentKind::Chorus || sib.status != SubagentStatus::Running {
+                    continue;
+                }
+                let Some(other) = TaskSpec::split(&sib.task).1 else {
+                    continue;
+                };
+                if let Some((mine, theirs)) = spec.files_owned.iter().find_map(|m| {
+                    other
+                        .files_owned
+                        .iter()
+                        .find(|t| paths_overlap(m, t))
+                        .map(|t| (m, t))
+                }) {
+                    return Err(ChorusError::Invalid(format!(
+                        "files_owned {mine:?} overlaps {theirs:?}, owned by running agent #{} ({}); \
+                         wait for it or split the files differently",
+                        sib.id, sib.role
+                    )));
+                }
+            }
+        }
+    }
+
     let caps = caps
         .or_else(|| {
             parent_sess
@@ -472,10 +600,18 @@ pub fn spawn_agent_with_options(
     let child_cwd = worktree_path.as_deref().unwrap_or(cwd);
     let child_sess = if let Some(parent) = parent_sess {
         let title = format!("child-agent-{role}");
+        // Fork at the lead's latest event so the child's context carries the
+        // lead's goal, constraints and decisions through the usual rungs. An
+        // empty parent has nothing to inherit.
+        // Use the lead's history head, not its own newest row: a lead that is
+        // itself a fork may have no events of its own yet.
+        let fork_at: Option<i64> = crate::ledger::history(conn, parent, 1)?
+            .last()
+            .map(|e| e.seq);
         conn.execute(
             "INSERT INTO session(title, cwd, started_ms, forked_from, fork_at_seq)
-             VALUES (?1, ?2, ?3, ?4, NULL)",
-            params![title, child_cwd, now, parent],
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![title, child_cwd, now, parent, fork_at],
         )?;
         Some(conn.last_insert_rowid())
     } else {
@@ -884,7 +1020,7 @@ pub fn collect_results(
         .map(|a| SubagentBrief {
             id: a.id,
             role: a.role,
-            task: a.task,
+            task: task_text(&a.task).to_string(),
             status: a.status,
             summary: a.summary.unwrap_or_else(|| "No summary reported".into()),
             diff_stat: a.diff_stat.unwrap_or_else(|| "0 files changed".into()),

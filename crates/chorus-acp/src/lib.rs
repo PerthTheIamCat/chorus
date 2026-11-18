@@ -242,7 +242,7 @@ pub mod push {
     //! nothing here is written anywhere.
     //!
     //! Kinds: `thought` · `message` · `tool` · `tool_done` (`status\ttitle`) ·
-    //! `usage` (`used\tsize`) · `events` (new rows up to `seq`) · `status`
+    //! `usage` (`used\tsize`) · `plan` (JSON checklist) · `events` (new rows up to `seq`) · `status`
     //! (`running` | `idle` | `failed`).
 
     use std::cell::Cell;

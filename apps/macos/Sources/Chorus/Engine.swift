@@ -695,6 +695,8 @@ final class Engine: ObservableObject {
             || f.turn.tools.map(\.state) != live.tools.map(\.state) || f.turn.tools.count != live.tools.count {
             live = f.turn
         }
+        // The agent's own plan, already in checklist shape (replaces the list).
+        if let plan = f.plan, plan != checklist { checklist = plan }
         if f.contextUsed != contextUsed { contextUsed = f.contextUsed }
         if f.contextWindow != contextWindow { contextWindow = f.contextWindow }
         for (id, status) in f.statuses where sessionStatus[id] != status { sessionStatus[id] = status }
@@ -2262,6 +2264,29 @@ final class Engine: ObservableObject {
             let r = Self.decode(ChecklistResult.self, json)
             DispatchQueue.main.async {
                 self?.checklist = r?.items ?? []
+            }
+        }
+    }
+
+    /// Numbers for the metrics strip; nil until the first read for this session.
+    @Published var metrics: SessionMetrics?
+    private struct MetricsResult: Codable { let ok: Bool; let metrics: SessionMetrics? }
+
+    /// Ask Rust for the strip's numbers (store read by path, off the main
+    /// thread: the limit lookup may spawn the agent CLI on a cold cache).
+    /// The account is the agent that spoke last; no match = no limit chip.
+    func refreshMetrics(db: String) {
+        let sid = sessionID
+        guard sid >= 0 else { metrics = nil; return }
+        let account = events.last(where: { $0.actor != "user" })?.actor ?? ""
+        ioQueue.async { [weak self] in
+            let json = db.withCString { d in
+                account.withCString { a in Self.string(from: chorus_session_metrics(d, sid, a)) }
+            }
+            let r = Self.decode(MetricsResult.self, json)
+            DispatchQueue.main.async {
+                guard let self, self.sessionID == sid else { return }
+                self.metrics = r?.metrics
             }
         }
     }

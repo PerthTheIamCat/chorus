@@ -5,6 +5,7 @@ pub mod accounts;
 pub mod agents;
 pub mod drafts;
 pub mod limits;
+pub mod metrics;
 pub mod orchestra;
 pub mod session;
 pub use chorus_acp::{cancel_active, sandbox, set_push_sink, shutdown, Push};

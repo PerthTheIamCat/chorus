@@ -32,6 +32,19 @@ final class LivePushTests: XCTestCase {
         XCTAssertEqual(f.statuses, [1: "running", 2: "running"])
     }
 
+    /// The agent's own plan arrives whole and already in checklist shape;
+    /// a plan for another session never touches this one's list.
+    func testPlanPushReplacesTheChecklist() {
+        let plan = #"[{"text":"Read","done":true,"in_progress":false},{"text":"Fix","done":false,"in_progress":true}]"#
+        let f = LiveFold.apply([push(1, 1, "plan", plan), push(2, 1, "plan", "[]")], session: 1, lastSeq: 1,
+                               turn: .init(), contextUsed: nil, contextWindow: nil)
+        XCTAssertEqual(f.plan?.map(\.text), ["Read", "Fix"])
+        XCTAssertEqual(f.plan?.map(\.in_progress), [false, true])
+        let bad = LiveFold.apply([push(1, 1, "plan", "not json")], session: 1, lastSeq: 1,
+                                 turn: .init(), contextUsed: nil, contextWindow: nil)
+        XCTAssertNil(bad.plan)
+    }
+
     /// A push for rows already on screen asks for nothing; a newer one asks
     /// for a pull even if the pushes before it were lost.
     func testPullsOnlyWhenTheLedgerIsAhead() {

@@ -167,6 +167,17 @@ pub enum AgentEvent {
     },
 }
 
+/// One entry of an ACP execution plan (`session/update` →
+/// `sessionUpdate: "plan"`, agentclientprotocol.com/protocol/v1/agent-plan).
+/// `status` is `pending` | `in_progress` | `completed`; `priority` is
+/// `high` | `medium` | `low`. An update always carries the *whole* plan.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlanEntry {
+    pub content: String,
+    pub status: String,
+    pub priority: String,
+}
+
 /// The result of one `prompt` turn.
 ///
 /// Codex reports usage as cumulative *context* pressure, not a per-turn
@@ -188,8 +199,18 @@ pub struct TurnOutcome {
     /// Dollar cost the bridge reported for this turn (`usage_update.cost`,
     /// USD only). Codex sends none; claude-agent-acp sends the SDK's total.
     pub cost_usd: Option<f64>,
+    /// The agent's last reported plan of the turn, if it sent one. `None` =
+    /// no plan frame at all (an empty `Some` is the agent clearing its plan).
+    pub plan: Option<Vec<PlanEntry>>,
+    /// Milliseconds the agent spent actually streaming text/thought chunks
+    /// (gaps over [`STREAM_GAP_MS`] — tool runs, waiting — are not counted).
+    /// With the streamed text this gives an *estimated* tokens/second.
+    pub stream_ms: u64,
     pub stop_reason: String,
 }
+
+/// A silence longer than this between two text chunks is not generation time.
+pub const STREAM_GAP_MS: u128 = 2_000;
 
 /// How to start the bridge.
 pub struct CodexConfig {
@@ -1050,6 +1071,9 @@ struct Accumulator {
     context_used: Option<i64>,
     context_window: Option<i64>,
     cost_usd: Option<f64>,
+    plan: Option<Vec<PlanEntry>>,
+    stream_ms: u64,
+    last_chunk: Option<std::time::Instant>,
     stop_reason: String,
 }
 
@@ -1167,7 +1191,17 @@ impl Accumulator {
                 report_progress(update);
                 if kind == "usage_update" {
                     self.absorb_usage(update);
+                } else if kind == "plan" {
+                    // A child's plan is the child's business; only the root's
+                    // plan is the user's task list.
+                    if let Some(plan) = plan_from(update) {
+                        crate::emit_progress("plan", &plan_progress_json(&plan));
+                        self.plan = Some(plan);
+                    }
                 } else {
+                    if kind == "agent_message_chunk" || kind == "agent_thought_chunk" {
+                        self.note_stream();
+                    }
                     self.main.absorb(kind, update);
                 }
             }
@@ -1314,6 +1348,19 @@ impl Accumulator {
         self.set_state(key, if waiting { "waiting" } else { "running" });
     }
 
+    /// Count the time between consecutive text chunks as generation time,
+    /// unless the gap is long enough to be a tool run or a wait.
+    fn note_stream(&mut self) {
+        let now = std::time::Instant::now();
+        if let Some(prev) = self.last_chunk {
+            let gap = now.duration_since(prev).as_millis();
+            if gap <= STREAM_GAP_MS {
+                self.stream_ms += gap as u64;
+            }
+        }
+        self.last_chunk = Some(now);
+    }
+
     fn absorb_usage(&mut self, update: &Value) {
         // Bridge sends `{used, size}` — cumulative context pressure.
         // Last one in the turn wins.
@@ -1378,9 +1425,59 @@ impl Accumulator {
             context_used: self.context_used,
             context_window: self.context_window,
             cost_usd: self.cost_usd,
+            plan: self.plan,
+            stream_ms: self.stream_ms,
             stop_reason: self.stop_reason,
         }
     }
+}
+
+/// The live `plan` push: the checklist shape the shell already draws
+/// (`text` / `done` / `in_progress`), so Swift does no status mapping.
+pub fn plan_progress_json(plan: &[PlanEntry]) -> String {
+    Value::Array(
+        plan.iter()
+            .map(|e| {
+                json!({
+                    "text": e.content,
+                    "done": e.status == "completed",
+                    "in_progress": e.status == "in_progress",
+                })
+            })
+            .collect(),
+    )
+    .to_string()
+}
+
+/// Parse a `plan` frame's `entries`. Unknown statuses read as `pending`;
+/// entries without text are skipped (nothing to show).
+pub fn plan_from(update: &Value) -> Option<Vec<PlanEntry>> {
+    let entries = update.get("entries")?.as_array()?;
+    Some(
+        entries
+            .iter()
+            .filter_map(|e| {
+                let content = e.get("content").and_then(Value::as_str)?.trim();
+                if content.is_empty() {
+                    return None;
+                }
+                let status = e
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .filter(|s| matches!(*s, "in_progress" | "completed"))
+                    .unwrap_or("pending");
+                Some(PlanEntry {
+                    content: content.to_string(),
+                    status: status.to_string(),
+                    priority: e
+                        .get("priority")
+                        .and_then(Value::as_str)
+                        .unwrap_or("medium")
+                        .to_string(),
+                })
+            })
+            .collect(),
+    )
 }
 
 fn chunk_text(update: &Value) -> Option<String> {
@@ -1420,6 +1517,50 @@ pub fn file_log(path: &Path) -> Result<Log> {
 mod usage_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn plan_frame_becomes_the_turns_plan_and_replaces_the_previous_one() {
+        let mut acc = Accumulator::default();
+        acc.absorb(&json!({"update": {"sessionUpdate": "plan", "entries": [
+            {"content": "Read the code", "priority": "high", "status": "pending"},
+            {"content": "Write the fix", "priority": "high", "status": "pending"}]}}));
+        acc.absorb(&json!({"update": {"sessionUpdate": "plan", "entries": [
+            {"content": "Read the code", "priority": "high", "status": "completed"},
+            {"content": "Write the fix", "priority": "low", "status": "in_progress"},
+            {"content": "  ", "priority": "low", "status": "pending"},
+            {"content": "Run tests", "status": "weird"}]}}));
+        let plan = acc.finish().plan.expect("plan");
+        let got: Vec<_> = plan.iter().map(|e| (e.content.as_str(), e.status.as_str())).collect();
+        assert_eq!(
+            got,
+            [("Read the code", "completed"), ("Write the fix", "in_progress"), ("Run tests", "pending")]
+        );
+        assert_eq!(plan[2].priority, "medium");
+    }
+
+    #[test]
+    fn plan_progress_json_uses_the_checklist_shape() {
+        let plan = vec![
+            PlanEntry { content: "a".into(), status: "completed".into(), priority: "high".into() },
+            PlanEntry { content: "b".into(), status: "in_progress".into(), priority: "high".into() },
+        ];
+        let v: Value = serde_json::from_str(&plan_progress_json(&plan)).unwrap();
+        assert_eq!(v[0], json!({"text": "a", "done": true, "in_progress": false}));
+        assert_eq!(v[1], json!({"text": "b", "done": false, "in_progress": true}));
+    }
+
+    #[test]
+    fn a_childs_plan_is_not_the_turns_plan() {
+        let mut acc = Accumulator { root_session_id: "root".into(), ..Default::default() };
+        acc.absorb(&json!({"sessionId": "kid", "update": {"sessionUpdate": "plan",
+            "entries": [{"content": "x", "priority": "low", "status": "pending"}]}}));
+        assert!(acc.finish().plan.is_none());
+    }
+
+    #[test]
+    fn no_plan_frame_means_none() {
+        assert!(Accumulator::default().finish().plan.is_none());
+    }
 
     #[test]
     fn usage_update_keeps_context_and_usd_cost() {
