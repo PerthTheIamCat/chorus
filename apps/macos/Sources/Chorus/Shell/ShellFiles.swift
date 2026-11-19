@@ -101,12 +101,13 @@ struct FilesTool: View {
     }
 }
 
+private let fileViewerLimit = 400_000
+
 private struct FileViewer: View {
     let root: String
     let node: Engine.FileNode
     @State private var text: String?
     @State private var note: String?
-    private static let limit = 400_000
 
     private var url: URL { URL(fileURLWithPath: root).appendingPathComponent(node.rel_path) }
 
@@ -144,11 +145,11 @@ private struct FileViewer: View {
         let result: (String?, String?) = await Task.detached(priority: .userInitiated) {
             guard let handle = try? FileHandle(forReadingFrom: target) else { return (nil, "เปิดไฟล์ไม่ได้") }
             defer { try? handle.close() }
-            let data = (try? handle.read(upToCount: FileViewer.limit + 1)) ?? Data()
-            guard let s = String(data: data.prefix(FileViewer.limit), encoding: .utf8) else {
+            let data = (try? handle.read(upToCount: fileViewerLimit + 1)) ?? Data()
+            guard let s = String(data: data.prefix(fileViewerLimit), encoding: .utf8) else {
                 return (nil, "ไฟล์นี้ไม่ใช่ข้อความ เปิดด้วยแอปเริ่มต้นแทน")
             }
-            return (s, data.count > FileViewer.limit ? "แสดงแค่ส่วนต้นของไฟล์" : nil)
+            return (s, data.count > fileViewerLimit ? "แสดงแค่ส่วนต้นของไฟล์" : nil)
         }.value
         text = result.0
         note = result.1
