@@ -651,7 +651,21 @@ fn call_tool(
         let proposal = memory::NewProposal { suspicious, ..memory::NewProposal::fact(scope, text) };
         let say = |t: String| Ok(json!({ "content": [{ "type": "text", "text": t }] }));
         return match memory::propose_with(conn, &proposal, embedder.as_deref()) {
-            Ok(memory::Proposed::Queued(id)) => say(format!("Queued proposal #{id} for review: {text:?}")),
+            Ok(memory::Proposed::Queued(id)) => {
+                // Default autonomy: remember it without a review queue. Words an
+                // attacker could have written (right after a web page or an
+                // imported session) still wait for a person.
+                let auto = !suspicious
+                    && crate::learn::settings_path()
+                        .map(|p| crate::learn::load_settings(&p).autonomy)
+                        .unwrap_or_default()
+                        == crate::learn::Autonomy::Auto;
+                if auto && memory::approve(conn, id).is_ok() {
+                    say(format!("Remembered: {text:?}"))
+                } else {
+                    say(format!("Queued proposal #{id} for review: {text:?}"))
+                }
+            }
             Ok(memory::Proposed::Replaces { proposal, fact }) => say(format!(
                 "Queued proposal #{proposal} for review: it would replace remembered fact #{fact}, \
                  which it conflicts with: {text:?}"

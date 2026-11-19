@@ -909,6 +909,11 @@ pub struct Session {
     last_turn_guard: Option<String>,
     /// Guard sha when the current agent took over (for Current agent scope).
     agent_turn_start_guard: Option<String>,
+    /// A handoff prepared when the user picked another provider's model: the
+    /// agent it is for and the brief. The next turn to that agent carries it
+    /// (one handoff event + the brief ahead of the user's message); a turn to
+    /// anyone else drops it. Memory only — the ledger is written at send time.
+    prepared_handoff: Option<(String, Brief)>,
     /// The in-process MCP server handed to every agent (exposes
     /// `memory.propose`). `None` when it couldn't bind a port.
     mcp: Option<McpServer>,
@@ -1052,10 +1057,25 @@ const PLAN_MODE_GUIDANCE: &str = "\n\n(Chorus plan mode: this turn is read-only 
 /// make an agent look finished while it is not: starting on a task that lacks
 /// what it needs (then guessing), and bending a test or the spec so a check
 /// goes green. Both are cheaper to say out loud than to review afterwards.
-const HONESTY_GUIDANCE: &str = "\n(Chorus: if the task is missing information you need in order \
+const HONESTY_GUIDANCE_OFTEN: &str = "\n(Chorus: if the task is missing information you need in order \
      to act (which file, which behaviour, which constraint), ask the user before starting instead \
      of guessing. If the spec cannot be met, say so plainly. Do not edit, weaken, skip or delete \
      a test just to make it pass; if a test is wrong, say why and let the user decide.)\n";
+
+/// Default (`ask_policy`): fewer interruptions. Settle ordinary ambiguity,
+/// say what was assumed, ask only when a wrong guess is costly.
+const HONESTY_GUIDANCE_QUIET: &str = "\n(Chorus: if something is unclear, choose the most reasonable \
+     reading, go on, and say what you assumed. Ask the user only when a wrong guess would be costly \
+     or hard to undo (deleting data, spending money, changing a public contract). If the spec \
+     cannot be met, say so plainly. Do not edit, weaken, skip or delete a test just to make it \
+     pass; if a test is wrong, say why and let the user decide.)\n";
+
+fn honesty_guidance() -> &'static str {
+    match chorus_core::ask_policy::AskPolicy::current().lead {
+        chorus_core::ask_policy::LeadEscalation::Often => HONESTY_GUIDANCE_OFTEN,
+        chorus_core::ask_policy::LeadEscalation::WhenStuck => HONESTY_GUIDANCE_QUIET,
+    }
+}
 
 /// What a child agent is told about working next to others.
 const CHILD_AGENT_HINT: &str = "(Chorus: you are one of several agents on this task. Stay inside \
@@ -1261,6 +1281,7 @@ impl Session {
             turn_end_git_head,
             last_turn_guard: None,
             agent_turn_start_guard: None,
+            prepared_handoff: None,
             mcp,
             memory: None,
             runner_state,
@@ -1321,6 +1342,7 @@ impl Session {
             turn_end_git_head,
             last_turn_guard: None,
             agent_turn_start_guard: None,
+            prepared_handoff: None,
             mcp,
             memory: None,
             runner_state,
@@ -1685,6 +1707,22 @@ impl Session {
             self.first_turn_prompt(user_text)
         };
 
+        // A handoff prepared for exactly this agent rides with this message:
+        // the Handoff event first (so the thread draws the divider), the brief
+        // ahead of the instruction (first message carries the handoff).
+        let mut prompt = prompt;
+        if let Some((to, brief)) = self.prepared_handoff.take() {
+            let base = |n: &str| n.split('@').next().unwrap_or(n).to_string();
+            if base(&to) == base(agent_name) {
+                let seq = ledger::append(
+                    self.store.conn(),
+                    &NewEvent::new(self.sess, EventKind::Handoff, agent_actor, brief.to_json()),
+                )?;
+                self.announce(seq);
+                prompt = format!("{}\n\n---\n{prompt}", brief.render_markdown());
+            }
+        }
+
         let event = NewEvent::new(self.sess, EventKind::Msg, self.user, user_text);
         let user_seq = if attachment_ids.is_empty() {
             ledger::append(self.store.conn(), &event)?
@@ -1819,6 +1857,29 @@ impl Session {
             },
         });
         Ok((brief, from))
+    }
+
+    /// Build the handoff to `to` now and hold it for the next turn to that
+    /// agent. Returns what it will carry. Pure of ledger writes and model
+    /// calls (the brief comes from the ledger by rules).
+    pub fn prepare_handoff(&mut self, to: &str) -> Result<Brief> {
+        let ts = self.task_state()?;
+        let (brief, _) = self.brief_for(
+            to,
+            HandoffReason::Manual,
+            &ts.goal,
+            ts.done,
+            ts.pending,
+            ts.constraints,
+            String::new(),
+        )?;
+        self.prepared_handoff = Some((to.to_string(), brief.clone()));
+        Ok(brief)
+    }
+
+    /// Drop a prepared handoff (the user switched back).
+    pub fn cancel_prepared_handoff(&mut self) {
+        self.prepared_handoff = None;
     }
 
     /// The first message `to` would get if the user pressed hand-off now —
@@ -3109,7 +3170,7 @@ impl Session {
         if self.plan_turn {
             prompt_text.push_str(PLAN_MODE_GUIDANCE);
         }
-        prompt_text.push_str(HONESTY_GUIDANCE);
+        prompt_text.push_str(honesty_guidance());
         if chorus_core::ask_user::available(self.store.conn(), self.sess) {
             prompt_text.push_str(ASK_USER_HINT);
         }

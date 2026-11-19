@@ -2385,6 +2385,76 @@ final class Engine: ObservableObject {
         }
     }
 
+    // MARK: - Handoff prepared by switching model
+
+    /// The brief Rust built when the user picked another provider's model.
+    struct PreparedHandoff: Codable, Equatable {
+        let ok: Bool?
+        let to: String?
+        let from: String?
+        let goal: String?
+        let done: [String]?
+        let pending: [String]?
+        let constraints: [String]?
+        let markdown: String?
+        let error: String?
+    }
+
+    enum HandoffPrep: Equatable {
+        case none
+        case preparing(String)
+        case ready(PreparedHandoff)
+        case failed(String)
+    }
+
+    /// There is no "hand over" button: choosing another provider's model in the
+    /// composer prepares the handoff in the background, and the next message
+    /// carries it. Rust builds the brief from the ledger by rules (no model
+    /// call) and holds it; this only mirrors its state for the composer.
+    @Published var handoffPrep: HandoffPrep = .none
+
+    /// The agent that answered last in this session, from the ledger.
+    var lastAnsweringAgent: String? {
+        guard let actor = events.last(where: { $0.kind == "msg" && $0.actor != "user" })?.actor else { return nil }
+        let base = String(actor.split(separator: "@", maxSplits: 1).first ?? Substring(actor))
+        return agents.first(where: { base == $0.id || base.hasPrefix($0.id) })?.id ?? base
+    }
+
+    func prepareHandoff(to: String) {
+        guard let h = handle, sessionID >= 0 else { return }
+        handoffPrep = .preparing(to)
+        // Same serial queue as the turns: a switch made mid-turn is prepared
+        // when the turn ends, which is when it can first matter.
+        queue.async { [weak self] in
+            let json = to.withCString { Self.string(from: chorus_prepare_handoff(h.raw, $0)) }
+            let r = Self.decode(PreparedHandoff.self, json)
+            DispatchQueue.main.async {
+                guard let self, case .preparing(let want) = self.handoffPrep, want == to else { return }
+                if r?.ok == true, let r { self.handoffPrep = .ready(r) }
+                else { self.handoffPrep = .failed(r?.error ?? "เตรียมส่งต่อไม่สำเร็จ") }
+            }
+        }
+    }
+
+    /// The user switched back (or to the same provider): nothing to hand over.
+    func cancelHandoffPrep() {
+        guard handoffPrep != .none else { return }
+        handoffPrep = .none
+        guard let h = handle else { return }
+        queue.async { _ = Self.string(from: chorus_cancel_handoff(h.raw)) }
+    }
+
+    /// A turn to `agent` is starting: if it carries the prepared handoff, the
+    /// strip has done its job. (Rust consumes the brief inside the turn.)
+    func consumeHandoffPrep(for agent: String) {
+        switch handoffPrep {
+        case .ready(let p) where p.to == agent: handoffPrep = .none
+        case .preparing(let to) where to == agent: handoffPrep = .none
+        case .failed: handoffPrep = .none
+        default: break
+        }
+    }
+
     /// Open Terminal on the command that fixes an agent's login. The app can
     /// not complete an OAuth flow itself, and pretending otherwise would just
     /// hide the one step the user has to take.

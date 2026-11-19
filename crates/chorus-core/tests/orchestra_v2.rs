@@ -207,6 +207,24 @@ fn child_server(l: &Lead, agent_id: i64) -> McpServer {
 }
 
 #[test]
+fn by_default_a_child_asks_its_lead_and_never_the_user() {
+    let l = lead();
+    let w = text(&call(
+        &l.server,
+        "chorus_spawn_agent",
+        json!({"role":"builder","goal":"build"}),
+    ));
+    assert!(w.contains("#1"), "{w}");
+    let child = child_server(&l, 1);
+    // Someone is registered to answer the person; the child still must not see the tool.
+    let sess = agent_control::get_subagent(l.store.conn(), 1).unwrap().child_sess.unwrap();
+    chorus_core::ask_user::set_asker(l.store.conn(), sess, Some(std::sync::Arc::new(|_| Some("yes".into()))));
+    assert!(!call_as_list(&child, "claude").contains(&"chorus_ask_user".to_string()));
+    let refused = text(&call_as(&child, "claude", "chorus_ask_user", json!({"question":"may I?"})));
+    assert!(refused.contains("chorus_ask_lead"), "{refused}");
+}
+
+#[test]
 fn a_child_question_reaches_the_lead_and_the_lead_answers_it() {
     std::env::set_var("CHORUS_CHILD_ASK_WAIT_S", "3");
     let l = lead();

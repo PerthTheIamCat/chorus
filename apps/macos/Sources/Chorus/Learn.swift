@@ -182,7 +182,7 @@ struct LearnSettings: View {
 
     private var autonomy: Binding<String> {
         Binding(
-            get: { model.state?.autonomy ?? "ask" },
+            get: { model.state?.autonomy ?? "auto" },
             set: { model.setAutonomy($0, workspace: workspace) })
     }
 
@@ -209,13 +209,14 @@ struct LearnSettings: View {
         SettingsGroup(title: "ให้เรียนรู้เองได้แค่ไหน",
                       footer: "Skill ที่ร่างจากงานเก่าต้องให้คุณอ่านก่อนเสมอ ไม่ว่าเลือกโหมดไหน — skill ที่ไม่มีคนรีวิวไม่ช่วยให้ agent เก่งขึ้น") {
             SettingsRow(title: "โหมด",
-                        info: "ถามทุกครั้ง = ทุกอย่างที่เรียนรู้ได้รอให้คุณกดรับ · รับเองเมื่อมีผลเทสต์ผ่าน = บทเรียนที่มีหลักฐานเป็นเทสต์ผ่านถูกรับเลย แต่ของที่มาจากเว็บหรือ session ที่นำเข้ายังต้องถามเสมอ · ปิด = ไม่ร่างอะไรเลย") {
+                        info: "อัตโนมัติ = จำเลยโดยไม่ต้องกดรับ (ข้อที่มาจากเว็บหรือ session ที่นำเข้ายังต้องถาม) · ถามทุกครั้ง = ทุกอย่างที่เรียนรู้ได้รอให้คุณกดรับ · รับเองเมื่อมีผลเทสต์ผ่าน = บทเรียนที่มีหลักฐานเป็นเทสต์ผ่านถูกรับเลย แต่ของที่มาจากเว็บหรือ session ที่นำเข้ายังต้องถามเสมอ · ปิด = ไม่ร่างอะไรเลย") {
                 Picker("โหมด", selection: autonomy) {
+                    Text("อัตโนมัติ").tag("auto")
                     Text("ถามทุกครั้ง").tag("ask")
                     Text("รับเองเมื่อเทสต์ผ่าน").tag("auto_with_tests")
                     Text("ปิด").tag("off")
                 }
-                .pickerStyle(.segmented).labelsHidden().frame(width: 330)
+                .pickerStyle(.segmented).labelsHidden().frame(width: 400)
             }
             RowDivider()
             SettingsRow(title: "เรียนรู้จากงานล่าสุดตอนนี้",

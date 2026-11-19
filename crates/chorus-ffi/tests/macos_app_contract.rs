@@ -9,6 +9,22 @@ fn app(rel: &str) -> String {
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
 }
 
+/// `ContentView` is split across `ContentView.swift` and `ContentView+*.swift`;
+/// the contracts below are about the view as a whole, so read them together.
+fn content_view() -> String {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/macos/Sources/Chorus");
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            let n = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            n == "ContentView.swift" || (n.starts_with("ContentView+") && n.ends_with(".swift"))
+        })
+        .collect();
+    files.sort();
+    files.iter().map(|p| std::fs::read_to_string(p).unwrap()).collect::<Vec<_>>().join("\n")
+}
+
 /// The Info.plist heredoc inside build.sh.
 fn info_plist() -> String {
     let sh = app("build.sh");
@@ -52,7 +68,7 @@ fn spotlight_indexing_is_opt_in() {
 /// P1: a finished turn runs project code only for a trusted project.
 #[test]
 fn post_turn_verify_is_gated_on_trust() {
-    let src = app("Sources/Chorus/ContentView.swift");
+    let src = content_view();
     assert!(src.contains("if !workspace.isEmpty && engine.projectTrusted {"));
     assert!(!src.contains("if !workspace.isEmpty {\n                    engine.verifyWorkspace"));
 }
@@ -94,7 +110,7 @@ fn requested_secret_is_typed_masked_and_never_kept_by_the_shell() {
 /// U2: a question is a card in the chat, not a sheet that hides where the work stopped.
 #[test]
 fn agent_questions_are_inline_cards_not_sheets() {
-    let content = app("Sources/Chorus/ContentView.swift");
+    let content = content_view();
     assert!(content.contains("AgentPromptCards(engine: engine"), "cards must be in the chat");
     assert!(!content.contains("$engine.pendingQuestion"), "no sheet for questions");
     assert!(content.contains("AgentPromptNotice.badge(engine.waitingForYou)"), "sidebar badge");

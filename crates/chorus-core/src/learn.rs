@@ -3,10 +3,13 @@
 //!
 //! Swift draws the screen; every rule lives here (CLAUDE.md 2.3).
 //!
-//! Three autonomy modes, one of them the default:
+//! Four autonomy modes, one of them the default:
 //!
-//! - [`Autonomy::Ask`] — *default.* Everything learned waits in a queue for a
-//!   person to accept or reject.
+//! - [`Autonomy::Auto`] — *default.* Lessons and agent-proposed facts are
+//!   accepted without asking. Anything that might carry planted instructions
+//!   (an imported session, web content) is still queued.
+//! - [`Autonomy::Ask`] — everything learned waits in a queue for a person to
+//!   accept or reject.
 //! - [`Autonomy::AutoWithTests`] — a lesson whose evidence includes a passing
 //!   test run is accepted without asking. Anything that might carry planted
 //!   instructions (an imported session, web content) is still queued.
@@ -30,7 +33,10 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Autonomy {
+    /// *Default.* Lessons and facts an agent proposes are accepted without a
+    /// queue; anything that may carry planted instructions still waits.
     #[default]
+    Auto,
     Ask,
     AutoWithTests,
     Off,
@@ -39,6 +45,7 @@ pub enum Autonomy {
 impl Autonomy {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
+            "auto" => Some(Self::Auto),
             "ask" => Some(Self::Ask),
             "auto_with_tests" => Some(Self::AutoWithTests),
             "off" => Some(Self::Off),
@@ -48,6 +55,7 @@ impl Autonomy {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::Ask => "ask",
             Self::AutoWithTests => "auto_with_tests",
             Self::Off => "off",
@@ -79,6 +87,8 @@ pub enum Decision {
 pub fn decide(mode: Autonomy, ev: &LessonEvidence) -> Decision {
     match mode {
         Autonomy::Off => Decision::Drop,
+        Autonomy::Auto if !ev.tainted => Decision::AutoAccept,
+        Autonomy::Auto => Decision::Queue,
         Autonomy::Ask => Decision::Queue,
         Autonomy::AutoWithTests if ev.tests_passed && !ev.tainted => Decision::AutoAccept,
         Autonomy::AutoWithTests => Decision::Queue,
@@ -94,6 +104,10 @@ pub struct Settings {
 
 /// `~/.chorus/learn.json`.
 pub fn settings_path() -> Option<PathBuf> {
+    // Tests (and anyone who wants a different file) can point elsewhere.
+    if let Some(p) = std::env::var_os("CHORUS_LEARN_FILE") {
+        return Some(PathBuf::from(p));
+    }
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".chorus").join("learn.json"))
 }
 
@@ -185,12 +199,12 @@ mod tests {
     use crate::Store;
 
     #[test]
-    fn asking_is_the_default() {
-        assert_eq!(Settings::default().autonomy, Autonomy::Ask);
+    fn auto_is_the_default() {
+        assert_eq!(Settings::default().autonomy, Autonomy::Auto);
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(load_settings(&dir.path().join("none.json")).autonomy, Autonomy::Ask);
+        assert_eq!(load_settings(&dir.path().join("none.json")).autonomy, Autonomy::Auto);
         std::fs::write(dir.path().join("bad.json"), "{nope").unwrap();
-        assert_eq!(load_settings(&dir.path().join("bad.json")).autonomy, Autonomy::Ask);
+        assert_eq!(load_settings(&dir.path().join("bad.json")).autonomy, Autonomy::Auto);
     }
 
     #[test]
@@ -199,7 +213,7 @@ mod tests {
         let p = dir.path().join("a/b/learn.json");
         save_settings(&p, &Settings { autonomy: Autonomy::AutoWithTests }).unwrap();
         assert_eq!(load_settings(&p).autonomy, Autonomy::AutoWithTests);
-        for m in [Autonomy::Ask, Autonomy::AutoWithTests, Autonomy::Off] {
+        for m in [Autonomy::Auto, Autonomy::Ask, Autonomy::AutoWithTests, Autonomy::Off] {
             assert_eq!(Autonomy::parse(m.as_str()), Some(m));
         }
         assert_eq!(Autonomy::parse("yolo"), None);
@@ -211,6 +225,8 @@ mod tests {
         let unproven = LessonEvidence { tests_passed: false, tainted: false };
         let planted = LessonEvidence { tests_passed: true, tainted: true };
         assert_eq!(decide(Autonomy::Ask, &proven), Decision::Queue);
+        assert_eq!(decide(Autonomy::Auto, &unproven), Decision::AutoAccept);
+        assert_eq!(decide(Autonomy::Auto, &planted), Decision::Queue);
         assert_eq!(decide(Autonomy::AutoWithTests, &proven), Decision::AutoAccept);
         assert_eq!(decide(Autonomy::AutoWithTests, &unproven), Decision::Queue);
         // Imported or web-derived lessons are never accepted unseen.

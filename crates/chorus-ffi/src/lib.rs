@@ -3164,6 +3164,52 @@ pub unsafe extern "C" fn chorus_handoff_auto(
     }
 }
 
+/// Prepare a handoff to agent `to` in the background (the user picked another
+/// provider's model in the composer). Builds the brief from the ledger by rules
+/// (no model call, no ledger write) and holds it: the next turn to `to` carries
+/// it. JSON: `{"ok":true,"to":"…","from":"…","goal":"…","done":[…],"pending":[…],
+/// "constraints":[…],"markdown":"…"}`.
+///
+/// # Safety
+/// `e` must be a live engine handle; `to` a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_prepare_handoff(e: *mut ChorusEngine, to: *const c_char) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let Some(to) = borrow(to) else {
+        return err("to must be valid UTF-8");
+    };
+    match catch_unwind(AssertUnwindSafe(|| engine.session.prepare_handoff(to))) {
+        Ok(Ok(b)) => out(serde_json::json!({
+            "ok": true,
+            "to": to,
+            "from": b.handoff.from,
+            "goal": b.goal,
+            "done": b.done,
+            "pending": b.pending,
+            "constraints": b.constraints,
+            "markdown": b.render_markdown(),
+        })
+        .to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in prepare_handoff"),
+    }
+}
+
+/// Drop the prepared handoff (the user switched back). Always `{"ok":true}`.
+///
+/// # Safety
+/// `e` must be a live engine handle.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_cancel_handoff(e: *mut ChorusEngine) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    engine.session.cancel_prepared_handoff();
+    out(serde_json::json!({"ok": true}).to_string())
+}
+
 /// Build file tree for workspace with git statuses and agent focus marker.
 ///
 /// # Safety
@@ -3548,7 +3594,7 @@ pub unsafe extern "C" fn chorus_router_clear_learned_json(db_path: *const c_char
 /// Learn screen (L3 + L4 + E6): everything the app has learned and may learn.
 ///
 /// `db_path` is the project's ledger (`<project>/.chorus/store.db`), `cwd` the
-/// project folder. JSON: `{"ok":true,"autonomy":"ask|auto_with_tests|off",
+/// project folder. JSON: `{"ok":true,"autonomy":"auto|ask|auto_with_tests|off",
 /// "drafts":[{name,description,signature,steps,sessions,body}],
 /// "outcomes":{cells,counted_turns,min_samples,enabled,steering},
 /// "notes":null|"…","notes_enabled":bool}`.
@@ -3625,8 +3671,8 @@ pub unsafe extern "C" fn chorus_learn_idle_json(db_path: *const c_char, cwd: *co
     }
 }
 
-/// Set how much the app may learn without asking: `ask` (default),
-/// `auto_with_tests` or `off`. Skill drafts are always reviewed by hand.
+/// Set how much the app may learn without asking: `auto` (default),
+/// `ask`, `auto_with_tests` or `off`. Skill drafts are always reviewed by hand.
 ///
 /// # Safety
 /// `mode` must be null or point to a NUL-terminated string.
@@ -3634,13 +3680,50 @@ pub unsafe extern "C" fn chorus_learn_idle_json(db_path: *const c_char, cwd: *co
 #[no_mangle]
 pub unsafe extern "C" fn chorus_learn_set_autonomy(mode: *const c_char) -> *mut c_char {
     let Some(mode) = borrow(mode).and_then(chorus_core::learn::Autonomy::parse) else {
-        return err("mode must be ask, auto_with_tests or off");
+        return err("mode must be auto, ask, auto_with_tests or off");
     };
     let Some(path) = chorus_core::learn::settings_path() else {
         return err("HOME environment variable not set");
     };
     match chorus_core::learn::save_settings(&path, &chorus_core::learn::Settings { autonomy: mode }) {
         Ok(()) => out(serde_json::json!({"ok": true, "autonomy": mode.as_str()}).to_string()),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// How often the app may interrupt with a question (`ask_policy`).
+/// JSON: `{"ok":true,"children":"lead_first|user","lead":"when_stuck|often"}`.
+///
+/// # Safety
+/// The returned string must be freed with `chorus_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_ask_policy_json() -> *mut c_char {
+    let p = chorus_core::ask_policy::AskPolicy::current();
+    let mut v = serde_json::to_value(p).unwrap_or_default();
+    v["ok"] = serde_json::Value::Bool(true);
+    out(v.to_string())
+}
+
+/// Save the ask policy: `{"children":"lead_first|user","lead":"when_stuck|often"}`.
+/// A missing key keeps its default. Takes effect from the next turn.
+///
+/// # Safety
+/// `json` must be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_ask_policy(json: *const c_char) -> *mut c_char {
+    let Some(p) = borrow(json).and_then(|j| serde_json::from_str::<chorus_core::ask_policy::AskPolicy>(j).ok()) else {
+        return err("json must be {\"children\":\"lead_first|user\",\"lead\":\"when_stuck|often\"}");
+    };
+    let Some(path) = chorus_core::ask_policy::AskPolicy::path() else {
+        return err("HOME environment variable not set");
+    };
+    match p.save_to(&path) {
+        Ok(()) => {
+            let mut v = serde_json::to_value(p).unwrap_or_default();
+            v["ok"] = serde_json::Value::Bool(true);
+            out(v.to_string())
+        }
         Err(e) => err(format!("{e:#}")),
     }
 }

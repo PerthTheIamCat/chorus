@@ -6,6 +6,14 @@ use chorus_core::{actor, history, ledger, mcp::McpServer, memory, store::Store};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
+/// These tests exercise the review queue, which is the `ask` mode (the default is `auto`).
+fn queue_mode() {
+    let f = std::env::temp_dir().join(format!("chorus-learn-ask-{}.json", std::process::id()));
+    std::fs::write(&f, r#"{"autonomy":"ask"}"#).unwrap();
+    std::env::set_var("CHORUS_LEARN_FILE", &f);
+}
+
+
 fn say(c: &rusqlite::Connection, sess: i64, who: &str, kind: EventKind, body: &str) -> i64 {
     let a = actor::intern(c, who, if who == "user" { "human" } else { "openai" }).unwrap();
     ledger::append(c, &NewEvent::new(sess, kind, a, body))
@@ -170,6 +178,7 @@ fn rpc(server: &McpServer, secret: &str, body: serde_json::Value) -> serde_json:
 
 #[test]
 fn the_mcp_server_offers_history_search_and_folds_scope_2_into_project() {
+    queue_mode();
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("s.db");
     let sess = {

@@ -521,11 +521,27 @@ pub fn ask_lead(
         lead,
         actor_id,
         &format!(
-            "❓ agent #{} ({}) ถาม lead: {q}\n(ตอบด้วย chorus_send_message ไปที่ agent #{}, หรือถามผู้ใช้ด้วย chorus_ask_user)",
-            child.id, child.role, child.id
+            "❓ agent #{} ({}) ถาม lead: {q}\n{}",
+            child.id,
+            child.role,
+            lead_reply_hint(child.id)
         ),
     );
     Ok(Asked::New(id))
+}
+
+/// What the lead is told about answering. By default it decides and escalates
+/// to the person only when it truly cannot (`ask_policy`).
+fn lead_reply_hint(child_id: i64) -> String {
+    match crate::ask_policy::AskPolicy::current().lead {
+        crate::ask_policy::LeadEscalation::WhenStuck => format!(
+            "(ตัดสินใจเองแล้วตอบด้วย chorus_send_message ไปที่ agent #{child_id} · ใช้ chorus_ask_user \
+             เฉพาะเมื่อคุณตัดสินใจเองไม่ได้จริง ๆ และเดาผิดแล้วเสียหายหนักหรือย้อนยาก)"
+        ),
+        crate::ask_policy::LeadEscalation::Often => format!(
+            "(ตอบด้วย chorus_send_message ไปที่ agent #{child_id}, หรือถามผู้ใช้ด้วย chorus_ask_user)"
+        ),
+    }
 }
 
 /// The lead's answer to question `question_id`: the first message it sent that

@@ -4,6 +4,19 @@ use chorus_core::{mcp::McpServer, memory, store::Store};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
+static MODE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The Learn mode is process-wide (one env var), so tests that depend on it
+/// take turns. The review queue is the `ask` mode; the default is `auto`.
+fn mode(m: &str) -> std::sync::MutexGuard<'static, ()> {
+    let g = MODE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let f = std::env::temp_dir().join(format!("chorus-learn-{m}-{}.json", std::process::id()));
+    std::fs::write(&f, format!(r#"{{"autonomy":"{m}"}}"#)).unwrap();
+    std::env::set_var("CHORUS_LEARN_FILE", &f);
+    g
+}
+
+
 fn rpc(server: &McpServer, body: serde_json::Value) -> serde_json::Value {
     rpc_as(server.url(), Some(&server.credential("codex").unwrap()), body)
 }
@@ -43,6 +56,7 @@ fn rpc_as(url: &str, secret: Option<&str>, body: serde_json::Value) -> serde_jso
 
 #[test]
 fn an_agent_can_list_and_call_memory_propose() {
+    let _m = mode("ask");
     let dir = std::env::temp_dir().join(format!("chorus-mcp-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let db = dir.join("store.db");
@@ -215,6 +229,7 @@ fn requests_without_the_session_secret_are_rejected() {
 
 #[test]
 fn memory_propose_turns_a_contradiction_into_a_replacement_and_ignores_repeats() {
+    let _m = mode("ask");
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("store.db");
     {
@@ -240,4 +255,23 @@ fn memory_propose_turns_a_contradiction_into_a_replacement_and_ignores_repeats()
     assert_eq!(q.len(), 1);
     assert_eq!(q[0].replaces, Some(1));
     assert_eq!(memory::pending_count(s.conn()).unwrap(), 1);
+}
+
+#[test]
+fn by_default_a_proposed_fact_is_remembered_without_a_queue() {
+    let _m = mode("auto");
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("s.db");
+    let store = Store::open(&db).unwrap();
+    memory::propose_with(store.conn(), &memory::NewProposal::fact(1, "seed"), None).ok();
+    let server = McpServer::start(db.to_str().unwrap()).unwrap();
+    let call = rpc(
+        &server,
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+            "params":{"name":"memory_propose","arguments":{"text":"ใช้ pnpm ไม่ใช่ npm"}}}),
+    );
+    let said = call["result"]["content"][0]["text"].as_str().unwrap().to_string();
+    assert!(said.starts_with("Remembered"), "{said}");
+    let store = Store::open(&db).unwrap();
+    assert!(memory::top(store.conn(), 1, 10).unwrap().iter().any(|f| f.text.contains("pnpm")));
 }

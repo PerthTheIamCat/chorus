@@ -5,6 +5,14 @@
 use chorus_cli::session::{Policy, Session};
 use chorus_core::memory::{self, ProposalKind};
 
+/// These tests exercise the review queue, which is the `ask` mode (the default is `auto`).
+fn queue_mode() {
+    let f = std::env::temp_dir().join(format!("chorus-learn-ask-{}.json", std::process::id()));
+    std::fs::write(&f, r#"{"autonomy":"ask"}"#).unwrap();
+    std::env::set_var("CHORUS_LEARN_FILE", &f);
+}
+
+
 mod common;
 
 fn mock_bridge() -> Vec<String> {
@@ -51,6 +59,7 @@ fn a_turn_counts_the_facts_it_carried_and_the_ones_the_agent_used() {
 
 #[test]
 fn compact_drafts_lessons_once_and_never_into_the_facts() {
+    queue_mode();
     let (_d, db, cwd) = workspace();
     let mut s = Session::create(&db, &cwd, "lessons").unwrap().with_bridge(mock_bridge());
     s.run_turn("codex", "openai", "ทำ cache ให้หน่อย", Policy::AllowAll).unwrap();
@@ -86,6 +95,7 @@ fn compact_suggests_retiring_a_fact_that_points_at_a_deleted_file() {
 
 #[test]
 fn rejecting_hunks_leaves_a_decision_the_lesson_pass_turns_into_advice() {
+    queue_mode();
     let (_d, db, cwd) = workspace();
     std::fs::write(cwd.join("a.txt"), "one\n").unwrap();
     let mut s = Session::create(&db, &cwd, "reject").unwrap().with_bridge(mock_bridge());
