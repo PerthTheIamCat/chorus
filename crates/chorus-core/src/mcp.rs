@@ -450,10 +450,14 @@ fn dispatch(req: &Value, conn: &rusqlite::Connection, caller: &Caller) -> Value 
     }
 }
 
-const MEMORY_INSTRUCTIONS: &str = "When the user asks you to remember, note or keep something \
-for later, or states a durable fact about the project (a convention, a decision, a preference), \
-call `memory_propose` with that fact in one short sentence. Do this instead of your own memory \
-notes: Chorus shares this memory with every agent in the session. A person approves it afterwards.";
+const MEMORY_INSTRUCTIONS: &str = "Chorus keeps one memory for every agent in this session. Call \
+`memory_propose` with one short sentence whenever you learn something a later turn, or another \
+agent, would otherwise have to rediscover: when the user asks you to remember something; a \
+decision that was made and why; a convention you found in the code; the build, test or run \
+command that actually worked; a pitfall you hit. You do not need to be asked. Do this instead \
+of your own memory notes. Do not propose what is already in the project files or obvious from \
+the code, and never a secret. A person approves each proposal afterwards; if it contradicts \
+something already remembered it is offered as a replacement for it.";
 
 fn search_history_schema() -> Value {
     json!({
@@ -476,10 +480,13 @@ fn search_history_schema() -> Value {
 fn propose_tool_schema() -> Value {
     json!({
         "name": "memory_propose",
-        "description": "Call this whenever the user asks you to remember something or states a \
-                        durable project fact. Proposes it for the human to review, shared with every \
-                        agent in this session. Keep it under 140 characters. It is NOT remembered \
-                        until a person approves it.",
+        "description": "Propose one durable fact for the project's shared memory. Call it when the \
+                        user asks you to remember something, and also on your own when you learn \
+                        something a later turn would have to rediscover: a decision and its reason, \
+                        a convention you found, the build/test/run command that worked, a pitfall. \
+                        One sentence under 140 characters; no secrets. It is NOT remembered until \
+                        a person approves it, and if it contradicts an existing fact it is queued \
+                        as a replacement for that fact.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -634,13 +641,23 @@ fn call_tool(
         let masked = crate::secrets::user_vault().mask(text).text;
         let text = masked.as_str();
 
-        return match memory::propose(conn, scope, text, None) {
-            Ok(id) => Ok(json!({
-                "content": [{
-                    "type": "text",
-                    "text": format!("Queued proposal #{id} for review: {text:?}")
-                }]
-            })),
+        // Right after the agent read a web page or an imported conversation,
+        // what it proposes may be someone else's words: flag it for the reviewer.
+        let suspicious = caller
+            .session
+            .map(|s| crate::lessons::session_tainted(conn, s).unwrap_or(false))
+            .unwrap_or(false);
+        let embedder = crate::embedding::from_env();
+        let proposal = memory::NewProposal { suspicious, ..memory::NewProposal::fact(scope, text) };
+        let say = |t: String| Ok(json!({ "content": [{ "type": "text", "text": t }] }));
+        return match memory::propose_with(conn, &proposal, embedder.as_deref()) {
+            Ok(memory::Proposed::Queued(id)) => say(format!("Queued proposal #{id} for review: {text:?}")),
+            Ok(memory::Proposed::Replaces { proposal, fact }) => say(format!(
+                "Queued proposal #{proposal} for review: it would replace remembered fact #{fact}, \
+                 which it conflicts with: {text:?}"
+            )),
+            Ok(memory::Proposed::Known(fact)) => say(format!("Already remembered (fact #{fact}); nothing to add.")),
+            Ok(memory::Proposed::AlreadyQueued(id)) => say(format!("Already waiting for review (proposal #{id}).")),
             Err(e) => Err(e.to_string()),
         };
     }

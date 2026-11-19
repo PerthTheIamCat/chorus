@@ -1163,8 +1163,12 @@ pub unsafe extern "C" fn chorus_restore(e: *const ChorusEngine, sha: *const c_ch
 // ---- memory ----------------------------------------------------
 
 /// The memory inspector's data: approved facts + the pending proposal
-/// queue. JSON: {"ok":true,"facts":["...", ...],
-///               "pending":[{"id":N,"scope":N,"text":"..."}, ...]}
+/// queue. JSON: {"ok":true,"facts":["...", ...],"pending_count":N,
+///               "pending":[{"id":N,"scope":N,"text":"...",
+///                           "kind":"fact"|"lesson"|"retire","replaces":N|null,
+///                           "evidence":"..."|null,"suspicious":bool}, ...]}
+/// `pending_count` is the "รอคุณดู N ข้อ" badge; `kind`/`replaces`/`evidence`/
+/// `suspicious` are additive (schema v9) and absent-safe for older shells.
 ///
 /// # Safety
 /// `e` must be a live engine handle.
@@ -1175,14 +1179,27 @@ pub unsafe extern "C" fn chorus_memory_state(e: *const ChorusEngine) -> *mut c_c
     };
     let r = catch_unwind(AssertUnwindSafe(|| engine.session.memory_state()));
     match r {
-        Ok(Ok((facts, pending))) => out(serde_json::json!({
-            "ok": true,
-            "facts": facts,
-            "pending": pending.iter().map(|(id, scope, text)| {
-                serde_json::json!({ "id": id, "scope": scope, "text": text })
-            }).collect::<Vec<_>>(),
-        })
-        .to_string()),
+        Ok(Ok((facts, pending))) => {
+            // Detail per entry comes from the queue itself; the tuple above
+            // stays for its older callers.
+            let detail = engine.session.memory_proposals().unwrap_or_default();
+            out(serde_json::json!({
+                "ok": true,
+                "facts": facts,
+                "pending_count": pending.len(),
+                "pending": pending.iter().map(|(id, scope, text)| {
+                    let d = detail.iter().find(|p| p.id == *id);
+                    serde_json::json!({
+                        "id": id, "scope": scope, "text": text,
+                        "kind": d.map_or("fact", |p| p.kind.as_str()),
+                        "replaces": d.and_then(|p| p.replaces),
+                        "evidence": d.and_then(|p| p.evidence.clone()),
+                        "suspicious": d.is_some_and(|p| p.suspicious),
+                    })
+                }).collect::<Vec<_>>(),
+            })
+            .to_string())
+        }
         Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in memory_state"),
     }
@@ -1666,6 +1683,19 @@ pub unsafe extern "C" fn chorus_set_variants_callback(
 pub unsafe extern "C" fn chorus_set_claude_chrome(e: *mut ChorusEngine, on: c_int) {
     if let Some(engine) = e.as_mut() {
         engine.session.set_claude_chrome(on != 0);
+    }
+}
+
+/// Allow Claude Code's own auto memory for the open session's next turns
+/// instead of switching it off (Settings). Off by default: Chorus memory is
+/// the single source.
+///
+/// # Safety
+/// `e` must be live or null.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_claude_auto_memory(e: *mut ChorusEngine, on: c_int) {
+    if let Some(engine) = e.as_mut() {
+        engine.session.set_claude_auto_memory(on != 0);
     }
 }
 
@@ -2363,6 +2393,9 @@ pub unsafe extern "C" fn chorus_compact(e: *const ChorusEngine, limit: i32) -> *
             // True when the pass stopped on the clock rather than finishing.
             // Not an error: it is how a slow summariser is meant to behave.
             "hit_budget": r.hit_budget,
+            // What the learning pass queued for review (additive).
+            "lessons": r.learned.lessons,
+            "retirements": r.learned.retirements,
         })
         .to_string()),
         Ok(Err(e)) => err(format!("{e:#}")),

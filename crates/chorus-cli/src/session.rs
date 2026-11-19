@@ -239,6 +239,17 @@ pub struct CompactReport {
     /// True when the pass stopped on the clock rather than finishing its
     /// batch — the signal that the summariser is slow, not that anything failed.
     pub hit_budget: bool,
+    /// What the off-path learning pass queued after compaction (`Session::learn`).
+    pub learned: LearnReport,
+}
+
+/// What one pass of [`Session::learn`] put in the approve queue.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LearnReport {
+    /// Lessons drafted from the ledger.
+    pub lessons: usize,
+    /// Facts suggested for retirement.
+    pub retirements: usize,
 }
 
 fn clip(text: &str, max_chars: usize) -> String {
@@ -899,6 +910,11 @@ pub struct Session {
     /// Let Claude use the user's own Chrome through the Claude in Chrome
     /// extension (Settings › off by default).
     claude_chrome: bool,
+    /// Let Claude Code keep its own auto memory (`~/.claude/projects/*/memory`).
+    /// Off by default: Chorus memory is single-sourced, so a second, private
+    /// memory that other agents never see is turned off for Claude's turns
+    /// (Settings › off by default). See `provider_memory_env`.
+    claude_auto_memory: bool,
     /// The agent sandbox denies reading `.env*` and key files; Chorus reads
     /// the project `.env` itself and passes its variables as environment
     /// (Settings › on by default).
@@ -907,6 +923,11 @@ pub struct Session {
     /// Agents are told about them every turn and the sandbox treats them
     /// like the working directory.
     project_folders: Vec<PathBuf>,
+    /// Ids of the memory facts the latest `assemble_context` put in the prompt.
+    /// `assemble_context` only notes them here; the turn's epilogue
+    /// (`account_memory`) is what writes the counters (7.2b: assembling makes
+    /// nothing).
+    injected_facts: std::sync::Mutex<Vec<i64>>,
 }
 
 /// What an agent is told about the rest of its project. Names and absolute
@@ -961,6 +982,22 @@ fn mask_secrets(text: &str) -> String {
 pub fn provider_browser_env(agent_name: &str, claude_chrome: bool) -> Vec<(String, String)> {
     if claude_chrome && agent_name.to_lowercase().contains("claude") {
         vec![("CLAUDE_CODE_ENABLE_CFC".to_string(), "1".to_string())]
+    } else {
+        Vec::new()
+    }
+}
+
+/// `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` keeps Claude Code from loading or
+/// writing its auto memory (code.claude.com/docs/en/env-vars and /memory,
+/// checked 18 Nov 2026; the Agent SDK docs list auto memory among what an SDK
+/// process picks up from `~/.claude`, and name this variable as the way to turn
+/// it off). Without it a Claude turn under `claude-agent-acp` may read and write
+/// notes no other agent sees — a second memory beside Chorus's. `allow` leaves
+/// the user's own setting alone (it does not force it on). Other agents have no
+/// such memory, so they get nothing. Takes effect from the next turn's bridge.
+pub fn provider_memory_env(agent_name: &str, allow_claude_auto_memory: bool) -> Vec<(String, String)> {
+    if !allow_claude_auto_memory && agent_name.to_lowercase().contains("claude") {
+        vec![("CLAUDE_CODE_DISABLE_AUTO_MEMORY".to_string(), "1".to_string())]
     } else {
         Vec::new()
     }
@@ -1199,8 +1236,10 @@ impl Session {
             loop_notes: std::sync::Mutex::new(Vec::new()),
             computer_use: false,
             claude_chrome: false,
+            claude_auto_memory: false,
             hide_secret_files: true,
             project_folders: Vec::new(),
+            injected_facts: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -1254,8 +1293,10 @@ impl Session {
             loop_notes: std::sync::Mutex::new(Vec::new()),
             computer_use: false,
             claude_chrome: false,
+            claude_auto_memory: false,
             hide_secret_files: true,
             project_folders: Vec::new(),
+            injected_facts: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -1493,6 +1534,13 @@ impl Session {
         Ok((facts, pending))
     }
 
+    /// The approve queue with what each entry is (fact, lesson, retirement),
+    /// what it replaces and the evidence it came from — `memory_state`'s
+    /// `(id, scope, text)` tuples keep their shape for older callers.
+    pub fn memory_proposals(&self) -> Result<Vec<memory::Proposal>> {
+        Ok(memory::pending(self.mem_store().conn())?)
+    }
+
     /// Approve or reject a queued proposal.
     pub fn review_proposal(&self, id: i64, approve: bool) -> Result<()> {
         let c = self.mem_store().conn();
@@ -1511,7 +1559,18 @@ impl Session {
             .checkpoint
             .as_ref()
             .context("no shadow repo for this workspace")?;
-        Ok(ck.apply_reverse(patch)?)
+        ck.apply_reverse(patch)?;
+        // Leave a trace in the ledger: the next agent should know the user threw
+        // this away, and the lesson pass learns from it.
+        let files = chorus_core::lessons::patch_files(patch);
+        if !files.is_empty() {
+            let note = format!("{}{}", chorus_core::lessons::REJECTED_PREFIX, files.join(", "));
+            ledger::append(
+                self.store.conn(),
+                &NewEvent::new(self.sess, EventKind::Decision, self.user, mask_secrets(&note)),
+            )?;
+        }
+        Ok(())
     }
 
     /// Roll the workspace back to `sha` (or the session base when empty).
@@ -2206,7 +2265,46 @@ impl Session {
 
     pub fn compact(&self, limit: usize) -> Result<CompactReport> {
         let summarizer = compaction::best();
-        self.compact_with(summarizer.as_ref(), limit, Self::compact_budget())
+        let mut report = self.compact_with(summarizer.as_ref(), limit, Self::compact_budget())?;
+        // Same off-path moment, same serial queue: draft lessons and retirement
+        // suggestions into the approve queue. Never fails the compaction.
+        match self.learn() {
+            Ok(l) => report.learned = l,
+            Err(e) => eprintln!("chorus: learning pass skipped: {e:#}"),
+        }
+        Ok(report)
+    }
+
+    /// Memory that learns, off the turn path (`compact` calls this; so does
+    /// `chorus memory learn`): read what happened since the last pass and queue
+    /// lessons (failed-then-fixed commands, rejected hunks, rewinds, user
+    /// corrections, unanswered handoffs) and retirement suggestions for facts
+    /// that are never used or point at files that are gone. Everything lands in
+    /// the approve queue; nothing becomes a fact here. A local model rewords a
+    /// lesson only when `CHORUS_SUMMARY_MODEL` is set, within the compaction
+    /// time budget.
+    pub fn learn(&self) -> Result<LearnReport> {
+        let started = std::time::Instant::now();
+        let scan = chorus_core::lessons::scan(self.store.conn(), self.sess)?;
+        let mut drafts = scan.drafts.clone();
+        drafts.sort_by_key(|d| std::cmp::Reverse(d.seq));
+        drafts.truncate(chorus_core::lessons::MAX_PER_PASS);
+        if let Some(model) = std::env::var("CHORUS_SUMMARY_MODEL").ok().filter(|m| !m.trim().is_empty()) {
+            let ollama = compaction::Ollama::new(model);
+            let budget = Self::compact_budget();
+            for d in drafts.iter_mut() {
+                if started.elapsed() >= budget {
+                    break;
+                }
+                d.text = chorus_core::lessons::polish(&ollama, &d.text);
+            }
+        }
+        let mem = self.mem_store().conn();
+        let queued = chorus_core::lessons::queue(mem, drafts)?;
+        // Only now: if queueing failed, the next pass reads the same events again.
+        chorus_core::lessons::mark_scanned(self.store.conn(), self.sess, &scan)?;
+        let retirements = memory::suggest_retirements(mem, &self.cwd, 3)?.len();
+        Ok(LearnReport { lessons: queued.queued, retirements })
     }
 
     /// The testable half of [`compact`]: summariser and time budget injected.
@@ -2230,6 +2328,7 @@ impl Session {
                 model: "nothing to do".into(),
                 took_ms: 0,
                 hit_budget: false,
+                learned: LearnReport::default(),
             });
         }
         let model = summarizer.label();
@@ -2255,6 +2354,7 @@ impl Session {
             model,
             took_ms: started.elapsed().as_millis() as u64,
             hit_budget,
+            learned: LearnReport::default(),
         })
     }
 
@@ -2376,7 +2476,47 @@ impl Session {
             code,
         };
         let assembler = Assembler::new(Budget::new(budget), CachedCounter::new(HeuristicCounter));
-        Ok(assembler.assemble(&input).text)
+        let text = assembler.assemble(&input).text;
+        // Remember which facts actually made it into the prompt (a fact the
+        // budget dropped was not injected). Written after the turn, not here.
+        if let Ok(mut held) = self.injected_facts.lock() {
+            *held = facts.iter().filter(|f| text.contains(&f.text)).map(|f| f.id).collect();
+        }
+        Ok(text)
+    }
+
+    /// The turn's epilogue for memory: count the facts this turn's context
+    /// carried as injected, and those the agent's output then touched as
+    /// referenced (schema v9). Best effort — a counter that cannot be written
+    /// must not fail a turn that already happened.
+    fn account_memory(&self, outcome: &TurnOutcome) {
+        let ids = match self.injected_facts.lock() {
+            Ok(mut held) => std::mem::take(&mut *held),
+            Err(_) => return,
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let mut said = String::new();
+        for ev in &outcome.events {
+            match ev {
+                AgentEvent::Message(m) => said.push_str(m),
+                AgentEvent::ToolCall { title, .. } => said.push_str(title),
+                AgentEvent::Diff { path, .. } => said.push_str(path),
+                _ => continue,
+            }
+            said.push('\n');
+        }
+        let c = self.mem_store().conn();
+        let counted = (|| -> Result<()> {
+            memory::record_injected(c, &ids)?;
+            let facts = memory::fact_texts(c, &ids)?;
+            memory::record_referenced(c, &memory::referenced_ids(&said, &facts))?;
+            Ok(())
+        })();
+        if let Err(e) = counted {
+            eprintln!("chorus: memory counters not updated: {e:#}");
+        }
     }
 
     /// The workspace's symbols, ranked towards the files this session has
@@ -2683,6 +2823,7 @@ impl Session {
 
         let mut env = crate::accounts::env_for(agent_name);
         env.extend(provider_browser_env(agent_name, self.claude_chrome));
+        env.extend(provider_memory_env(agent_name, self.claude_auto_memory));
         // Secrets the prompt names reach the agent's shell as variables; the
         // model only ever sees `$CHORUS_SECRET_…`.
         let vault = secrets::user_vault();
@@ -3197,6 +3338,7 @@ impl Session {
             outcome.cost_usd,
         )?;
         seqs.extend(self.flush_loop_notes());
+        self.account_memory(outcome);
         // The agent's own plan is the task list the shell shows (the ACP
         // `plan` frame replaces the whole list each time, so the last one
         // wins). It goes through the same checklist as `chorus_update_checklist`.
@@ -3345,6 +3487,12 @@ impl Session {
     /// Claude uses the user's Chrome through its own extension (Settings).
     pub fn set_claude_chrome(&mut self, on: bool) {
         self.claude_chrome = on;
+    }
+
+    /// Allow Claude Code's own auto memory instead of switching it off
+    /// (Settings › off by default; see `provider_memory_env`).
+    pub fn set_claude_auto_memory(&mut self, on: bool) {
+        self.claude_auto_memory = on;
     }
 
     /// Hide `.env*` and key files from the agent (Settings › on by default).

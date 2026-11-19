@@ -599,6 +599,27 @@ struct ProviderBrowserSettings: View {
     }
 }
 
+/// Claude Code keeps notes of its own (auto memory) that no other agent sees.
+/// Chorus turns it off for Claude's turns so memory has one source; this is the
+/// way back. The environment variable is set in chorus-cli (`provider_memory_env`).
+struct ClaudeMemorySettings: View {
+    @EnvironmentObject var engine: Engine
+    @AppStorage(Engine.claudeAutoMemoryKey) private var allowAutoMemory = false
+
+    var body: some View {
+        SettingsGroup(title: "ความจำของ Claude",
+                      footer: "ปิดอยู่ = Claude ไม่อ่าน/ไม่เขียนความจำส่วนตัวใน ~/.claude/projects/…/memory ทุกอย่างที่ควรจำจะผ่านความจำร่วมของ Chorus ที่ทุก agent เห็นเหมือนกัน · มีผลตั้งแต่เทิร์นถัดไป") {
+            SettingsRow(title: "ให้ Claude จำเองด้วย auto memory",
+                        info: "เปิดแล้ว Claude อาจเก็บบันทึกที่ agent ตัวอื่นไม่เห็น ทำให้ความจำแยกกัน ตั้ง CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 เมื่อปิด") {
+                Toggle("ให้ Claude จำเองด้วย auto memory", isOn: Binding(
+                    get: { allowAutoMemory },
+                    set: { allowAutoMemory = $0; engine.setClaudeAutoMemory($0) }))
+                    .labelsHidden().toggleStyle(.switch)
+            }
+        }
+    }
+}
+
 /// Computer use: the switch, what it means, and the two macOS permissions it
 /// needs. The rules themselves (read-only turns only look, "ถามก่อน" asks for
 /// every action, a cap per turn) live in chorus-core/src/computer.rs.
@@ -704,6 +725,7 @@ struct SafetySettings: View {
         }
         ComputerUseSettings()
         ProviderBrowserSettings()
+        ClaudeMemorySettings()
         SecretsSettings()
         SettingsGroup(title: "โปรเจกต์ที่เชื่อถือ",
                       footer: "repo ใหม่จะไม่รันอะไรจนกว่าคุณเปิดเอง") {
