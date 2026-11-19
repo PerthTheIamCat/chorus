@@ -14,7 +14,7 @@ struct ShellRoot: View {
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columns) {
-            ShellSidebar(projects: shell.projects) { shell.showSettings = true }
+            ShellSidebar(projects: shell.projects) { ShellRoot.openSettings() }
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 380)
         } detail: {
             Conversation()
@@ -41,9 +41,6 @@ struct ShellRoot: View {
             engine.loadAgents()
         }
         .onReceive(AppCommandCenter.shared.fire) { handle($0) }
-        .sheet(isPresented: $shell.showSettings) {
-            SettingsSheet(workspace: shell.workspace).environmentObject(engine)
-        }
         .sheet(item: $engine.pendingSecret) { SecretSheet(request: $0) }
         .confirmationDialog(
             "ลบ session นี้?",
@@ -59,6 +56,10 @@ struct ShellRoot: View {
         } message: { s in
             Text("“\(shell.title(of: s))” และประวัติทั้งหมดจะหายถาวร ไฟล์ในโฟลเดอร์ไม่ถูกแตะ")
         }
+    }
+
+    static func openSettings() {
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
     }
 
     // MARK: title and toolbar
@@ -105,7 +106,7 @@ struct ShellRoot: View {
     private func handle(_ c: AppCommand) {
         switch c {
         case .newSession: shell.newSession()
-        case .settings: shell.showSettings = true
+        case .settings: ShellRoot.openSettings()
         case .toggleSidebar:
             columns = columns == .detailOnly ? .all : .detailOnly
         case .toggleInspector: shell.showInspector.toggle()

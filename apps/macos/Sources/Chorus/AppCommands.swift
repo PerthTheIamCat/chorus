@@ -103,11 +103,6 @@ struct ChorusCommands: Commands {
             Divider()
         }
 
-        CommandGroup(replacing: .appSettings) {
-            Button("Settings…") { center.send(.settings) }
-                .keyboardShortcut(AppCommand.settings.shortcut)
-        }
-
         CommandGroup(replacing: .newItem) {
             Button("New Session") { center.send(.newSession) }
                 .keyboardShortcut(AppCommand.newSession.shortcut)

@@ -48,5 +48,13 @@ struct ChorusApp: App {
             CheckForUpdatesCommand(updater: updater)
             ChorusCommands(center: AppCommandCenter.shared)
         }
+
+        // ⌘, and the sidebar gear open the standard Settings window.
+        Settings {
+            SettingsRoot()
+                .environmentObject(engine)
+                .environmentObject(shell)
+                .chorusAppearance()
+        }
     }
 }
