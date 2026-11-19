@@ -275,8 +275,7 @@ struct HunkView: View {
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(rejected ? .red : .green)
                 }
-                .buttonStyle(InteractiveStyle(cornerRadius: 99, selected: rejected,
-                                              padding: .init(top: 2, leading: 7, bottom: 2, trailing: 7)))
+                .buttonStyle(.plain)
                 .help(rejected ? "กดอีกครั้งเพื่อเก็บไว้" : "กดเพื่อเลือกตีกลับก้อนนี้")
             }
             VStack(alignment: .leading, spacing: 0) {

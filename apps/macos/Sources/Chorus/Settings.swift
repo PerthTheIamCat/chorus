@@ -946,8 +946,7 @@ struct OrchestrationSettings: View {
         }
         SettingsGroup(title: "คลังบทบาท (Role Library)", footer: "บทบาท agent ที่กำหนดเองจะถูกบันทึกใน .chorus/agents/*.md") {
             if !workspace.isEmpty {
-                OrchestratorView(engine: engine, workspace: workspace)
-                    .padding(.vertical, 4)
+                RoleLibrary(workspace: workspace)
             } else {
                 Text("เลือก workspace เพื่อจัดการบทบาท").font(.caption).foregroundStyle(.secondary)
             }

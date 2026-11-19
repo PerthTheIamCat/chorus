@@ -58,7 +58,7 @@ struct ToolPage: View {
             VStack(alignment: .leading, spacing: 18) {
                 HStack {
                     Button(action: onClose) { Label("กลับไปที่ session", systemImage: "chevron.left") }
-                        .buttonStyle(.chorusPlain).foregroundStyle(.secondary)
+                        .buttonStyle(.borderless).foregroundStyle(.secondary)
                     Spacer()
                 }
                 if let board { content(board) }
@@ -148,7 +148,7 @@ struct ToolPage: View {
                         .padding(.horizontal, 12).padding(.vertical, 9)
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.chorusPlain)
+                    .buttonStyle(.borderless)
                 }
             }
         }
@@ -327,7 +327,7 @@ struct InstallStatusChip: View {
                     Text(result.succeeded ? "\(title(result.id)) เรียบร้อย" : "\(title(result.id)) ไม่สำเร็จ")
                         .font(.callout.weight(.medium))
                     Button { dismissed = result.id } label: { Image(systemName: "xmark").font(.caption.weight(.semibold)) }
-                        .buttonStyle(.chorusPlain).foregroundStyle(.secondary)
+                        .buttonStyle(.borderless).foregroundStyle(.secondary)
                 }
                 .task(id: result) {
                     try? await Task.sleep(for: .seconds(8))
@@ -342,9 +342,9 @@ struct InstallStatusChip: View {
         Button(action: onOpen) {
             HStack(spacing: 10) { content() }
                 .padding(.horizontal, 14).padding(.vertical, 9)
-                .floatingPanel(cornerRadius: 16)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
-        .buttonStyle(.chorusPlain)
+        .buttonStyle(.borderless)
         .transition(.move(edge: .top).combined(with: .opacity))
     }
 }

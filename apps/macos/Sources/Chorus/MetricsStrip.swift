@@ -84,36 +84,3 @@ enum MetricsChips {
     }
 }
 
-/// A thin row under the composer. Draws what Rust gave it; empty = invisible.
-struct MetricsStripView: View {
-    @ObservedObject var engine: Engine
-    @AppStorage(MetricsKey.tokPerS) private var tokPerS = true
-    @AppStorage(MetricsKey.ttft) private var ttft = true
-    @AppStorage(DisplayKey.detail) private var detail = DetailLevel.normal.rawValue
-    @AppStorage(DisplayKey.currency) private var currency = "auto"
-    @AppStorage(SettingsKey.thbRate) private var thbRate = ""
-    @AppStorage(MetricsKey.cache) private var cache = true
-    @AppStorage(MetricsKey.cost) private var cost = true
-    @AppStorage(MetricsKey.limit) private var limit = true
-    @AppStorage(MetricsKey.context) private var context = true
-
-    var body: some View {
-        let chips = MetricsChips.make(engine.metrics,
-            .init(tokPerS: tokPerS, ttft: ttft, cache: cache, cost: cost, limit: limit, context: context,
-                  currency: currency, thbRate: Money.rate(thbRate)))
-        if DetailLevel.from(detail).showsMetrics, !chips.isEmpty {
-            HStack(spacing: 12) {
-                ForEach(chips) { c in
-                    Label(c.label, systemImage: c.icon)
-                        .labelStyle(.titleAndIcon)
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(c.warn ? Color.orange : Color.secondary)
-                        .help(c.help)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 6)
-            .accessibilityElement(children: .combine)
-        }
-    }
-}

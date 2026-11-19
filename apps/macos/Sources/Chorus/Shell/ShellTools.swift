@@ -42,7 +42,6 @@ struct ToolSheet: View {
     @EnvironmentObject private var shell: ShellModel
     @Environment(\.dismiss) private var dismiss
     let tool: ShellTool
-    @State private var openFile: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -64,32 +63,13 @@ struct ToolSheet: View {
         switch tool {
         case .ship:
             GitShipSheet(workspace: ws, sessionFiles: engine.diffFiles, goal: "") { dismiss() }
-        case .terminal:
-            TerminalDrawerView(workspace: ws) { dismiss() }
-        case .files:
-            HSplitView {
-                WorkspaceExplorerView(engine: engine, workspace: ws) { openFile = $0 }
-                    .frame(minWidth: 240, idealWidth: 300)
-                if let f = openFile {
-                    CodeViewerView(filePath: f, cwd: ws) { openFile = nil }
-                        .id(f)
-                } else {
-                    ContentUnavailableView("เลือกไฟล์ทางซ้าย", systemImage: "doc.text")
-                }
-            }
-        case .search:
-            ChatSearchView(engine: engine, dbPath: shell.currentDB, onSelectSession: { id in
-                shell.open(SessionKey(folder: ws, id: id))
-                dismiss()
-            }, onClose: { dismiss() })
-        case .checkpoints:
-            CheckpointTimelineView(engine: engine, dbPath: shell.currentDB, workspace: ws) { dismiss() }
-        case .orchestra:
-            OrchestratorView(engine: engine, workspace: ws)
-        case .monitor:
-            SystemMonitorView()
-        case .preview:
-            ShellPreview()
+        case .terminal: TerminalTool(workspace: ws)
+        case .files: FilesTool(workspace: ws)
+        case .search: SearchTool { dismiss() }
+        case .checkpoints: CheckpointsTool()
+        case .orchestra: OrchestraTool()
+        case .monitor: MonitorTool()
+        case .preview: ShellPreview()
         }
     }
 }

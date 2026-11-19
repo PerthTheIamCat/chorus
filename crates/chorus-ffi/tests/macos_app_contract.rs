@@ -92,12 +92,11 @@ fn pairing_view_has_no_hardcoded_port_and_no_optimistic_revoke() {
 /// engine or shown back in the transcript.
 #[test]
 fn requested_secret_is_typed_masked_and_never_kept_by_the_shell() {
-    let views = app("Sources/Chorus/AgentPromptViews.swift");
-    let sheet = &views[views.find("struct SecretRequestSheet").expect("sheet")
-        ..views.find("// MARK: variants").expect("variants section")];
+    let views = app("Sources/Chorus/Shell/ShellPrompts.swift");
+    let sheet = &views[views.find("struct SecretSheet").expect("sheet")..];
     assert!(sheet.contains("SecureField("), "the value must be typed into a SecureField");
     for leak in ["print(", "NSLog(", "Logger", "os_log", "UserDefaults", "@AppStorage", "Text(value", "Text(\"\\(value"] {
-        assert!(!sheet.contains(leak), "SecretRequestSheet must not use {leak}");
+        assert!(!sheet.contains(leak), "SecretSheet must not use {leak}");
     }
     let prompts = app("Sources/Chorus/AgentPrompts.swift");
     for leak in ["print(", "NSLog(", "UserDefaults"] {

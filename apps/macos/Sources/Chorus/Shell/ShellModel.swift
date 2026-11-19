@@ -165,6 +165,8 @@ final class ShellModel: ObservableObject {
 
     var currentDB: String { dbPath(for: workspace) }
 
+    func reloadSessions() { engine.loadSessions(db: currentDB) }
+
     func sessions(in folder: String) -> [Engine.SessionSummary] {
         engine.sessionsByDB[dbPath(for: folder)] ?? []
     }
