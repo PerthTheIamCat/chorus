@@ -215,6 +215,8 @@ fn compare_cmd(args: &[String]) -> Result<()> {
     let mut agents: Vec<String> = Vec::new();
     let mut policy = Policy::DenyAll;
     let mut positional: Vec<&String> = Vec::new();
+    let mut opts = chorus_cli::session::CompareOptions::default();
+    let mut results = false;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -232,24 +234,63 @@ fn compare_cmd(args: &[String]) -> Result<()> {
             }
             "--yes" => policy = Policy::AllowAll,
             "--read-only" => policy = Policy::ReadOnly,
+            "--score" => opts.score = true,
+            "--judge" => opts.judge = true,
+            "--discriminating-test" => opts.discriminating_test = true,
+            "--judge-agent" => opts.judge_agent = it.next().cloned().unwrap_or_default(),
+            "--results" => results = true,
             _ => positional.push(a),
         }
     }
     let db = db.context("--db is required")?;
+    if results {
+        let store = chorus_core::Store::open(&db)?;
+        let rows = chorus_cli::session::judge::compare_results(&store, 200)?;
+        for st in chorus_cli::session::judge::lane_stats(&rows) {
+            println!(
+                "{:<22} {:<10} runs {:>3} · passed {:>3} · unknown {:>3} · {} tokens · {:.1}s · rewinds {}",
+                st.agent,
+                st.mode,
+                st.runs,
+                st.passed,
+                st.unknown,
+                st.avg_tokens.map_or("—".to_string(), |t| t.to_string()),
+                st.avg_ms as f64 / 1000.0,
+                st.rewinds
+            );
+        }
+        return Ok(());
+    }
     let [prompt] = positional.as_slice() else {
-        anyhow::bail!("usage: chorus compare <prompt> --db PATH --session N --agents a,b");
+        anyhow::bail!("usage: chorus compare <prompt> --db PATH --session N --agents a,b [--score] [--judge] [--discriminating-test] [--judge-agent X]\n   or: chorus compare --results --db PATH");
     };
     anyhow::ensure!(agents.len() >= 2, "--agents needs at least two");
 
-    let specs: Vec<AgentSpec> = agents
-        .iter()
-        .map(|n| AgentSpec::new(n, provider_of(n)))
-        .collect();
+    let lanes = chorus_cli::session::judge::lanes_from_csv(&agents.join(","), |n| provider_of(n).to_string());
     let mut s = Session::open(&db, session_id).context("open session")?
         .log_permissions(true);
-    let branches = s.compare(&specs, prompt, policy)?;
+    let report = s.compare_with(&lanes, prompt, policy, &opts)?;
+    if let Some(v) = &report.verdict {
+        println!(
+            "judge: {}{}{}",
+            if v.judge.is_empty() { "—" } else { &v.judge },
+            if v.summary.is_empty() { String::new() } else { format!(" · {}", v.summary) },
+            if v.note.is_empty() { String::new() } else { format!(" · {}", v.note) },
+        );
+    }
 
-    for b in branches {
+    for b in report.branches {
+        if let Some(sc) = &b.score {
+            let mark = |c: &chorus_cli::session::judge::Check| match (c.ran, c.passed) {
+                (true, Some(true)) => "pass",
+                (true, _) => "FAIL",
+                _ => "—",
+            };
+            println!(
+                "#{} {} — verify {} · tests {} · discriminating {} · {}",
+                sc.rank, sc.lane, mark(&sc.verify), mark(&sc.tests), mark(&sc.discriminating), sc.reason
+            );
+        }
         println!(
             "\n── {} · resume with --session {} ──────────────",
             b.agent, b.session_id
@@ -382,6 +423,8 @@ fn run(args: &[String]) -> Result<()> {
     let mut claude_chrome = false;
     let mut claude_auto_memory = false;
     let mut show_secret_files = false;
+    let mut review_by: Option<String> = None;
+    let mut criteria: Vec<String> = Vec::new();
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -406,6 +449,13 @@ fn run(args: &[String]) -> Result<()> {
             "--claude-chrome" => claude_chrome = true,
             "--claude-auto-memory" => claude_auto_memory = true,
             "--show-secret-files" => show_secret_files = true,
+            "--review-by" => review_by = it.next().cloned(),
+            "--criteria" => {
+                criteria = it
+                    .next()
+                    .map(|v| v.split(';').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect())
+                    .unwrap_or_default();
+            }
             "--session" => continue_session = it.next().and_then(|v| v.parse().ok()),
             "--yes" => policy = Policy::AllowAll,
             "--read-only" => policy = Policy::ReadOnly,
@@ -450,6 +500,13 @@ fn run(args: &[String]) -> Result<()> {
     s.set_claude_chrome(claude_chrome);
     s.set_claude_auto_memory(claude_auto_memory);
     s.set_hide_secret_files(!show_secret_files);
+    if let Some(r) = &review_by {
+        // A second pair of eyes from another provider, against criteria agreed now.
+        s.set_cross_review(Some(chorus_cli::session::CrossReview::new(
+            AgentSpec::new(r, provider_of(r)),
+            criteria.clone(),
+        )));
+    }
     if let Some(m) = &model {
         // Pinned for whoever answers, including anyone the relay hands to:
         // "use the cheap model" is a statement about the task, not about one

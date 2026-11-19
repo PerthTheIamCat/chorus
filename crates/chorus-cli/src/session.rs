@@ -29,6 +29,12 @@ use chorus_core::tokens::{CachedCounter, HeuristicCounter};
 use chorus_core::{actor, ledger, memory, usage, Event, EventKind, NewEvent, Store};
 use std::path::{Path, PathBuf};
 
+pub mod judge;
+pub use judge::{CompareOptions, CrossReview, Lane};
+
+/// Wraps a command in the sandbox a scored compare's checks run under.
+pub type LaneConfine = fn(&[String], &Path) -> std::result::Result<Vec<String>, String>;
+
 /// How to answer the agent's permission requests for a whole run. The
 /// three levels mirror the design's per-agent permission (§7): deny
 /// everything the sandbox escalates, auto-allow only reads, or allow all.
@@ -150,6 +156,9 @@ pub struct CompareBranch {
     /// ran in the shared folder.
     pub worktree: Option<String>,
     pub worktree_branch: Option<String>,
+    /// Verifier/test evidence and rank when the compare was scored
+    /// (see [`judge`]); `None` for a plain compare.
+    pub score: Option<judge::LaneScore>,
 }
 
 /// The result of a relay run: who ended up answering, their turn, and every
@@ -908,6 +917,15 @@ pub struct Session {
     /// Loop-guard notices from the turn in flight, written to the ledger after
     /// the agent's own events so the thread reads in the order things happened.
     loop_notes: std::sync::Mutex<Vec<String>>,
+    /// Side effects (push, PR, …) the agent started this turn whose result has
+    /// not been recorded: `(tool title, intent seq)`. See `chorus_core::journal`.
+    open_intents: std::sync::Mutex<Vec<(String, i64)>>,
+    /// Reviewer from another provider, run after a builder turn changed files
+    /// (R6a). `None` = off.
+    cross_review: Option<CrossReview>,
+    /// Sandbox for the checks a scored compare runs in lane worktrees.
+    /// `None` = Seatbelt; a host with its own sandbox (and tests) sets one.
+    lane_confine: Option<LaneConfine>,
     /// The user's computer-use switch (Settings › off by default).
     computer_use: bool,
     /// Let Claude use the user's own Chrome through the Claude in Chrome
@@ -1237,6 +1255,9 @@ impl Session {
             repo_map: Default::default(),
             plan_turn: false,
             loop_notes: std::sync::Mutex::new(Vec::new()),
+            open_intents: std::sync::Mutex::new(Vec::new()),
+            cross_review: None,
+            lane_confine: None,
             computer_use: false,
             claude_chrome: false,
             claude_auto_memory: false,
@@ -1294,6 +1315,9 @@ impl Session {
             repo_map: Default::default(),
             plan_turn: false,
             loop_notes: std::sync::Mutex::new(Vec::new()),
+            open_intents: std::sync::Mutex::new(Vec::new()),
+            cross_review: None,
+            lane_confine: None,
             computer_use: false,
             claude_chrome: false,
             claude_auto_memory: false,
@@ -1719,6 +1743,12 @@ impl Session {
             }
         }
 
+        for note in chorus_core::handoff::half_done_notes(&events) {
+            if !pending.contains(&note) {
+                pending.push(note);
+            }
+        }
+
         let brief = Brief::build(BriefInput {
             goal: goal.to_string(),
             done,
@@ -1768,61 +1798,10 @@ impl Session {
         prompt: &str,
         policy: Policy,
     ) -> Result<Vec<CompareBranch>> {
-        let db_path: String = self
-            .store
-            .conn()
-            .query_row("PRAGMA database_list", [], |r| r.get::<_, String>(2))
-            .unwrap_or_default();
-        anyhow::ensure!(!db_path.is_empty(), "compare needs a file-backed store");
-
-        let head = ledger::history(self.store.conn(), self.sess, 1_000_000)
-            .ok()
-            .and_then(|h| h.last().map(|e| e.seq))
-            .unwrap_or(0);
-
-        let mut out = Vec::new();
-        for spec in agents {
-            let fork_id = ledger::fork(
-                self.store.conn(),
-                self.sess,
-                head,
-                &format!("compare: {}", spec.name),
-            )?;
-            // Each agent works in its own git worktree, started from the
-            // user's current tree, so none sees (or edits) another's files.
-            // Outside a git repo, or if the worktree cannot be made, the
-            // shared folder is used as before.
-            let isolated = self.compare_worktree(&spec.name);
-            if let Some((_, cwd)) = &isolated {
-                self.store.conn().execute(
-                    "UPDATE session SET cwd = ?1 WHERE id = ?2",
-                    (cwd.to_string_lossy().as_ref(), fork_id),
-                )?;
-            }
-            let mut branch = Session::open(Path::new(&db_path), fork_id)?;
-            branch.forced_bridge = Some(self.resolve_bridge(&spec.name, &spec.bridge));
-            let before = branch.checkpoint.as_ref().and_then(|ck| ck.snapshot("compare base").ok());
-            let started = std::time::Instant::now();
-            let turn = branch.run_turn(&spec.name, &spec.provider, prompt, policy);
-            let elapsed_ms = started.elapsed().as_millis() as u64;
-            let diff = match (&branch.checkpoint, &before) {
-                (Some(ck), Some(base)) => ck.diff_since_user(base).unwrap_or_default(),
-                _ => String::new(),
-            };
-            let used = usage::get(self.store.conn(), fork_id).ok().flatten().unwrap_or_default();
-            out.push(CompareBranch {
-                agent: spec.name.clone(),
-                session_id: fork_id,
-                result: turn.map(|t| (t.message, t.stop_reason)),
-                diff,
-                elapsed_ms,
-                context_used: used.context_used,
-                cost_usd: used.cost_usd,
-                worktree: isolated.as_ref().map(|(w, _)| w.path.clone()),
-                worktree_branch: isolated.as_ref().map(|(w, _)| w.branch.clone()),
-            });
-        }
-        Ok(out)
+        let lanes: Vec<Lane> = agents.iter().cloned().map(Lane::single).collect();
+        Ok(self
+            .compare_with(&lanes, prompt, policy, &CompareOptions::default())?
+            .branches)
     }
 
     /// A private worktree for one compare branch and the directory inside it
@@ -1980,6 +1959,16 @@ impl Session {
         };
 
         self.forced_bridge = saved_bridge;
+        if let Ok(r) = &result {
+            let by = r.answered_by.clone();
+            let provider = chain
+                .iter()
+                .find(|s| s.name == by)
+                .map(|s| s.provider.clone())
+                .unwrap_or_default();
+            // Optional second pair of eyes from another provider (R6a).
+            let _ = self.review_after_turn(&by, &provider, user_text);
+        }
         result
     }
 
@@ -2207,7 +2196,11 @@ impl Session {
 
         for e in &events {
             if e.kind == EventKind::Decision {
-                push_unique(&mut ts.done, ledger::body(c, e)?.trim());
+                let body = ledger::body(c, e)?;
+                if chorus_core::journal::is_marker(&body) {
+                    continue;
+                }
+                push_unique(&mut ts.done, body.trim());
             }
         }
         // `done` carries only what actually happened: decisions someone
@@ -2430,6 +2423,7 @@ impl Session {
         let bodies: Vec<(Event, String)> = bodies
             .into_iter()
             .filter(|(e, body)| e.kind != EventKind::ToolResult || !is_bare_success(body))
+            .filter(|(e, body)| e.kind != EventKind::Decision || !chorus_core::journal::is_marker(body))
             .collect();
 
         let n = bodies.len();
@@ -2797,6 +2791,13 @@ impl Session {
         self.models.get(agent_name).map(String::as_str)
     }
 
+    /// Run a scored compare's checks under `confine` instead of Seatbelt.
+    /// For hosts that bring their own sandbox, and for tests on Linux.
+    pub fn with_lane_confine(mut self, confine: LaneConfine) -> Self {
+        self.lane_confine = Some(confine);
+        self
+    }
+
     pub fn log_permissions(mut self, on: bool) -> Self {
         self.log_permissions = on;
         self
@@ -3120,12 +3121,53 @@ impl Session {
         )));
         let loop_notes = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
         let loop_stop = std::rc::Rc::new(std::cell::Cell::new(None::<String>));
-        let tool_observer = loop_guard_enabled().then(|| {
+        // Journal side effects (push, PR, …) the moment the agent starts them,
+        // on a connection of their own like the usage observer above, so an
+        // intent survives a turn that dies before `persist_outcome`.
+        if let Ok(mut open) = self.open_intents.lock() {
+            // Pairing is per turn; an intent a dead turn left open is not
+            // lost, it is in the ledger.
+            open.clear();
+        }
+        let intent_log = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(String, i64)>::new()));
+        let intent_writer = self
+            .store
+            .conn()
+            .path()
+            .filter(|p| !p.is_empty())
+            .and_then(|path| {
+                let store = Store::open(Path::new(path)).ok()?;
+                let _ = store
+                    .conn()
+                    .busy_timeout(std::time::Duration::from_millis(200));
+                let who = actor::intern(store.conn(), "chorus", "system").ok()?;
+                Some((store, who))
+            });
+        let guard_on = loop_guard_enabled();
+        let tool_observer = (guard_on || intent_writer.is_some()).then(|| {
             let guard = loop_guard.clone();
+            let intents = intent_log.clone();
+            let sess = self.sess;
+            let agent = agent_name.to_string();
             let notes = loop_notes.clone();
             let stop = loop_stop.clone();
             let tag = chorus_acp::scope::current();
             Box::new(move |title: &str, args: Option<u64>| {
+                if let (Some((store, who)), Some(effect)) =
+                    (&intent_writer, chorus_core::journal::classify(title))
+                {
+                    let body = mask_secrets(&chorus_core::journal::intent_body(&effect, &agent));
+                    if let Ok(seq) = ledger::append(
+                        store.conn(),
+                        &NewEvent::new(sess, EventKind::Decision, *who, body),
+                    ) {
+                        intents.borrow_mut().push((title.to_string(), seq));
+                        chorus_acp::push(sess, seq, "events", "");
+                    }
+                }
+                if !guard_on {
+                    return;
+                }
                 let verdict = guard.borrow_mut().see(title, args);
                 let shown = short_title(guard.borrow().last());
                 let note = match verdict {
@@ -3161,6 +3203,9 @@ impl Session {
         chorus_acp::set_usage_observer(previous);
         if let Ok(mut held) = self.loop_notes.lock() {
             held.extend(loop_notes.borrow_mut().drain(..));
+        }
+        if let Ok(mut open) = self.open_intents.lock() {
+            open.extend(intent_log.borrow_mut().drain(..));
         }
         if let Some(why) = loop_stop.take() {
             if out.is_err() {
@@ -3400,6 +3445,7 @@ impl Session {
             }
             seqs.push(ledger::append(c, &ne)?);
         }
+        self.close_intents(outcome);
         // Bridges report context pressure, not an in/out split, so the token
         // columns stay at what is known (nothing yet); cost adds to the total.
         usage::record_turn(
@@ -3444,6 +3490,41 @@ impl Session {
             self.announce(last);
         }
         Ok(seqs)
+    }
+
+    /// Close the intents of this turn that reported back: a done mark for a
+    /// call that went through, a failed mark for one that did not. Whatever
+    /// has no result stays open, which is how a handoff knows it may be
+    /// half-done.
+    fn close_intents(&self, outcome: &TurnOutcome) {
+        let open: Vec<(String, i64)> = self
+            .open_intents
+            .lock()
+            .map(|mut o| std::mem::take(&mut *o))
+            .unwrap_or_default();
+        if open.is_empty() {
+            return;
+        }
+        let c = self.store.conn();
+        let Ok(who) = actor::intern(c, "chorus", "system") else {
+            return;
+        };
+        let mut open = open;
+        for ev in &outcome.events {
+            let AgentEvent::ToolResult { title, status, .. } = ev else {
+                continue;
+            };
+            let Some(i) = open.iter().position(|(t, _)| t == title) else {
+                continue;
+            };
+            let (_, intent) = open.remove(i);
+            let body = chorus_core::journal::done_body(intent, chorus_core::journal::status_ok(status));
+            if let Ok(seq) = ledger::append(c, &NewEvent::new(self.sess, EventKind::Decision, who, body)) {
+                self.announce(seq);
+            }
+        }
+        // A call that never reported stays open in the ledger, which is
+        // where the next handoff reads it.
     }
 
     /// Write the loop guard's notices to the ledger as messages from
