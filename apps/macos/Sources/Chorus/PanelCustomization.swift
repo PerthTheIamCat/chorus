@@ -227,7 +227,7 @@ private struct NativeSplitterRepresentable: NSViewRepresentable {
             guard isDraggingInternal else { return }
             let currentX = NSEvent.mouseLocation.x
             let delta = direction == .forward ? (currentX - startMouseX) : (startMouseX - currentX)
-            // Widths live in @AppStorage on ContentView: every write persists to
+            // Widths live in @AppStorage on the window: every write persists to
             // UserDefaults and re-evaluates the whole view. Whole points only,
             // and nothing when the clamped width did not change.
             let newWidth = min(max((initialWidth + Double(delta)).rounded(), minWidth), maxWidth)
