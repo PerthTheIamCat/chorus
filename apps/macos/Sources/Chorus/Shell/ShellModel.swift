@@ -91,7 +91,7 @@ final class ShellModel: ObservableObject {
     @Published var routeStatus: RouteStatus?
     @Published var pendingRoute: PendingRoute?
     @Published var reviewModel = ""
-    @Published private(set) var routingInProgress = false
+    @Published var routingInProgress = false
     @Published var lastPrompt = ""
     let fileIndex = FileIndex()
     // Compare.
