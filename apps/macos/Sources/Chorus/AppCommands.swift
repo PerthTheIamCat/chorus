@@ -36,7 +36,7 @@ enum AppCommand: Equatable {
     static var all: [AppCommand] {
         [.newSession, .settings, .commandPalette, .searchSessions,
          .toggleSidebar, .toggleExplorer, .toggleInspector]
-            + ContentView.RightTab.allCases.indices.map { .inspectorTab($0) }
+            + InspectorTab.allCases.indices.map { .inspectorTab($0) }
             + [.toggleOrchestrator, .toggleLivePreview, .toggleTerminal, .toggleFocusMode,
                .send, .stop, .chooseModel, .nextEffort, .compareAgents, .sendReview, .openInEditor, .systemMonitor]
     }
@@ -103,11 +103,6 @@ struct ChorusCommands: Commands {
             Divider()
         }
 
-        CommandGroup(replacing: .appSettings) {
-            Button("Settings…") { center.send(.settings) }
-                .keyboardShortcut(AppCommand.settings.shortcut)
-        }
-
         CommandGroup(replacing: .newItem) {
             Button("New Session") { center.send(.newSession) }
                 .keyboardShortcut(AppCommand.newSession.shortcut)
@@ -130,8 +125,8 @@ struct ChorusCommands: Commands {
             Button("Toggle Inspector") { center.send(.toggleInspector) }
                 .keyboardShortcut(AppCommand.toggleInspector.shortcut)
             Menu("Inspector Tab") {
-                ForEach(Array(ContentView.RightTab.allCases.enumerated()), id: \.offset) { i, tab in
-                    Button(tab.rawValue) { center.send(.inspectorTab(i)) }
+                ForEach(Array(InspectorTab.allCases.enumerated()), id: \.offset) { i, tab in
+                    Button(tab.title) { center.send(.inspectorTab(i)) }
                         .keyboardShortcut(AppCommand.inspectorTab(i).shortcut)
                 }
             }

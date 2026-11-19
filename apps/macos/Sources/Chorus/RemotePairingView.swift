@@ -85,7 +85,7 @@ struct RemotePairingView: View {
                         .foregroundStyle(.secondary)
                         .font(.title3)
                 }
-                .buttonStyle(.chorusPlain)
+                .buttonStyle(.borderless)
             }
             .padding()
             .background(.regularMaterial)

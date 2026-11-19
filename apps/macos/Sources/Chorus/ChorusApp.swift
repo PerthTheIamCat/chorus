@@ -19,25 +19,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct ChorusApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var engine = Engine()
+    @StateObject private var engine: Engine
+    @StateObject private var shell: ShellModel
     @StateObject private var updater = Updater.shared
+
+    init() {
+        let e = Engine()
+        _engine = StateObject(wrappedValue: e)
+        _shell = StateObject(wrappedValue: ShellModel(engine: e))
+    }
 
     var body: some Scene {
         WindowGroup("Chorus") {
-            ContentView()
+            // A bare `swift build` executable has no app bundle, so launching it
+            // can leave the window on screen but never made key; ShellRoot
+            // forces activation when it appears.
+            ShellRoot()
                 .environmentObject(engine)
+                .environmentObject(shell)
                 .chorusAppearance()
-                .frame(minWidth: 820, minHeight: 560)
-                .onAppear {
-                    // A bare `swift build` executable has no app bundle, so
-                    // launching it (especially from a background/detached
-                    // process, not a foreground double-click) can leave the
-                    // window on screen but never made key — every field
-                    // then silently refuses keyboard input. Force it.
-                    NSApp.setActivationPolicy(.regular)
-                    NSApp.activate(ignoringOtherApps: true)
-                    NSApp.windows.first?.makeKeyAndOrderFront(nil)
-                }
         }
         // Not `.hiddenTitleBar`: with a NavigationSplitView and a toolbar it
         // shifts hit-testing away from what is drawn, so sidebar clicks landed
@@ -47,6 +47,14 @@ struct ChorusApp: App {
             AboutCommand()
             CheckForUpdatesCommand(updater: updater)
             ChorusCommands(center: AppCommandCenter.shared)
+        }
+
+        // ⌘, and the sidebar gear open the standard Settings window.
+        Settings {
+            SettingsRoot()
+                .environmentObject(engine)
+                .environmentObject(shell)
+                .chorusAppearance()
         }
     }
 }

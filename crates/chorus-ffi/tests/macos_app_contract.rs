@@ -9,17 +9,14 @@ fn app(rel: &str) -> String {
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
 }
 
-/// `ContentView` is split across `ContentView.swift` and `ContentView+*.swift`;
-/// the contracts below are about the view as a whole, so read them together.
-fn content_view() -> String {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/macos/Sources/Chorus");
+/// The v0.4 window lives in `Sources/Chorus/Shell/`; the contracts below are
+/// about the window as a whole, so read those files together.
+fn shell() -> String {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/macos/Sources/Chorus/Shell");
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            let n = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            n == "ContentView.swift" || (n.starts_with("ContentView+") && n.ends_with(".swift"))
-        })
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("swift"))
         .collect();
     files.sort();
     files.iter().map(|p| std::fs::read_to_string(p).unwrap()).collect::<Vec<_>>().join("\n")
@@ -65,12 +62,16 @@ fn spotlight_indexing_is_opt_in() {
     assert!(settings.contains("@AppStorage(SpotlightIndexer.settingKey) private var spotlightIndexing = false"));
 }
 
-/// P1: a finished turn runs project code only for a trusted project.
+/// P1: nothing in the window runs project code after a turn unless the
+/// project is trusted. The v0.4 shell does not verify after a turn at all; if
+/// that comes back, it must be behind `engine.projectTrusted`.
 #[test]
 fn post_turn_verify_is_gated_on_trust() {
-    let src = content_view();
-    assert!(src.contains("if !workspace.isEmpty && engine.projectTrusted {"));
-    assert!(!src.contains("if !workspace.isEmpty {\n                    engine.verifyWorkspace"));
+    let src = shell();
+    assert!(
+        !src.contains("verifyWorkspace") || src.contains("engine.projectTrusted"),
+        "a verify call in the window must be gated on engine.projectTrusted"
+    );
 }
 
 /// P2-2 / P3-3: the pairing sheet trusts Rust for the endpoint and only
@@ -91,12 +92,11 @@ fn pairing_view_has_no_hardcoded_port_and_no_optimistic_revoke() {
 /// engine or shown back in the transcript.
 #[test]
 fn requested_secret_is_typed_masked_and_never_kept_by_the_shell() {
-    let views = app("Sources/Chorus/AgentPromptViews.swift");
-    let sheet = &views[views.find("struct SecretRequestSheet").expect("sheet")
-        ..views.find("// MARK: variants").expect("variants section")];
+    let views = app("Sources/Chorus/Shell/ShellPrompts.swift");
+    let sheet = &views[views.find("struct SecretSheet").expect("sheet")..];
     assert!(sheet.contains("SecureField("), "the value must be typed into a SecureField");
     for leak in ["print(", "NSLog(", "Logger", "os_log", "UserDefaults", "@AppStorage", "Text(value", "Text(\"\\(value"] {
-        assert!(!sheet.contains(leak), "SecretRequestSheet must not use {leak}");
+        assert!(!sheet.contains(leak), "SecretSheet must not use {leak}");
     }
     let prompts = app("Sources/Chorus/AgentPrompts.swift");
     for leak in ["print(", "NSLog(", "UserDefaults"] {
@@ -110,8 +110,10 @@ fn requested_secret_is_typed_masked_and_never_kept_by_the_shell() {
 /// U2: a question is a card in the chat, not a sheet that hides where the work stopped.
 #[test]
 fn agent_questions_are_inline_cards_not_sheets() {
-    let content = content_view();
-    assert!(content.contains("AgentPromptCards(engine: engine"), "cards must be in the chat");
-    assert!(!content.contains("$engine.pendingQuestion"), "no sheet for questions");
-    assert!(content.contains("AgentPromptNotice.badge(engine.waitingForYou)"), "sidebar badge");
+    let src = shell();
+    assert!(src.contains("QuestionCard(question:"), "cards must be in the chat");
+    assert!(src.contains("PermissionCard(ask:"), "permission must be a card too");
+    assert!(!src.contains("$engine.pendingQuestion"), "no sheet for questions");
+    assert!(!src.contains("$engine.pendingVariants"), "no sheet for variants");
+    assert!(src.contains("engine.waitingForYou"), "sidebar badge");
 }

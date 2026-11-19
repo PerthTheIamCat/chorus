@@ -138,8 +138,7 @@ struct AccountEditorSheet: View {
                         } label: {
                             Label(preset.label, systemImage: preset.symbol).font(.caption)
                         }
-                        .buttonStyle(InteractiveStyle(cornerRadius: 14, selected: slug == preset.slug,
-                                                      padding: .init(top: 4, leading: 9, bottom: 4, trailing: 9)))
+                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -213,7 +212,7 @@ struct AccountEditorSheet: View {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .strokeBorder(icon == value ? Color.accentColor : .clear, lineWidth: 2))
         }
-        .buttonStyle(.chorusPlain)
+        .buttonStyle(.borderless)
         .help(value == nil ? "โลโก้ของเจ้านี้" : "ไอคอน")
         .accessibilityLabel(value == nil ? "โลโก้ของเจ้านี้" : "ไอคอน")
         .accessibilityAddTraits(icon == value ? .isSelected : [])
@@ -226,7 +225,7 @@ struct AccountEditorSheet: View {
                 .frame(width: 20, height: 20)
                 .overlay(Circle().strokeBorder(Color.primary.opacity(0.35), lineWidth: color == value ? 2 : 0).padding(-3))
         }
-        .buttonStyle(.chorusPlain)
+        .buttonStyle(.borderless)
         .help(value == nil ? "สีของเจ้านี้" : "สี")
         .accessibilityLabel(value == nil ? "สีของเจ้านี้" : "สี")
         .accessibilityAddTraits(color == value ? .isSelected : [])

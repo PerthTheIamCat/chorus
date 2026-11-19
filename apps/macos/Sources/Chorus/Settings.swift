@@ -1,242 +1,6 @@
 import AppKit
 import SwiftUI
 
-/// Settings, laid out like System Settings: 13 categories in 4 groups on the
-/// left, the category on the right. Each row is a short label, its control,
-/// and an (i) for anything longer than one line.
-struct SettingsSheet: View {
-    @EnvironmentObject var engine: Engine
-    @Environment(\.dismiss) private var dismiss
-    let workspace: String
-    @State var section: Section = .accounts
-    @AppStorage("chorus.autoCatalogUpdates") private var autoCatalogUpdates = true
-
-    enum Section: String, CaseIterable, Identifiable {
-        case general, display, accounts, routing, orchestration, asking
-        case agents, safety, integrations, skills
-        case review, cost, storage, languages, learn
-        case companion, about, changelog
-        var id: String { rawValue }
-
-        var title: String {
-            switch self {
-            case .general: "ทั่วไป"
-            case .display: "การแสดงผล"
-            case .accounts: "บัญชี"
-            case .routing: "การส่งงาน"
-            case .orchestration: "Orchestra"
-            case .asking: "การถามและอัตโนมัติ"
-            case .agents: "โมเดล"
-            case .safety: "สิทธิ์และความปลอดภัย"
-            case .integrations: "เครื่องมือเสริม (MCP)"
-            case .skills: "Skills"
-            case .review: "Review และ checkpoint"
-            case .cost: "การใช้งานและค่าใช้จ่าย"
-            case .storage: "พื้นที่และประสิทธิภาพ"
-            case .languages: "ภาษา (Syntax)"
-            case .learn: "เรียนรู้"
-            case .companion: "Mobile Companion"
-            case .about: "เกี่ยวกับ"
-            case .changelog: "มีอะไรใหม่"
-            }
-        }
-
-        var subtitle: String {
-            switch self {
-            case .general: "การพิมพ์และหน้าต่าง"
-            case .display: "รายละเอียดของเทิร์น ตัวชี้วัด สกุลเงิน ธีม และสีเน้น"
-            case .accounts: "บัญชีของแต่ละเจ้าและโควตาที่เหลือ"
-            case .routing: "เทิร์นของคุณถูกส่งไปที่ไหน"
-            case .orchestration: "โมเดลหลักที่วางแผนและแจกงาน"
-            case .asking: "agent ถามคุณบ่อยแค่ไหน"
-            case .agents: "agent ที่ติดตั้งและโมเดลที่มันมี"
-            case .safety: "agent ทำอะไรได้บ้าง"
-            case .integrations: "MCP server ที่ทุก agent ใช้ร่วมกัน"
-            case .skills: "skill ที่ agent ในโฟลเดอร์นี้มองเห็น"
-            case .review: "การตรวจสิ่งที่ agent แก้"
-            case .cost: "token โควตา และเงิน"
-            case .storage: "โมเดลในเครื่อง หน่วยความจำ และข้อมูล"
-            case .languages: "สีตามไวยากรณ์ของแต่ละภาษาในตัวดูโค้ด"
-            case .learn: "สิ่งที่ Chorus เรียนรู้จากงานที่ผ่านมา"
-            case .companion: "สั่งงานจาก iPhone"
-            case .about: "เวอร์ชันและสัญญาอนุญาต"
-            case .changelog: "สิ่งที่เปลี่ยนในแต่ละเวอร์ชัน"
-            }
-        }
-
-        var icon: String {
-            switch self {
-            case .general: "gearshape"
-            case .display: "paintpalette"
-            case .accounts: "person.2"
-            case .routing: "arrow.triangle.branch"
-            case .orchestration: "point.3.connected.trianglepath.dotted"
-            case .asking: "bubble.left.and.exclamationmark.bubble.right"
-            case .agents: "cpu"
-            case .safety: "lock.shield"
-            case .integrations: "puzzlepiece.extension"
-            case .skills: "sparkles"
-            case .review: "plusminus"
-            case .cost: "bahtsign.circle"
-            case .storage: "internaldrive"
-            case .languages: "chevron.left.forwardslash.chevron.right"
-            case .learn: "graduationcap"
-            case .companion: "iphone"
-            case .about: "info.circle"
-            case .changelog: "clock.arrow.circlepath"
-            }
-        }
-
-        var tint: Color {
-            switch self {
-            case .general, .about, .changelog: .gray
-            case .display: .pink
-            case .accounts: .teal
-            case .routing: .blue
-            case .orchestration: .purple
-            case .asking: .orange
-            case .agents: .indigo
-            case .safety: .red
-            case .integrations: .orange
-            case .skills: .yellow
-            case .review: .green
-            case .cost: .mint
-            case .storage: .brown
-            case .languages: .purple
-            case .learn: .green
-            case .companion: .cyan
-            }
-        }
-
-        static let groups: [(title: String, items: [Section])] = [
-            ("ทั่วไป", [.general, .display, .languages]),
-            ("เอเจนต์", [.accounts, .agents, .routing, .orchestration, .asking]),
-            ("ความจำและเครื่องมือ", [.learn, .skills, .integrations]),
-            ("ความปลอดภัย", [.safety, .review]),
-            ("ระบบ", [.cost, .storage, .companion, .about, .changelog]),
-        ]
-    }
-
-    init(workspace: String, section: Section = .accounts) {
-        self.workspace = workspace
-        _section = State(initialValue: section)
-    }
-
-    var body: some View {
-        HStack(spacing: 0) {
-            sidebar
-            Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(section.title).font(.title3.bold())
-                        Text(section.subtitle).font(.callout).foregroundStyle(.secondary)
-                    }
-                    .accessibilityElement(children: .combine)
-                    .accessibilityAddTraits(.isHeader)
-                    pane
-                }
-                .padding(.horizontal, 22).padding(.vertical, 18)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .chorusScrollIndicators()
-        }
-        .frame(width: 820, height: 620)
-        .onAppear {
-            engine.loadAgents()
-            engine.loadUsage()
-            engine.loadSkills(cwd: workspace)
-            engine.loadCatalog(project: workspace, automaticUpdates: autoCatalogUpdates)
-        }
-    }
-
-    private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            ForEach(Section.groups, id: \.title) { group in
-                Text(group.title)
-                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    .padding(.horizontal, 8).padding(.top, 10).padding(.bottom, 2)
-                    .accessibilityAddTraits(.isHeader)
-                ForEach(group.items) { s in
-                    Button { section = s } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: s.icon)
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .frame(width: 20, height: 20)
-                                .background(s.tint.gradient, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
-                            Text(s.title).lineLimit(1)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(InteractiveStyle(cornerRadius: 6, selected: section == s,
-                                                  padding: .init(top: 3, leading: 6, bottom: 3, trailing: 6)))
-                    .accessibilityAddTraits(section == s ? .isSelected : [])
-                }
-            }
-            Spacer()
-            Button("เสร็จ") { dismiss() }
-                .keyboardShortcut(.defaultAction)
-                .padding(.horizontal, 8)
-        }
-        .padding(.horizontal, 8).padding(.vertical, 12)
-        .frame(width: 220)
-        .background(Color.primary.opacity(0.03))
-    }
-
-    @ViewBuilder private var pane: some View {
-        switch section {
-        case .general: GeneralSettings()
-        case .display: DisplaySettingsView()
-        case .accounts: AccountsSettings()
-        case .routing: RoutingSettings(workspace: workspace)
-        case .orchestration: OrchestrationSettings(workspace: workspace)
-        case .asking: AskingSettings(workspace: workspace)
-        case .agents: AgentsSettings()
-        case .safety: SafetySettings(workspace: workspace)
-        case .integrations: integrations
-        case .skills: SkillsSettings(workspace: workspace)
-        case .review: ReviewSettings()
-        case .cost: CostSettings()
-        case .storage: StorageSettings()
-        case .languages: LanguagesSettings()
-        case .learn: LearnSettings(workspace: workspace)
-        case .companion: RemotePairingView()
-        case .about: AboutSettings(showChangelog: { section = .changelog })
-        case .changelog: ChangelogSettings()
-        }
-    }
-
-    @ViewBuilder private var integrations: some View {
-        CatalogView(projectName: workspace.isEmpty ? "" : URL(fileURLWithPath: workspace).lastPathComponent,
-                    entries: engine.catalog,
-                    automaticUpdates: autoCatalogUpdates,
-                    backgroundStatus: engine.catalogBackgroundStatus,
-                    actionResult: engine.catalogActionResult,
-                    progress: engine.catalogProgress,
-                    requestedInstall: engine.requestedInstall,
-                    onRequestHandled: { engine.requestedInstall = nil },
-                    onLoadPlan: { id, action, done in
-                        engine.loadCatalogPlan(project: workspace, id: id, action: action, completion: done)
-                    },
-                    onAutomaticUpdatesChanged: { value in
-                        autoCatalogUpdates = value
-                        if value { engine.loadCatalog(project: workspace, automaticUpdates: true) }
-                    },
-                    onInstall: { engine.catalogAction(project: workspace, id: $0,
-                                                      action: workspace.isEmpty ? "install" : "install_enable") },
-                    onUpdate: { engine.catalogAction(project: workspace, id: $0, action: "update") },
-                    onRemove: { engine.catalogAction(project: workspace, id: $0, action: "remove") },
-                    onProjectEnableChanged: { id, enabled in
-                        engine.catalogAction(project: workspace, id: id,
-                                             action: enabled ? "enable" : "disable")
-                    })
-        if let error = engine.catalogActionError ?? engine.catalogError {
-            Text(error).font(.caption).foregroundStyle(.red)
-        }
-    }
-}
-
 /// Every key Settings owns, with the default decided for it. Several back
 /// features that have not shipped yet (orchestra caps, route preset, trusted
 /// projects, THB rate): they are stored now so those features can read them.
@@ -263,30 +27,25 @@ enum SettingsKey {
 
 // MARK: shared bits
 
+/// A group of rows: a `Section` of the page's grouped `Form`.
 struct SettingsGroup<Content: View>: View {
     let title: String
     var footer: String?
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
-                .padding(.leading, 4)
-                .accessibilityAddTraits(.isHeader)
-            VStack(alignment: .leading, spacing: 0) { content() }
-                .padding(.vertical, 2)
-                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            if let footer {
-                Text(footer).font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.leading, 4)
-            }
+        Section {
+            content()
+        } header: {
+            Text(title)
+        } footer: {
+            if let footer { Text(footer) }
         }
     }
 }
 
-/// One row: a short label, an optional (i) with the long explanation, an
-/// optional one-line status under the label, and the control on the right.
+/// One row: a label, an optional one-line status under it, the control on the
+/// right, and the long explanation as the hover help.
 struct SettingsRow<Trailing: View>: View {
     let title: String
     var detail: String?
@@ -294,64 +53,23 @@ struct SettingsRow<Trailing: View>: View {
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
+        LabeledContent {
+            trailing()
+        } label: {
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(title)
-                    if let info { InfoTip(text: info) }
-                }
+                Text(title)
                 if let detail {
                     Text(detail).font(.caption).foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            Spacer(minLength: 8)
-            trailing()
         }
-        .padding(.horizontal, 12).padding(.vertical, 7)
-        .frame(minHeight: 38)
+        .help(info ?? "")
     }
 }
 
-/// The (i): the native tooltip on hover, a popover on keyboard focus or click,
-/// and the full text for VoiceOver.
-struct InfoTip: View {
-    let text: String
-    @State private var shown = false
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        Image(systemName: "info.circle")
-            .font(.system(size: 12))
-            .foregroundStyle(focused || shown ? Color.accentColor : .secondary)
-            .contentShape(Circle())
-            .help(text)
-            .focusable()
-            .focused($focused)
-            // Open on focus but never close on blur: a popover that takes key
-            // would blur the icon and snap itself shut.
-            .onChange(of: focused) { _, f in if f { shown = true } }
-            .onTapGesture { shown.toggle() }
-            .onKeyPress(.space) { shown.toggle(); return .handled }
-            .onKeyPress(.escape) { shown = false; return .handled }
-            .popover(isPresented: $shown, arrowEdge: .trailing) {
-                Text(text)
-                    .font(.callout)
-                    .frame(width: 260, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(12)
-            }
-            .accessibilityElement()
-            .accessibilityLabel("ข้อมูลเพิ่มเติม")
-            .accessibilityValue(text)
-            .accessibilityAddTraits(.isButton)
-            .accessibilityAction { shown.toggle() }
-    }
-}
-
+/// Rows in a grouped `Form` are already separated.
 struct RowDivider: View {
-    var body: some View { Divider().padding(.leading, 12) }
+    var body: some View { EmptyView() }
 }
 
 /// A usage bar: green → orange → red as it fills.
@@ -385,72 +103,13 @@ func resetText(_ unix: Int64?) -> String {
 // MARK: ทั่วไป
 
 struct GeneralSettings: View {
-    @AppStorage("chorus.enterSends") private var enterSends = true
     @AppStorage("chorus.thinkingOpen") private var thinkingOpen = false
-    @AppStorage("chorus.suggestNext") private var suggestNext = true
-    @AppStorage("chorus.dismissedSetupCards") private var dismissedSetupCards = ""
-    @AppStorage("chorus.scrollbarStyle") private var scrollbarStyle = "hidden"
-    @AppStorage("chorus.inspectorPosition") private var inspectorPosition = "trailing"
-    @AppStorage("chorus.explorerPosition") private var explorerPosition = "leading"
-    @AppStorage("chorus.sidebarWidth") private var sidebarWidth: Double = 260
-    @AppStorage("chorus.explorerWidth") private var explorerWidth: Double = 260
-    @AppStorage("chorus.inspectorWidth") private var inspectorWidth: Double = 330
-    @AppStorage("chorus.codeViewerShare") private var codeViewerShare: Double = WorkbenchLayout.defaultViewerShare
 
     var body: some View {
-        SettingsGroup(title: "การพิมพ์") {
-            SettingsRow(title: "Enter เพื่อส่ง",
-                        info: enterSends ? "Shift+Enter ขึ้นบรรทัดใหม่" : "⌘Enter ส่ง · Enter ขึ้นบรรทัดใหม่") {
-                Toggle("Enter เพื่อส่ง", isOn: $enterSends).labelsHidden().toggleStyle(.switch)
-            }
-            RowDivider()
+        SettingsGroup(title: "แชท") {
             SettingsRow(title: "เปิดกล่องความคิดไว้",
                         info: "แสดงสิ่งที่ agent คิดระหว่างทำงาน ปิดไว้ก็กดเปิดดูทีหลังได้") {
-                Toggle("เปิดกล่องความคิดไว้", isOn: $thinkingOpen).labelsHidden().toggleStyle(.switch)
-            }
-            RowDivider()
-            SettingsRow(title: "เดาข้อความถัดไป (Tab)",
-                        info: "หลัง agent ตอบเสร็จ ช่องพิมพ์ขึ้นข้อความที่น่าจะพิมพ์ต่อแบบจาง ๆ กด Tab เพื่อใส่ลงช่อง (ยังไม่ส่ง) · ใช้โมเดลในเครื่องตัวเดียวกับ router ไม่เสียโทเคนของ provider · ไม่มีโมเดลในเครื่อง = ไม่ขึ้น") {
-                Toggle("เดาข้อความถัดไป", isOn: $suggestNext).labelsHidden().toggleStyle(.switch)
-            }
-        }
-        SettingsGroup(title: "หน้าต่าง") {
-            SettingsRow(title: "แถบเลื่อน", info: ScrollbarStyle(rawValue: scrollbarStyle)?.hint) {
-                Picker("แถบเลื่อน", selection: $scrollbarStyle) {
-                    ForEach(ScrollbarStyle.allCases) { Text($0.label).tag($0.rawValue) }
-                }
-                .labelsHidden().fixedSize()
-            }
-            RowDivider()
-            SettingsRow(title: "แผงบริบท", info: "แผงบริบท สิ่งที่แก้ และความจำ") {
-                Picker("แผงบริบท", selection: $inspectorPosition) {
-                    Text("ขวา").tag("trailing")
-                    Text("ซ้าย").tag("leading")
-                }
-                .pickerStyle(.segmented).labelsHidden().frame(width: 120)
-            }
-            RowDivider()
-            SettingsRow(title: "แผงไฟล์", info: "โครงสร้างไฟล์และ Git worktree") {
-                Picker("แผงไฟล์", selection: $explorerPosition) {
-                    Text("ซ้าย").tag("leading")
-                    Text("ขวา").tag("trailing")
-                }
-                .pickerStyle(.segmented).labelsHidden().frame(width: 120)
-            }
-            RowDivider()
-            SettingsRow(title: "ขนาดแผง", info: "ลากเส้นแบ่งเพื่อปรับความกว้างของแต่ละแผง ปุ่มนี้คืนค่าเดิมทั้งหมด") {
-                Button("คืนค่าเริ่มต้น") {
-                    sidebarWidth = 260
-                    explorerWidth = 260
-                    inspectorWidth = 330
-                    codeViewerShare = WorkbenchLayout.defaultViewerShare
-                }
-            }
-        }
-        SettingsGroup(title: "คำแนะนำ") {
-            SettingsRow(title: "การ์ดแนะนำที่ปิดไว้", info: "การ์ดตั้งค่า agent, Auto route และเครื่องมือเสริม") {
-                Button("แสดงอีกครั้ง") { dismissedSetupCards = "" }
-                    .disabled(dismissedSetupCards.isEmpty)
+                Toggle("เปิดกล่องความคิดไว้", isOn: $thinkingOpen).labelsHidden()
             }
         }
     }
@@ -669,7 +328,7 @@ struct ComputerUseSettings: View {
                     }
                     .controlSize(.small)
                     Button { perms = engine.computerPermissions() } label: { Image(systemName: "arrow.clockwise") }
-                        .buttonStyle(.chorusPlain)
+                        .buttonStyle(.borderless)
                         .help("ตรวจอีกครั้ง")
                 }
             }
@@ -985,7 +644,7 @@ struct AccountsSettings: View {
                     Label("เพิ่มบัญชี \(agent.label)", systemImage: "plus.circle")
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .buttonStyle(InteractiveStyle(cornerRadius: 8, padding: .init(top: 8, leading: 12, bottom: 8, trailing: 12)))
+                .buttonStyle(.bordered)
             }
         }
         HStack {
@@ -1053,12 +712,12 @@ struct AccountRow: View {
                         .buttonStyle(.link).font(.caption)
                 }
                 Button(action: onEdit) { Image(systemName: "pencil") }
-                    .buttonStyle(InteractiveStyle(cornerRadius: 6, padding: .init(top: 3, leading: 6, bottom: 3, trailing: 6)))
+                    .buttonStyle(.bordered)
                     .help("เปลี่ยนชื่อและไอคอน")
                     .accessibilityLabel("แก้ไขบัญชี \(account.title)")
                 if !account.account.isEmpty {
                     Button(role: .destructive, action: onRemove) { Image(systemName: "trash") }
-                        .buttonStyle(InteractiveStyle(cornerRadius: 6, padding: .init(top: 3, leading: 6, bottom: 3, trailing: 6)))
+                        .buttonStyle(.bordered)
                         .help("ลบบัญชีนี้")
                 }
             }
@@ -1216,7 +875,7 @@ struct SkillsSettings: View {
                             Button { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: sk.path)]) } label: {
                                 Image(systemName: "arrow.up.forward.square")
                             }
-                            .buttonStyle(InteractiveStyle(cornerRadius: 6, padding: .init(top: 3, leading: 6, bottom: 3, trailing: 6)))
+                            .buttonStyle(.bordered)
                             .help(sk.path)
                         }
                     }
@@ -1287,8 +946,7 @@ struct OrchestrationSettings: View {
         }
         SettingsGroup(title: "คลังบทบาท (Role Library)", footer: "บทบาท agent ที่กำหนดเองจะถูกบันทึกใน .chorus/agents/*.md") {
             if !workspace.isEmpty {
-                OrchestratorView(engine: engine, workspace: workspace)
-                    .padding(.vertical, 4)
+                RoleLibrary(workspace: workspace)
             } else {
                 Text("เลือก workspace เพื่อจัดการบทบาท").font(.caption).foregroundStyle(.secondary)
             }
@@ -1407,7 +1065,7 @@ struct LearnedRoutesSheet: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                        .buttonStyle(.chorusPlain)
+                        .buttonStyle(.borderless)
                     }
                 }
                 .padding(.horizontal, 10)
@@ -1641,7 +1299,7 @@ struct LearnedRouteCard: View {
                         .font(.caption)
                         .foregroundStyle(isCopied ? .green : .secondary)
                 }
-                .buttonStyle(.chorusPlain)
+                .buttonStyle(.borderless)
                 .help("คัดลอกข้อความ")
             }
 
