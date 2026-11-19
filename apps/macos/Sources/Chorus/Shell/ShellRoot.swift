@@ -12,6 +12,7 @@ struct ShellRoot: View {
     @EnvironmentObject private var shell: ShellModel
     @State private var columns: NavigationSplitViewVisibility = .all
     @State private var tool: ShellTool?
+    @Environment(\.openSettings) private var openSettingsEnv
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columns) {
@@ -29,6 +30,9 @@ struct ShellRoot: View {
         .toolbar { toolbar }
         .frame(minWidth: 820, minHeight: 560)
         .onAppear {
+            // SwiftUI's own opener: the AppKit selector never reached the
+            // Settings scene from a button in the shell (gear did nothing).
+            ShellRoot.openSettingsAction = { openSettingsEnv() }
             shell.start()
             syncCommands()
             NSApp.setActivationPolicy(.regular)
@@ -75,8 +79,12 @@ struct ShellRoot: View {
         }
     }
 
+    static var openSettingsAction: (() -> Void)?
+
     static func openSettings() {
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        NSApp.activate(ignoringOtherApps: true)
+        if let open = openSettingsAction { open(); return }
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: NSApp, from: nil)
     }
 
     // MARK: title and toolbar
@@ -96,16 +104,16 @@ struct ShellRoot: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
-            Button { shell.newSession() } label: { Label("session ใหม่", systemImage: "square.and.pencil") }
-                .help("session ใหม่ (⌘N)")
-                .disabled(engine.busy)
+            Button { tool = .search } label: { Label("ค้นหา", systemImage: "magnifyingglass") }
+                .help("ค้นแชท (⌘F)")
+                .disabled(shell.workspace.isEmpty)
         }
         ToolbarItem(placement: .primaryAction) {
             Menu {
-                ForEach([ShellTool.files, .terminal, .preview, .ship, .checkpoints, .search, .orchestra, .monitor]) { t in
+                ForEach([ShellTool.files, .terminal, .preview, .ship, .checkpoints, .orchestra, .monitor]) { t in
                     Button { tool = t } label: { Label(t.title, systemImage: t.symbol) }
                 }
-            } label: { Label("เครื่องมือ", systemImage: "wrench.and.screwdriver") }
+            } label: { Label("เพิ่มเติม", systemImage: "ellipsis") }
             .disabled(shell.workspace.isEmpty)
             .help("ไฟล์ เทอร์มินัล commit/PR checkpoint ค้นแชท Orchestra")
         }

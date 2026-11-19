@@ -86,8 +86,16 @@ struct SettingsRoot: View {
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)
         } detail: {
-            Form { pane(section ?? .accounts) }
-                .formStyle(.grouped)
+            // Not a grouped `Form`: its NestedSections section indexer traps
+            // (IndexPath out of range, EXC_BREAKPOINT) on these panes, which
+            // build their sections from ForEach/conditionals. Plain scroll +
+            // `SettingsGroup` cards have no such indexer.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) { pane(section ?? .accounts) }
+                    .frame(maxWidth: 720, alignment: .leading)
+                    .padding(20)
+                    .frame(maxWidth: .infinity)
+            }
                 .navigationTitle((section ?? .accounts).title)
         }
         .frame(minWidth: 760, minHeight: 520)

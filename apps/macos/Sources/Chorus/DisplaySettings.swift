@@ -106,6 +106,14 @@ struct AccentPreset: Identifiable {
     var id: String { hex }
 }
 
+enum ChorusPalette {
+    static let accent = Color(nsColor: NSColor(name: nil) { a in
+        a.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 0.42, green: 0.49, blue: 0.94, alpha: 1)
+            : NSColor(srgbRed: 0.20, green: 0.27, blue: 0.78, alpha: 1)
+    })
+}
+
 enum AccentHex {
     static let presets: [AccentPreset] = [
         AccentPreset(name: "น้ำเงิน", hex: "#0A84FF"), AccentPreset(name: "ม่วง", hex: "#BF5AF2"),
@@ -140,11 +148,9 @@ struct AppearanceModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         let scheme = AppTheme(rawValue: theme)?.scheme
-        if let color = AccentHex.color(from: accent) {
-            content.preferredColorScheme(scheme).tint(color)
-        } else {
-            content.preferredColorScheme(scheme)
-        }
+        // Board 13: one accent, #3346C8 (lifted in dark so it still reads).
+        let color = AccentHex.color(from: accent) ?? ChorusPalette.accent
+        content.preferredColorScheme(scheme).tint(color)
     }
 }
 
