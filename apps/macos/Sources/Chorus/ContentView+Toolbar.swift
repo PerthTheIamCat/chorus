@@ -23,12 +23,6 @@ extension ContentView {
             .help("เปิด/ปิดแถบโปรเจกต์ (⌃⌘S)")
         }
         ToolbarItem(placement: .navigation) {
-            Button { showExplorer.toggle() } label: {
-                Label("ไฟล์", systemImage: "folder")
-            }
-            .help("เปิด/ปิดแถบไฟล์ (⌘B)")
-        }
-        ToolbarItem(placement: .navigation) {
             HStack(spacing: 8) {
                 let title = engine.sessionID < 0 ? (engine.draft != nil ? "session ใหม่" : "ยังไม่ได้เปิด session")
                      : (engine.sessionsByDB[dbPath]?.first { $0.id == engine.sessionID }).map(displayTitle)
@@ -70,14 +64,15 @@ extension ContentView {
         }
     }
 
+    /// Four things at the trailing edge, nothing else: hand over, search,
+    /// "more" (everything occasional) and the side panel. Files, terminal,
+    /// preview, focus mode and Orchestra used to be one button each.
     @ToolbarContentBuilder
     var actionToolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
             // Handing over is one click per agent. Everything the next
             // agent needs is already in the ledger, so asking the user to
             // fill in a form would be asking them to retype what we know.
-            // One menu, not a button per agent: with three agents ready the
-            // row of "ส่งต่อ X" labels crowded the toolbar and read as text.
             let targets = engine.agents.filter { $0.ready && $0.id != currentAgentID }
             if engine.sessionID >= 0 && !targets.isEmpty {
                 Menu {
@@ -102,69 +97,59 @@ extension ContentView {
             .help("ค้นหาบทสนทนาข้าม session (⇧⌘F)")
         }
         ToolbarItem(placement: .primaryAction) {
-            Button {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
-                    maximizedPanel = (maximizedPanel == .thread) ? .none : .thread
+            Menu {
+                Button {
+                    showExplorer.toggle()
+                } label: {
+                    Label(showExplorer ? "ซ่อนไฟล์" : "แสดงไฟล์", systemImage: "folder")
+                }
+                Button {
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) { showTerminalDrawer.toggle() }
+                } label: {
+                    Label(showTerminalDrawer ? "ปิดเทอร์มินัล" : "เทอร์มินัล", systemImage: "terminal")
+                }
+                Button {
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                        centerStageMode = (centerStageMode == .livePreview) ? .thread : .livePreview
+                    }
+                } label: {
+                    Label(centerStageMode == .livePreview ? "กลับสู่บทสนทนา" : "พรีวิวเว็บ", systemImage: "globe")
+                }
+                Divider()
+                Button {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                        maximizedPanel = (maximizedPanel == .thread) ? .none : .thread
+                    }
+                } label: {
+                    Label(maximizedPanel == .thread ? "ออกจากโหมดโฟกัส" : "โหมดโฟกัส",
+                          systemImage: "viewfinder")
+                }
+                Button {
+                    settingsSection = .orchestration
+                    showSettings = true
+                } label: {
+                    Label("Orchestra และบทบาท", systemImage: "point.3.connected.trianglepath.dotted")
+                }
+                if powerManager.shouldThrottleConcurrency {
+                    Divider()
+                    Text("เครื่องร้อน (\(powerManager.thermalStateName)) — ระบบลดงานขนานให้อัตโนมัติ")
                 }
             } label: {
-                Label(maximizedPanel == .thread ? "ออกจากโหมดโฟกัส" : "โหมดโฟกัส",
-                      systemImage: maximizedPanel == .thread ? "arrow.down.right.and.arrow.up.left" : "viewfinder")
+                Label("เพิ่มเติม", systemImage: "ellipsis.circle")
             }
-            .help(maximizedPanel == .thread ? "ออกจากโหมดโฟกัส (⇧⌘M)" : "ขยายบทสนทนาเต็มจอ / โหมดโฟกัส (⇧⌘M)")
-        }
-        ToolbarItem(placement: .primaryAction) {
-            if powerManager.shouldThrottleConcurrency {
-                HStack(spacing: 4) {
-                    Image(systemName: "flame.fill")
-                        .font(.system(size: 11))
-                        .foregroundColor(.orange)
-                    Text(powerManager.thermalStateName)
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.secondary)
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(Color.orange.opacity(0.12), in: Capsule())
-                .help("Apple Silicon Thermal Governor: ระบบควบคุมความร้อนกำลังปรับการทำงานให้เหมาะสม")
-            }
-        }
-        ToolbarItem(placement: .primaryAction) {
-            Button {
-                settingsSection = .orchestration
-                showSettings = true
-            } label: {
-                Label("Orchestra & Roles", systemImage: "point.3.connected.trianglepath.dotted")
-            }
-            .help("เปิดการตั้งค่า Orchestra และ Role Library (⌘⌥O)")
-        }
-        ToolbarItem(placement: .primaryAction) {
-            Button {
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
-                    centerStageMode = (centerStageMode == .livePreview) ? .thread : .livePreview
-                }
-            } label: {
-                Label(centerStageMode == .livePreview ? "กลับสู่บทสนทนา" : "Live Preview",
-                      systemImage: centerStageMode == .livePreview ? "globe.badge.chevron.backward" : "globe")
-                    .foregroundStyle(centerStageMode == .livePreview ? Color.accentColor : Color.primary)
-            }
-            .help(centerStageMode == .livePreview ? "กลับสู่บทสนทนา (⌘⌥P)" : "เปิด Web Live Preview (⌘⌥P)")
-        }
-        ToolbarItem(placement: .primaryAction) {
-            Button {
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
-                    showTerminalDrawer.toggle()
-                }
-            } label: {
-                Label(showTerminalDrawer ? "ปิดเทอร์มินัล" : "เทอร์มินัล",
-                      systemImage: showTerminalDrawer ? "terminal.fill" : "terminal")
-                    .foregroundStyle(showTerminalDrawer ? Color.accentColor : Color.primary)
-            }
-            .help("เปิด/ปิดเทอร์มินัลในตัว (⌃`)")
+            .menuIndicator(.hidden)
+            .help("ไฟล์ เทอร์มินัล พรีวิว โหมดโฟกัส Orchestra")
         }
         // Declared last so it sits at the far right, over the panel it opens.
+        // A dot says something is waiting inside (changed files, proposals).
         ToolbarItem(placement: .primaryAction) {
             Button { showInspector.toggle() } label: {
                 Label("แผงข้อมูล", systemImage: "sidebar.right")
+                    .overlay(alignment: .topTrailing) {
+                        if !showInspector && (engine.diffFiles.count + engine.pending.count) > 0 {
+                            Circle().fill(Color.accentColor).frame(width: 7, height: 7).offset(x: 3, y: -2)
+                        }
+                    }
             }
             .help("เปิด/ปิดแผงคอนเท็กซ์ ที่แก้ไป ความจำ (⌘⌥I)")
         }

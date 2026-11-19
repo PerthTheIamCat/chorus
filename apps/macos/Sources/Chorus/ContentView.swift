@@ -138,12 +138,14 @@ struct ContentView: View {
 
     @State var rightTab = RightTab.context
     @State var showPalette = false
-    @State var showInspector = true
+    @State var showInspector = false
     @AppStorage("chorus.failoverAccounts") var failoverAccounts = true
     @AppStorage("chorus.failoverProviders") var failoverProviders = true
 
     @AppStorage("chorus.showSidebar") var showSidebar = true
-    @AppStorage("chorus.showExplorer") var showExplorer = true
+    // v2 key: the file tree starts hidden (open it from the ⋯ menu or ⌘B).
+    @AppStorage("chorus.showExplorer.v2") var showExplorer = false
+    @AppStorage("chorus.showToolsSection") var showToolsSection = false
     @State var selectedFile: String? = nil
     @State var diffReviewMode = true
     @State var showSearchSheet = false

@@ -145,21 +145,10 @@ extension ContentView {
                 } else {
                     ModelPicker(model: $model, onNeedsLogin: { settingsSection = .agents; showSettings = true })
                 }
-                if engine.agents.filter(\.ready).count > 1 {
-                    Button { runCompare() } label: {
-                        CompactLabel(text: comparing ? "กำลังเทียบ…" : "เทียบ agent", spacing: 3) {
-                            if comparing { ProgressView().controlSize(.mini) } else { Image(systemName: "square.split.2x1") }
-                        }
-                        .font(.caption.weight(.medium))
-                    }
-                    .buttonStyle(InteractiveStyle(cornerRadius: 7, padding: .init(top: 4, leading: 8, bottom: 4, trailing: 8)))
-                    .disabled(!canCompare || engine.busy || comparing)
-                    .help("ถามทุก agent ที่พร้อมด้วยคำถามล่าสุด แล้วเทียบคำตอบ ไฟล์ที่แก้ เวลา และค่าใช้จ่าย (⇧⌘K)")
-                }
             }
         }
         .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 10)
-        .floatingPanel(cornerRadius: 22)
+        .floatingPanel(cornerRadius: 14)
         }
     }
 

@@ -7,7 +7,9 @@ extension View {
     /// A clean panel: crisp continuous rounded corners with subtle native border and translucent material.
     /// Completely eliminates harsh drop-shadow artifacts and corner clipping anomalies.
     @ViewBuilder
-    func floatingPanel(cornerRadius: CGFloat, tint: Color? = nil) -> some View {
+    func floatingPanel(cornerRadius requested: CGFloat, tint: Color? = nil) -> some View {
+        // One quiet radius for every panel, whatever the call site asks for.
+        let cornerRadius = min(requested, 14)
         self
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .background(
@@ -24,21 +26,17 @@ extension View {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                    .stroke(Color.primary.opacity(0.06), lineWidth: 0.5)
             )
     }
 }
 
 
-/// What the glass panels float over: the window colour with a faint wash of
-/// the accent, so the panels read as separate layers.
+/// What the panels sit on: the plain window colour. (It used to carry an
+/// accent-to-purple wash; a flat ground is calmer and keeps text contrast.)
 struct Backdrop: View {
     var body: some View {
-        ZStack {
-            Color(nsColor: .windowBackgroundColor)
-            LinearGradient(colors: [Color.accentColor.opacity(0.10), .clear, Color.purple.opacity(0.06)],
-                           startPoint: .topLeading, endPoint: .bottomTrailing)
-        }
+        Color(nsColor: .windowBackgroundColor)
         .ignoresSafeArea()
     }
 }

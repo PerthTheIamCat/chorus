@@ -140,28 +140,38 @@ extension ContentView {
     /// is one click away while working.
     var toolsSection: some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text("เครื่องมือ")
-                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                .padding(.horizontal, 10).padding(.top, 14).padding(.bottom, 4)
-            ForEach(engine.catalog.filter(\.isInstalled)) { tool in
-                Button { toolPage = tool.id } label: {
-                    HStack(spacing: 9) {
-                        IntegrationIcon(id: tool.id, size: 22)
-                        Text(tool.title)
-                        Spacer(minLength: 4)
-                        if tool.isWorking { ProgressView().controlSize(.mini) }
-                        else if tool.isHealthy == false { Circle().fill(.orange).frame(width: 6, height: 6) }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            Button { withAnimation(.easeOut(duration: 0.15)) { showToolsSection.toggle() } } label: {
+                HStack(spacing: 4) {
+                    Text("เครื่องมือ").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Image(systemName: showToolsSection ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8, weight: .bold)).foregroundStyle(.tertiary)
+                    Spacer()
                 }
-                .buttonStyle(InteractiveStyle(selected: toolPage == tool.id))
+                .contentShape(Rectangle())
             }
-            Button { settingsSection = .integrations; showSettings = true } label: {
-                Label("เพิ่มเครื่องมือ", systemImage: "plus.circle")
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            .buttonStyle(.chorusPlain)
+            .padding(.horizontal, 10).padding(.top, 14).padding(.bottom, 4)
+            if showToolsSection {
+                ForEach(engine.catalog.filter(\.isInstalled)) { tool in
+                    Button { toolPage = tool.id } label: {
+                        HStack(spacing: 9) {
+                            IntegrationIcon(id: tool.id, size: 22)
+                            Text(tool.title)
+                            Spacer(minLength: 4)
+                            if tool.isWorking { ProgressView().controlSize(.mini) }
+                            else if tool.isHealthy == false { Circle().fill(.orange).frame(width: 6, height: 6) }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(InteractiveStyle(selected: toolPage == tool.id))
+                }
+                Button { settingsSection = .integrations; showSettings = true } label: {
+                    Label("เพิ่มเครื่องมือ", systemImage: "plus.circle")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(InteractiveStyle())
+                .foregroundStyle(.secondary)
             }
-            .buttonStyle(InteractiveStyle())
-            .foregroundStyle(.secondary)
         }
         .chorusScrollIndicators()
     }
