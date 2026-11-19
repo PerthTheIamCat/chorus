@@ -20,6 +20,10 @@ struct ShellComposer: View {
             PromptStack()
             if !shell.queued.isEmpty { queue }
             HandoffStrip()
+            if let status = shell.routeStatus {
+                RouteStatusCard(status: status) { shell.routeStatus = nil }
+            }
+            completions
             field
             metrics
         }
@@ -63,11 +67,16 @@ struct ShellComposer: View {
                     }
                 }
             }
-            TextField("ขอให้ทำอะไร…", text: $shell.text, axis: .vertical)
+            TextField(engine.nextHint ?? "ขอให้ทำอะไร…  (@ เลือก agent หรือไฟล์ · / คำสั่ง)", text: $shell.text, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...10)
                 .focused($focused)
                 .onSubmit { shell.send() }
+                .onKeyPress(.tab) {
+                    if let first = suggestions.first { pick(first); return .handled }
+                    if shell.text.isEmpty, let hint = engine.nextHint { shell.text = hint; engine.nextHint = nil; return .handled }
+                    return .ignored
+                }
                 .onPasteCommand(of: [.image]) { providers in
                     for p in providers {
                         _ = p.loadDataRepresentation(for: .image) { data, _ in
@@ -81,7 +90,12 @@ struct ShellComposer: View {
                     .buttonStyle(.borderless)
                     .help("แนบไฟล์หรือรูป")
                 ModeMenu()
+                RouteMenu()
                 ModelMenu()
+                Button { shell.runCompare() } label: { Image(systemName: "square.split.2x1") }
+                    .buttonStyle(.borderless)
+                    .disabled(engine.agents.filter(\.ready).count < 2 || !shell.canCompare || shell.comparing)
+                    .help("เทียบ agent: ถามทุกตัวด้วยคำถามเดียวกัน (⇧⌘K)")
                 Spacer()
                 sendButton
             }
@@ -112,12 +126,60 @@ struct ShellComposer: View {
         }
     }
 
+    // MARK: `@` and `/`
+
+    private var suggestions: [Suggestion] {
+        shell.suggestions(for: ShellModel.completionToken(in: shell.text))
+    }
+
+    @ViewBuilder
+    private var completions: some View {
+        let items = suggestions
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(items) { s in
+                    Button { pick(s) } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: s.icon).frame(width: 18).foregroundStyle(.secondary)
+                            Text(s.title).font(.callout.weight(.medium))
+                            if !s.detail.isEmpty {
+                                Text(s.detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.vertical, 4)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.primary.opacity(0.1)))
+            .accessibilityLabel("ตัวเลือกที่พิมพ์ค้างอยู่ กด Tab เพื่อเลือกอันแรก")
+        }
+    }
+
+    /// Replaces the word being typed with the choice, or runs it and clears the word.
+    private func pick(_ s: Suggestion) {
+        var words = shell.text.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+        if let insert = s.insert {
+            if !words.isEmpty { words.removeLast() }
+            words.append(insert)
+            shell.text = words.joined(separator: " ")
+        } else if let action = s.action {
+            if !words.isEmpty { words.removeLast() }
+            shell.text = words.joined(separator: " ")
+            action()
+        }
+    }
+
     private var queue: some View {
         VStack(alignment: .leading, spacing: 4) {
             ForEach(Array(shell.queued.enumerated()), id: \.offset) { i, q in
                 HStack(spacing: 8) {
                     Image(systemName: "clock").foregroundStyle(.secondary)
-                    Text(q.text).lineLimit(1).font(.callout)
+                    Text(q.send.text).lineLimit(1).font(.callout)
                     Spacer()
                     Button { shell.dismissQueued(at: i) } label: { Image(systemName: "xmark.circle.fill") }
                         .buttonStyle(.borderless).foregroundStyle(.secondary)
@@ -173,6 +235,30 @@ private struct ModeMenu: View {
         .menuIndicator(.visible)
         .fixedSize()
         .help("agent ทำอะไรได้เอง แค่ไหน")
+    }
+}
+
+/// Who decides the model for a message: the router, the Orchestra lead, or the
+/// picker. Picking a model by hand switches this to "เลือกเอง".
+private struct RouteMenu: View {
+    @EnvironmentObject private var shell: ShellModel
+
+    var body: some View {
+        Menu {
+            ForEach(SessionMode.allCases) { m in
+                Button { shell.sessionMode = m } label: {
+                    if shell.sessionMode == m { Label(m.label, systemImage: "checkmark") } else { Text(m.label) }
+                }
+            }
+        } label: {
+            Label(shell.sessionMode.label, systemImage: shell.sessionMode == .orchestra
+                  ? "point.3.connected.trianglepath.dotted" : "arrow.triangle.branch").font(.callout)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .fixedSize()
+        .help("Auto route ให้ Chorus เลือกโมเดลให้ · Orchestra ให้ lead แตกงานให้ agent ย่อย · เลือกเอง ใช้โมเดลที่เลือกไว้")
     }
 }
 

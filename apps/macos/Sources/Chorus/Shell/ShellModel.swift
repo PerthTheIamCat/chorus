@@ -82,11 +82,54 @@ final class ShellModel: ObservableObject {
     @Published var hint: String?
     @Published private(set) var attachments: [DraftAttachment] = []
     @Published private(set) var importing = 0
-    struct Queued { let text: String; let attachments: [Int64] }
+    struct Queued { let send: PendingSend }
     @Published private(set) var queued: [Queued] = []
     @Published var model = ""
+    /// Auto route, Orchestra, or the model picked by hand.
+    @Published var sessionMode: SessionMode = SessionMode(
+        rawValue: UserDefaults.standard.string(forKey: SettingsKey.defaultMode) ?? "auto") ?? .autoRoute
+    @Published var routeStatus: RouteStatus?
+    @Published var pendingRoute: PendingRoute?
+    @Published var reviewModel = ""
+    @Published private(set) var routingInProgress = false
+    @Published var lastPrompt = ""
+    let fileIndex = FileIndex()
+    // Compare.
+    @Published var comparing = false
+    @Published var confirmCompare = false
+    @Published var compareJudge = false
+    @Published var compareOrchestra = false
+    @Published var compareOutput: String?
+    // ⌘K.
+    @Published var showPalette = false
+
+    struct PendingSend {
+        let model: String
+        let text: String
+        let attachments: [Int64]
+        let explicitAgent: Bool
+    }
+    struct PendingRoute: Identifiable {
+        let id = UUID()
+        let send: PendingSend
+        let reason: String
+    }
+    struct RouterEnvelope: Decodable {
+        struct Route: Decodable {
+            struct Result: Decodable {
+                let candidate_id: String?
+                let reason: String?
+                let message: String?
+            }
+            let status: String
+            let result: Result?
+        }
+        let ok: Bool
+        let route: Route?
+        let error: String?
+    }
     /// The ABI's permission numbers (`ChorusPermission` in chorus.h).
-    private enum Level { static let ask: Int32 = -1; static let allow: Int32 = 2 }
+    enum Level { static let ask: Int32 = -1; static let allow: Int32 = 2 }
     /// What "ask" or "allow" was last picked, so a plan runs with it.
     private var lastActing: ActMode = .ask
     @Published var mode: ActMode {
@@ -219,10 +262,15 @@ final class ShellModel: ObservableObject {
 
     /// A turn started or ended.
     func busyChanged(_ busy: Bool) {
+        if busy { engine.nextHint = nil }
         if !busy {
             engine.refreshMetrics(db: currentDB)
             if engine.sessionID >= 0 { engine.updateSessionCost(db: currentDB, id: engine.sessionID) }
             flushQueue()
+            verifyAfterTurn()
+            if UserDefaults.standard.object(forKey: "chorus.suggestNext") as? Bool ?? true {
+                engine.loadNextHint(model: UserDefaults.standard.string(forKey: "chorus.routerModel") ?? "")
+            }
             if engine.sessionID >= 0 && !NSApp.isActive {
                 let reply = engine.events.last(where: { $0.actor != "user" && $0.kind == "msg" })
                 let n = TurnNotice.content(lastError: engine.lastError, lastReply: reply?.body, agent: reply?.actor)
@@ -251,7 +299,7 @@ final class ShellModel: ObservableObject {
         applyModel()
     }
 
-    private func applyModel() {
+    func applyModel() {
         guard let a = agent(for: model) else { return }
         engine.setModel(agent: a.id, model: model)
     }
@@ -260,6 +308,7 @@ final class ShellModel: ObservableObject {
     /// handoff in the background (the next message carries it); the same
     /// provider's, or going back to whoever is working, cancels it.
     func choose(_ modelID: String) {
+        sessionMode = .manual
         model = modelID
         applyModel()
         guard engine.sessionID >= 0, let last = engine.lastAnsweringAgent,
@@ -269,6 +318,20 @@ final class ShellModel: ObservableObject {
 
     // MARK: sending
 
+    /// `@codex fix the test` sends that turn to Codex without touching the
+    /// picker. Returns the model to use and the text with the tag removed.
+    func route(_ text: String) -> (model: String, text: String, explicit: Bool) {
+        guard text.hasPrefix("@") else { return (model, text, false) }
+        let parts = text.dropFirst().split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+        guard let tag = parts.first?.lowercased(),
+              let a = engine.agents.first(where: {
+                  $0.ready && ($0.id.lowercased() == tag || $0.label.lowercased() == tag
+                               || ($0.id == "antigravity" && tag == "agy"))
+              })
+        else { return (model, text, false) }
+        return (a.defaultModel, parts.count > 1 ? String(parts[1]) : "", true)
+    }
+
     func send() {
         let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty || !attachments.isEmpty else { return }
@@ -277,12 +340,19 @@ final class ShellModel: ObservableObject {
             hint = "มีไฟล์ที่ agent ยังอ่านไม่ได้ ลบไฟล์นั้นก่อนส่ง"
             return
         }
-        let ids = attachments.map(\.id)
-        let prompt = raw.isEmpty ? "ช่วยดูไฟล์ที่แนบมา" : raw
         guard engine.sessionID >= 0 || engine.draft != nil else {
             hint = "เปิดโปรเจกต์ก่อนส่งข้อความ"
             return
         }
+        let routed = route(raw)
+        if routed.text.isEmpty && attachments.isEmpty {
+            hint = "พิมพ์ข้อความต่อจาก \(raw) ด้วย"
+            return
+        }
+        let send = PendingSend(model: routed.model,
+                               text: routed.text.isEmpty ? "ช่วยดูไฟล์ที่แนบมา" : routed.text,
+                               attachments: attachments.map(\.id),
+                               explicitAgent: routed.explicit)
         hint = nil
         text = ""
         attachments = []
@@ -291,12 +361,12 @@ final class ShellModel: ObservableObject {
             // (picked while there was no engine to tell) before sending.
             engine.commitDraft { [weak self] in
                 self?.applyModel()
-                self?.dispatch(prompt, attachments: ids)
+                self?.routeOrDispatch(send)
             }
             return
         }
-        if engine.busy { queued.append(Queued(text: prompt, attachments: ids)); return }
-        dispatch(prompt, attachments: ids)
+        if engine.busy || routingInProgress || pendingRoute != nil { queued.append(Queued(send: send)); return }
+        routeOrDispatch(send)
     }
 
     // MARK: attachments
@@ -329,10 +399,10 @@ final class ShellModel: ObservableObject {
         engine.deleteAttachment(id)
     }
 
-    private func flushQueue() {
-        guard !engine.busy, !queued.isEmpty else { return }
-        let next = queued.removeFirst()
-        dispatch(next.text, attachments: next.attachments)
+    func flushQueue() {
+        guard !engine.busy, !routingInProgress, pendingRoute == nil, !queued.isEmpty,
+              engine.lastError == nil else { return }
+        routeOrDispatch(queued.removeFirst().send)
     }
 
     func stop() {
@@ -348,7 +418,7 @@ final class ShellModel: ObservableObject {
     /// The relay chain for a turn as agent names (with accounts), never model
     /// ids: the engine picks the bridge from the name. The chosen agent's
     /// usable accounts first, then every other ready agent's.
-    private func chain(for agentID: String) -> [String] {
+    func chain(for agentID: String) -> [String] {
         let d = UserDefaults.standard
         let usable = engine.accounts.filter { $0.ready && !$0.limited }
         func names(_ agent: String) -> [String] {
@@ -367,14 +437,20 @@ final class ShellModel: ObservableObject {
         return out
     }
 
-    private func dispatch(_ prompt: String, attachments: [Int64] = []) {
-        let agentID = agent(for: model)?.id ?? model
+    func dispatch(_ target: String, _ prompt: String, attachments: [Int64] = [], agentOverride: String? = nil) {
+        lastPrompt = prompt
+        let agentID = agentOverride ?? agent(for: target)?.id ?? target
+        // `@codex …` and Auto route pick a model other than the picker's.
+        if target != model {
+            model = target
+            engine.setModel(agent: agentID, model: target)
+        }
         engine.liveAgent = agentID
         engine.consumeHandoffPrep(for: agentID)
         var names = chain(for: agentID)
         var notice: String?
         if names.first.map({ $0.split(separator: "@").first.map(String.init) ?? $0 }) != agentID {
-            let label = agent(for: model)?.label ?? agentID
+            let label = agent(for: target)?.label ?? agentID
             if let next = names.first {
                 notice = "\(label) ยังไม่ได้ login หรือติดลิมิตทุกบัญชี ส่งให้ \(next) แทน"
             } else {

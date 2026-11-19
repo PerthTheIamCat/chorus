@@ -34,6 +34,7 @@ struct ShellRoot: View {
             NSApp.setActivationPolicy(.regular)
             NSApp.activate(ignoringOtherApps: true)
         }
+        .onChange(of: shell.workspace) { _, w in shell.fileIndex.load(w) }
         .onChange(of: engine.sessionID) { _, id in shell.sessionChanged(id); syncCommands() }
         .onChange(of: engine.busy) { _, busy in shell.busyChanged(busy); syncCommands() }
         .onChange(of: engine.draft != nil) { _, _ in syncCommands() }
@@ -42,6 +43,14 @@ struct ShellRoot: View {
             engine.loadAgents()
         }
         .onReceive(AppCommandCenter.shared.fire) { handle($0) }
+        .sheet(isPresented: $shell.showPalette) {
+            ShellPalette(items: shell.paletteItems { tool = $0 }) { shell.showPalette = false }
+        }
+        .sheet(isPresented: $shell.confirmCompare) { CompareConfirm().environmentObject(engine).environmentObject(shell) }
+        .sheet(isPresented: Binding(get: { shell.compareOutput != nil }, set: { if !$0 { shell.compareOutput = nil } })) {
+            CompareResultsSheet(json: shell.compareOutput ?? "")
+        }
+        .sheet(item: $shell.pendingRoute) { RouteReview(proposal: $0).environmentObject(engine).environmentObject(shell) }
         .sheet(item: $tool) { ToolSheet(tool: $0).environmentObject(engine).environmentObject(shell) }
         .sheet(item: $engine.pendingSecret) { SecretSheet(request: $0) }
         .confirmationDialog(
@@ -129,6 +138,8 @@ struct ShellRoot: View {
         case .toggleOrchestrator: tool = .orchestra
         case .searchSessions: tool = .search
         case .systemMonitor: tool = .monitor
+        case .commandPalette: shell.showPalette = true
+        case .compareAgents: shell.runCompare()
         case .stop: shell.stop()
         case .send: shell.send()
         default: break
@@ -145,5 +156,102 @@ private struct Conversation: View {
             ShellComposer()
         }
         .background(Color(nsColor: .textBackgroundColor))
+    }
+}
+
+
+// MARK: sheets
+
+/// ⌘K: type to filter, ↩ runs the first match.
+private struct ShellPalette: View {
+    let items: [ShellModel.PaletteItem]
+    let dismiss: () -> Void
+    @State private var query = ""
+    @FocusState private var focused: Bool
+
+    private var shown: [ShellModel.PaletteItem] {
+        query.isEmpty ? items : items.filter { $0.title.localizedCaseInsensitiveContains(query) }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TextField("พิมพ์คำสั่ง…", text: $query)
+                .textFieldStyle(.plain).font(.title3).padding(14)
+                .focused($focused)
+                .onSubmit { if let f = shown.first { dismiss(); f.run() } }
+            Divider()
+            List(shown) { item in
+                Button { dismiss(); item.run() } label: {
+                    Label(item.title, systemImage: item.icon).frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+            }
+            .listStyle(.plain)
+        }
+        .frame(width: 460, height: 340)
+        .onAppear { focused = true }
+    }
+}
+
+private struct CompareConfirm: View {
+    @EnvironmentObject private var engine: Engine
+    @EnvironmentObject private var shell: ShellModel
+
+    var body: some View {
+        let agents = engine.agents.filter(\.ready)
+        let source = shell.comparePrompt
+        VStack(alignment: .leading, spacing: 14) {
+            Label("เทียบ agent", systemImage: "square.split.2x1").font(.title3.bold())
+            Text("ส่งคำถามเดียวกันให้ทุก agent ที่พร้อม แยกกันทำใน fork ของตัวเอง แล้วเทียบคำตอบ ไฟล์ที่แก้ เวลา และค่าใช้จ่าย แต่ละตัวใช้โควตาของตัวเองหนึ่งเทิร์น")
+                .font(.callout).foregroundStyle(.secondary)
+            GroupBox(source.fromComposer ? "คำถาม (จากช่องพิมพ์ จะถูกล้างหลังส่ง)" : "คำถาม (ข้อความล่าสุดที่ส่ง)") {
+                Text(source.text).lineLimit(5).font(.callout)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            Text("agent ที่จะถูกเรียก (\(agents.count)): " + agents.map(\.label).joined(separator: " · "))
+                .font(.callout)
+            Toggle("ตัดสินด้วยหลักฐาน: รันเช็คและเทสต์ในแต่ละสำเนา แล้วให้อีกเจ้าจัดอันดับ", isOn: $shell.compareJudge)
+                .help("ใช้เวลารันเทสต์และโควตาของผู้ตัดสินอีกหนึ่งเทิร์น เปิดได้เมื่อโปรเจกต์ trust แล้ว คุณเลือกผู้ชนะเองเสมอ")
+            Toggle("เทียบ agent เดี่ยว กับ orchestra ของ agent เดียวกัน", isOn: $shell.compareOrchestra)
+            HStack {
+                Button("ยกเลิก") { shell.confirmCompare = false }.keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("เทียบเลย") { shell.confirmCompare = false; shell.performCompare() }
+                    .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+    }
+}
+
+/// Auto route could not decide: the person picks the model and confirms.
+private struct RouteReview: View {
+    @EnvironmentObject private var engine: Engine
+    @EnvironmentObject private var shell: ShellModel
+    let proposal: ShellModel.PendingRoute
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("เลือกโมเดลก่อนส่ง", systemImage: "arrow.triangle.branch").font(.title3.bold())
+            Text(proposal.reason).font(.callout).foregroundStyle(.secondary)
+            Text(proposal.send.text).lineLimit(4).font(.callout)
+                .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            Picker("โมเดล", selection: $shell.reviewModel) {
+                ForEach(engine.agents.filter(\.ready)) { a in
+                    Section(a.label) { ForEach(a.models, id: \.id) { m in Text(m.label).tag(m.id) } }
+                }
+            }
+            HStack {
+                Button("ยกเลิก") { shell.cancelReviewedRoute() }.keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("ส่ง") { shell.sendReviewedRoute() }
+                    .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                    .disabled(shell.agent(for: shell.reviewModel)?.ready != true)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
     }
 }
