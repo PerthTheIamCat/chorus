@@ -6,8 +6,11 @@ import SwiftUI
 struct SessionMetrics: Codable, Equatable {
     var tok_per_s: Double?
     var tok_per_s_estimated: Bool?
+    var ttft_ms: Int?
     var cache_hit_pct: Double?
     var cost_usd: Double?
+    /// A plan-limit account: it shows the share of its limit, not a price.
+    var subscription: Bool?
     var context_pct: Double?
     var limit_pct: Double?
     var limit_window: String?
@@ -16,6 +19,7 @@ struct SessionMetrics: Codable, Equatable {
 /// Which chips the user wants (Settings › การแสดงผล). One key per chip.
 enum MetricsKey {
     static let tokPerS = "chorus.metrics.tokPerS"
+    static let ttft = "chorus.metrics.ttft"
     static let cache = "chorus.metrics.cache"
     static let cost = "chorus.metrics.cost"
     static let limit = "chorus.metrics.limit"
@@ -24,10 +28,14 @@ enum MetricsKey {
 
 struct MetricsToggles: Equatable {
     var tokPerS = true
+    var ttft = true
     var cache = true
     var cost = true
     var limit = true
     var context = true
+    /// "auto" | "usd" | "thb" and the baht-per-USD rate (see `Money`).
+    var currency = "usd"
+    var thbRate: Double?
 }
 
 /// One chip of the strip. `warn` tints it when the number is near a ceiling.
@@ -49,12 +57,18 @@ enum MetricsChips {
             out.append(.init(icon: "speedometer", label: "\(est ? "≈" : "")\(Int(v.rounded())) tok/s",
                              help: est ? "ประมาณ: นับจากข้อความที่ agent ส่งออกมาในช่วงที่กำลังพิมพ์" : "ความเร็วในการตอบ"))
         }
+        if t.ttft, let v = m.ttft_ms {
+            out.append(.init(icon: "timer", label: "TTFT " + String(format: "%.1f", Double(v) / 1000) + "s",
+                             help: "เวลารอคำแรก: นับจากส่งคำสั่งถึงตัวอักษรแรกที่ agent ตอบ"))
+        }
         if t.cache, let v = m.cache_hit_pct {
             out.append(.init(icon: "internaldrive", label: "cache \(Int(v.rounded()))%",
                              help: "สัดส่วน prompt ที่มาจาก cache ของ provider"))
         }
         if t.cost, let v = m.cost_usd {
-            out.append(.init(icon: "dollarsign.circle", label: "$" + String(format: v < 1 ? "%.4f" : "%.2f", v),
+            out.append(.init(icon: "dollarsign.circle",
+                             label: Money.format(usd: v, currency: t.currency, thbRate: t.thbRate,
+                                                 usdDecimals: v < 1 ? 4 : 2, thbDecimals: 2),
                              help: "ค่าใช้จ่ายของ session ตามที่ provider รายงาน"))
         }
         if t.context, let v = m.context_pct {
@@ -74,6 +88,10 @@ enum MetricsChips {
 struct MetricsStripView: View {
     @ObservedObject var engine: Engine
     @AppStorage(MetricsKey.tokPerS) private var tokPerS = true
+    @AppStorage(MetricsKey.ttft) private var ttft = true
+    @AppStorage(DisplayKey.detail) private var detail = DetailLevel.normal.rawValue
+    @AppStorage(DisplayKey.currency) private var currency = "auto"
+    @AppStorage(SettingsKey.thbRate) private var thbRate = ""
     @AppStorage(MetricsKey.cache) private var cache = true
     @AppStorage(MetricsKey.cost) private var cost = true
     @AppStorage(MetricsKey.limit) private var limit = true
@@ -81,8 +99,9 @@ struct MetricsStripView: View {
 
     var body: some View {
         let chips = MetricsChips.make(engine.metrics,
-            .init(tokPerS: tokPerS, cache: cache, cost: cost, limit: limit, context: context))
-        if !chips.isEmpty {
+            .init(tokPerS: tokPerS, ttft: ttft, cache: cache, cost: cost, limit: limit, context: context,
+                  currency: currency, thbRate: Money.rate(thbRate)))
+        if DetailLevel.from(detail).showsMetrics, !chips.isEmpty {
             HStack(spacing: 12) {
                 ForEach(chips) { c in
                     Label(c.label, systemImage: c.icon)

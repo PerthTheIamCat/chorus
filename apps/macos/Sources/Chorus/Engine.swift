@@ -2400,24 +2400,36 @@ final class Engine: ObservableObject {
         do { try p.run() } catch { lastError = "เปิด Terminal ไม่ได้: \(error.localizedDescription)" }
     }
 
-    private struct AssembledContext: Codable {
+    private struct InspectionResult: Codable {
         let ok: Bool?
-        let text: String?
-        let tokens: Int64?
+        let inspection: ContextInspection?
         let error: String?
+    }
+
+    /// What the agent saw, as numbers and a list of what was shortened or
+    /// left out — and, with `target` (an agent id), what that agent would get
+    /// if the session were handed to it now. Rust builds all of it read-only
+    /// (no memory counters bumped, no model call); `completion` gets nil when
+    /// there is no open session or the call failed.
+    func contextInspection(budget: Int64 = 120_000, target: String = "",
+                           completion: @escaping (ContextInspection?) -> Void) {
+        guard let h = handle else { return completion(nil) }
+        queue.async {
+            let json = target.withCString { t in
+                Self.string(from: chorus_context_inspect(h.raw, budget, t))
+            }
+            let r = Self.decode(InspectionResult.self, json)
+            DispatchQueue.main.async { completion(r?.inspection) }
+        }
     }
 
     /// Exactly what a turn would hand the agent right now — not a summary of
     /// it, the thing itself. The app claims to carry context between agents;
     /// this is the button that lets someone check.
     func assembledContext(budget: Int64 = 120_000, completion: @escaping (String, Int64) -> Void) {
-        guard let h = handle else { return completion("(ยังไม่ได้เปิด session)", 0) }
-        queue.async {
-            let json = Self.string(from: chorus_assembled_context(h.raw, budget))
-            let r = Self.decode(AssembledContext.self, json)
-            DispatchQueue.main.async {
-                completion(r?.text ?? r?.error ?? "(ประกอบ context ไม่สำเร็จ)", r?.tokens ?? 0)
-            }
+        guard handle != nil else { return completion("(ยังไม่ได้เปิด session)", 0) }
+        contextInspection(budget: budget) { i in
+            completion(i?.text ?? "(ประกอบ context ไม่สำเร็จ)", i?.tokens ?? 0)
         }
     }
 

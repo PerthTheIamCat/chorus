@@ -601,6 +601,9 @@ cache ใน `RepoMapCache` (หน่วยความจำ ไม่ลง�
 - idle pass (`chorus_learn_idle_json`) เปิด connection ของตัวเอง รันบน queue แยก ไม่แตะ queue ของ engine (7.7) · โน้ตโปรเจกต์อ่านใน `assemble_context` ได้เฉพาะตอนตั้ง `CHORUS_SUMMARY_MODEL` และเป็นการอ่านแถวที่เก็บไว้เท่านั้น (7.2b)
 - ตาราง `project_notes` สร้างใน `schema.rs` (บล็อก v9, `CREATE TABLE IF NOT EXISTS`) ไม่ใช่ lazy · บทเรียนจาก `Session::learn` ผ่าน `learn::decide()` ตามโหมดอัตโนมัติ: ถามก่อน = เข้าคิว · ปิด = ทิ้ง · ยอมรับเมื่อเทสต์ผ่าน = รับเองเฉพาะ `FixedAfterFailing` ที่คำสั่งเป็นเทสต์ และไม่ `suspicious`
 
+### 7.2c ตัวตรวจ context ต้องอ่านอย่างเดียว (21 ต.ค. 2026 → 18 พ.ย. 2026)
+`Session::assemble_report` / `inspector::inspect` ประกอบ context เหมือนเทิร์นจริงแต่ **ไม่นับ `hits` ของความจำ** (`memory::ranked_with` แยกจาก `relevant_with` ที่นับ) — ถ้านับ ทุกครั้งที่เปิดแผงจะเปลี่ยนอันดับความจำของเทิร์นถัดไป · ผล `ContextReport` มาจาก bookkeeping ของ assembler เอง ไม่มี model call · ตัวเลข cache hit มาจาก `usage` ใน reply ของ `session/prompt` (bridge ทั้งสอง `inputTokens` **ไม่รวม** cache) ไม่ใช่ `usage_update` · preview "ถ้าส่งให้ agent อื่น" ใช้ `brief_for` ตัวเดียวกับ `handoff()` จึงเพี้ยนจากของจริงไม่ได้ · ขนาดหน้าต่างของ agent ที่ยังไม่เคยรันไม่มีทางรู้ (ACP ไม่ให้ถามก่อนเปิด session) → ใช้ budget เดิมและบอกผู้ใช้ ห้ามเดาเลข
+
 ### 7.3 repo เงาสำหรับ checkpoint
 ต้องยึด `.gitignore` ของผู้ใช้ ไม่งั้น `.chorus/` จะโตกว่าโปรเจกต์จริง
 

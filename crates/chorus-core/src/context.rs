@@ -5,6 +5,7 @@
 //! Nothing here reads or writes storage — see the crate-level doc comment.
 //! `Assembler::assemble` is meant to be called fresh on every turn; its
 //! output is never persisted.
+use crate::context_report::{self as rep, CodeNote, ContextReport, ConversationReport, MemoryNote, TierReport, TurnNote};
 use crate::render::{self, ContextItem};
 use crate::tokens::TokenCounter;
 
@@ -121,6 +122,9 @@ pub struct Assembled {
     pub per_tier: Vec<(Tier, i64)>,
     pub dropped_turns: usize,
     pub demoted_turns: usize,
+    /// What the assembler decided and why — see [`ContextReport`]. Built from
+    /// bookkeeping the assembler already does; costs no extra model call.
+    pub report: ContextReport,
 }
 
 pub struct Assembler<C: TokenCounter> {
@@ -150,14 +154,14 @@ impl<C: TokenCounter> Assembler<C> {
 
         // Memory — drop lowest-ranked items on overflow.
         let memory_cap = self.budget.cap(Tier::Memory);
-        let (memory_text, memory_tokens) = self.assemble_memory(&input.memory, memory_cap);
+        let (memory_text, memory_tokens, memory_notes) = self.assemble_memory(&input.memory, memory_cap);
         per_tier.push((Tier::Memory, memory_tokens));
         sections.push((Tier::Memory, memory_text));
 
         // Conversation — step turns down the rungs, oldest first, before
         // dropping any.
         let conv_cap = self.budget.cap(Tier::Conversation);
-        let (conv_text, conv_tokens, dropped_turns, demoted_turns) =
+        let (conv_text, conv_tokens, dropped_turns, demoted_turns, conv_report) =
             self.assemble_conversation(&input.turns, conv_cap);
         per_tier.push((Tier::Conversation, conv_tokens));
         sections.push((Tier::Conversation, conv_text));
@@ -166,7 +170,7 @@ impl<C: TokenCounter> Assembler<C> {
         // manifest line on overflow, largest first.
         let code_cap = self.budget.cap(Tier::Code);
         let mut code_items = input.code.clone();
-        let (code_text, code_tokens) = self.assemble_code(&mut code_items, code_cap);
+        let (code_text, code_tokens, code_notes) = self.assemble_code(&mut code_items, code_cap);
         per_tier.push((Tier::Code, code_tokens));
         sections.push((Tier::Code, code_text));
 
@@ -185,17 +189,80 @@ impl<C: TokenCounter> Assembler<C> {
         }
         let text = text.trim_end().to_string();
 
+        let report = self.build_report(
+            &per_tier,
+            memory_notes,
+            conv_report,
+            code_notes,
+            memory_cap,
+            conv_cap,
+            code_cap,
+        );
         Assembled {
             text,
             per_tier,
             dropped_turns,
             demoted_turns,
+            report,
         }
     }
 
-    fn assemble_memory(&self, items: &[ContextItem], cap: i64) -> (String, i64) {
+    #[allow(clippy::too_many_arguments)]
+    fn build_report(
+        &self,
+        per_tier: &[(Tier, i64)],
+        memory: Vec<MemoryNote>,
+        conversation: ConversationReport,
+        code: Vec<CodeNote>,
+        memory_cap: i64,
+        conv_cap: i64,
+        code_cap: i64,
+    ) -> ContextReport {
+        let tokens_of = |t: Tier| per_tier.iter().find(|(x, _)| *x == t).map_or(0, |(_, n)| *n);
+        let cut_memory = memory.iter().filter(|m| !m.included).count();
+        let omitted_code = code.iter().filter(|c| c.status == "omitted").count();
+        let repeat_code = code.iter().filter(|c| c.status == "repeat").count();
+        let mut tiers = Vec::with_capacity(6);
+        for (tier, cap) in [
+            (Tier::System, self.budget.total),
+            (Tier::TaskState, self.budget.cap(Tier::TaskState)),
+            (Tier::Memory, memory_cap),
+            (Tier::Conversation, conv_cap),
+            (Tier::Code, code_cap),
+            (Tier::Reserve, self.budget.cap(Tier::Reserve)),
+        ] {
+            let note = match tier {
+                Tier::TaskState => "ไม่เคยถูกตัด — เข้าไปครบเสมอ".to_string(),
+                Tier::Memory if cut_memory > 0 => {
+                    format!("ตัด {cut_memory} ข้อที่อันดับต่ำสุด เพราะเกินเพดาน {memory_cap} token")
+                }
+                Tier::Conversation if conversation.dropped + conversation.demoted_by_budget > 0 => format!(
+                    "เกินเพดาน {conv_cap} token: ย่อ {} เทิร์น ทิ้ง {} เทิร์น (ย่อก่อนทิ้งเสมอ)",
+                    conversation.demoted_by_budget, conversation.dropped
+                ),
+                Tier::Code if omitted_code + repeat_code > 0 => {
+                    format!("ไฟล์ซ้ำ {repeat_code} · ถูกแทนด้วยรายการ {omitted_code} เพราะเกินเพดาน {code_cap} token")
+                }
+                Tier::Reserve => "กันไว้ให้ agent ตอบ ไม่มีอะไรถูกใส่".to_string(),
+                _ => String::new(),
+            };
+            tiers.push(TierReport::new(&format!("{tier:?}"), tokens_of(tier), cap, note));
+        }
+        let total_tokens = per_tier.iter().map(|(_, n)| *n).sum();
+        ContextReport {
+            budget: self.budget.total,
+            total_tokens,
+            tiers,
+            conversation,
+            memory,
+            code,
+        }
+    }
+
+    fn assemble_memory(&self, items: &[ContextItem], cap: i64) -> (String, i64, Vec<MemoryNote>) {
         let mut kept: Vec<&ContextItem> = items.iter().collect();
         let mut sizes: Vec<i64> = kept.iter().map(|i| self.counter.count(&i.text)).collect();
+        let all_sizes = sizes.clone();
         let mut total: i64 = sizes.iter().sum();
         while total > cap && !kept.is_empty() {
             // Lowest-ranked item is the last one (caller supplies items
@@ -209,14 +276,25 @@ impl<C: TokenCounter> Assembler<C> {
             .map(|i| i.text.clone())
             .collect::<Vec<_>>()
             .join("\n");
-        (text, total)
+        // Items are cut from the tail, so the first `kept.len()` are in.
+        let notes = items
+            .iter()
+            .enumerate()
+            .map(|(i, it)| MemoryNote {
+                text: it.text.clone(),
+                included: i < kept.len(),
+                tokens: all_sizes[i],
+                ..Default::default()
+            })
+            .collect();
+        (text, total, notes)
     }
 
     fn assemble_conversation(
         &self,
         turns: &[TurnItem],
         cap: i64,
-    ) -> (String, i64, usize, usize) {
+    ) -> (String, i64, usize, usize, ConversationReport) {
         struct State {
             turn: TurnItem,
             rung: u8,
@@ -293,14 +371,59 @@ impl<C: TokenCounter> Assembler<C> {
         }
 
         let used = total_of(&states, &self.counter);
-        (text, used, dropped_turns, demoted_turns)
+
+        // The report: only turns that did not arrive at their by-age size.
+        let mut report = ConversationReport {
+            turns_total: states.len(),
+            demoted_by_budget: demoted_turns,
+            dropped: dropped_turns,
+            ..Default::default()
+        };
+        let mut notes: Vec<TurnNote> = Vec::new();
+        for s in &states {
+            if !s.dropped {
+                match s.rung {
+                    0 => report.at_l0 += 1,
+                    1 => report.at_l1 += 1,
+                    _ => report.at_l2 += 1,
+                }
+            }
+            let by_age = base_rung(s.turn.age);
+            if s.dropped || s.rung > by_age {
+                notes.push(TurnNote {
+                    age: s.turn.age,
+                    from_rung: by_age,
+                    to_rung: s.rung,
+                    dropped: s.dropped,
+                    tokens_before: self.counter.count(&rung_text(&s.turn, by_age)),
+                    tokens_after: if s.dropped {
+                        0
+                    } else {
+                        self.counter.count(&rung_text(&s.turn, s.rung))
+                    },
+                    preview: rep::preview(&s.turn.text_l0, 60),
+                });
+            }
+        }
+        notes.sort_by_key(|n| n.age);
+        if notes.len() > rep::NOTES_MAX {
+            report.notes_omitted = notes.len() - rep::NOTES_MAX;
+            notes.truncate(rep::NOTES_MAX);
+        }
+        report.notes = notes;
+        (text, used, dropped_turns, demoted_turns, report)
     }
 
-    fn assemble_code(&self, items: &mut [ContextItem], cap: i64) -> (String, i64) {
+    fn assemble_code(&self, items: &mut [ContextItem], cap: i64) -> (String, i64, Vec<CodeNote>) {
         render::dedup_window(items);
+        let repeats: Vec<bool> = items
+            .iter()
+            .map(|i| i.text == render::repeat_ref(&i.label))
+            .collect();
 
         let mut sizes: Vec<i64> = items.iter().map(|i| self.counter.count(&i.text)).collect();
         let mut total: i64 = sizes.iter().sum();
+        let mut omitted = vec![false; items.len()];
 
         if total > cap {
             let mut order: Vec<usize> = (0..items.len()).collect();
@@ -315,14 +438,31 @@ impl<C: TokenCounter> Assembler<C> {
                 total = total - sizes[i] + new_size;
                 items[i].text = replacement;
                 sizes[i] = new_size;
+                omitted[i] = true;
             }
         }
+        let notes = items
+            .iter()
+            .enumerate()
+            .map(|(i, it)| CodeNote {
+                label: it.label.clone(),
+                tokens: sizes[i],
+                status: if omitted[i] {
+                    "omitted"
+                } else if repeats[i] {
+                    "repeat"
+                } else {
+                    "kept"
+                }
+                .to_string(),
+            })
+            .collect();
 
         let text = items
             .iter()
             .map(|i| i.text.clone())
             .collect::<Vec<_>>()
             .join("\n\n");
-        (text, total)
+        (text, total, notes)
     }
 }

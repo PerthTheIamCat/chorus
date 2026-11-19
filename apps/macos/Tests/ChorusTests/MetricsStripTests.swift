@@ -32,4 +32,26 @@ final class MetricsStripTests: XCTestCase {
         let big = SessionMetrics(cost_usd: 3.456)
         XCTAssertEqual(MetricsChips.make(big, .init()).first?.label, "$3.46")
     }
+
+    func testTtftAndSubscriptionDecodeAndDraw() throws {
+        let json = #"{"tok_per_s":null,"tok_per_s_estimated":false,"ttft_ms":900,"cache_hit_pct":75.0,"cost_usd":null,"subscription":true,"context_pct":null,"limit_pct":30.0,"limit_window":"5h"}"#
+        let m = try JSONDecoder().decode(SessionMetrics.self, from: Data(json.utf8))
+        XCTAssertEqual(m.ttft_ms, 900)
+        XCTAssertEqual(m.subscription, true)
+        // A subscription: the limit chip, no price chip (Rust already dropped the cost).
+        XCTAssertEqual(MetricsChips.make(m, .init()).map(\.label), ["TTFT 0.9s", "cache 75%", "5h 30%"])
+        var t = MetricsToggles()
+        t.ttft = false
+        XCTAssertEqual(MetricsChips.make(m, t).map(\.label), ["cache 75%", "5h 30%"])
+    }
+
+    func testCostFollowsTheChosenCurrency() {
+        let m = SessionMetrics(cost_usd: 2.0)
+        var t = MetricsToggles()
+        t.currency = "thb"
+        t.thbRate = 36
+        XCTAssertEqual(MetricsChips.make(m, t).first?.label, "฿72.00")
+        t.thbRate = nil
+        XCTAssertEqual(MetricsChips.make(m, t).first?.label, "$2.00")
+    }
 }

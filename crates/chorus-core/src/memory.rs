@@ -72,10 +72,8 @@ fn dedup_text(facts: Vec<Fact>) -> Vec<Fact> {
     facts.into_iter().filter(|f| seen.insert(f.text.clone())).collect()
 }
 
-/// The top `k` facts for a scope, ordered pinned-first, then by hits, then
-/// most-recently-created. Bumps `hits`/`last_used_ms` for every fact
-/// returned.
-pub fn top(c: &Connection, scope: i64, k: usize) -> Result<Vec<Fact>> {
+/// [`top`]'s ranking without the bookkeeping: read-only.
+fn top_rows(c: &Connection, scope: i64, k: usize) -> Result<Vec<Fact>> {
     let mut stmt = c.prepare(
         "SELECT id, scope, text, pinned, hits FROM fact
          WHERE scope IN (?1, ?2, ?3)
@@ -95,7 +93,14 @@ pub fn top(c: &Connection, scope: i64, k: usize) -> Result<Vec<Fact>> {
         .collect::<rusqlite::Result<_>>()?;
     let mut facts = dedup_text(facts);
     facts.truncate(k);
+    Ok(facts)
+}
 
+/// The top `k` facts for a scope, ordered pinned-first, then by hits, then
+/// most-recently-created. Bumps `hits`/`last_used_ms` for every fact
+/// returned.
+pub fn top(c: &Connection, scope: i64, k: usize) -> Result<Vec<Fact>> {
+    let facts = top_rows(c, scope, k)?;
     let now = now_ms();
     for f in &facts {
         c.execute(
@@ -172,8 +177,33 @@ pub fn relevant_with(
     k: usize,
     embedder: Option<&dyn Embedder>,
 ) -> Result<Vec<Fact>> {
+    let mut picked: Vec<Fact> = ranked_with(c, scope, query, k, embedder)?
+        .into_iter()
+        .map(|(f, _)| f)
+        .collect();
+    let now = now_ms();
+    for f in &mut picked {
+        c.execute("UPDATE fact SET hits = hits + 1, last_used_ms = ?1 WHERE id = ?2", (now, f.id))?;
+        f.hits += 1;
+    }
+    Ok(picked)
+}
+
+/// [`relevant_with`]'s ranking with each fact's similarity to `query`, and
+/// **no writes** — no `hits` bump. This is what the context inspector reads,
+/// so looking at what the agent saw cannot change what it sees next. The
+/// score is `None` when there was no query to score against (the plain
+/// most-used order); pinned facts keep their computed score but are listed
+/// first regardless of it.
+pub fn ranked_with(
+    c: &Connection,
+    scope: i64,
+    query: &str,
+    k: usize,
+    embedder: Option<&dyn Embedder>,
+) -> Result<Vec<(Fact, Option<f32>)>> {
     if query.trim().is_empty() || k == 0 {
-        return top(c, scope, k);
+        return Ok(top_rows(c, scope, k)?.into_iter().map(|f| (f, None)).collect());
     }
     let mut stmt = c.prepare(
         "SELECT id, scope, text, pinned, hits FROM fact WHERE scope IN (?1, ?2, ?3)
@@ -219,33 +249,28 @@ pub fn relevant_with(
         }
     };
     let mut scored = scored;
-    let mut picked: Vec<Fact> = Vec::new();
+    let mut picked: Vec<(Fact, Option<f32>)> = Vec::new();
     // Pinned first (already in hits order), then relevance, then the old order.
-    for (_, f) in scored.iter().filter(|(_, f)| f.pinned) {
-        picked.push(f.clone());
+    for (s, f) in scored.iter().filter(|(_, f)| f.pinned) {
+        picked.push((f.clone(), Some(*s)));
     }
     let mut hits: Vec<&(f32, Fact)> = scored.iter().filter(|(s, f)| !f.pinned && *s >= floor).collect();
     hits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    for (_, f) in hits {
-        picked.push(f.clone());
+    for (s, f) in hits {
+        picked.push((f.clone(), Some(*s)));
     }
     // With something to match against, a fact below the relevance floor is
     // not worth its tokens however much budget is left (R2). The old behaviour
     // — floor 0.18 and topping up with the most-used facts — stays one switch
     // away for comparison: `CHORUS_R2_MIN_RELEVANCE=off`.
     if !r2_on() {
-        for (_, f) in scored.drain(..) {
-            if !picked.iter().any(|p| p.id == f.id) {
-                picked.push(f);
+        for (s, f) in scored.drain(..) {
+            if !picked.iter().any(|(p, _)| p.id == f.id) {
+                picked.push((f, Some(s)));
             }
         }
     }
     picked.truncate(k);
-    let now = now_ms();
-    for f in &mut picked {
-        c.execute("UPDATE fact SET hits = hits + 1, last_used_ms = ?1 WHERE id = ?2", (now, f.id))?;
-        f.hits += 1;
-    }
     Ok(picked)
 }
 
