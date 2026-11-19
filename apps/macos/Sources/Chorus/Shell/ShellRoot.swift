@@ -11,6 +11,7 @@ struct ShellRoot: View {
     @EnvironmentObject private var engine: Engine
     @EnvironmentObject private var shell: ShellModel
     @State private var columns: NavigationSplitViewVisibility = .all
+    @State private var tool: ShellTool?
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columns) {
@@ -41,6 +42,7 @@ struct ShellRoot: View {
             engine.loadAgents()
         }
         .onReceive(AppCommandCenter.shared.fire) { handle($0) }
+        .sheet(item: $tool) { ToolSheet(tool: $0).environmentObject(engine).environmentObject(shell) }
         .sheet(item: $engine.pendingSecret) { SecretSheet(request: $0) }
         .confirmationDialog(
             "ลบ session นี้?",
@@ -84,6 +86,15 @@ struct ShellRoot: View {
                 .disabled(engine.busy)
         }
         ToolbarItem(placement: .primaryAction) {
+            Menu {
+                ForEach([ShellTool.files, .terminal, .ship, .checkpoints, .search, .orchestra, .monitor]) { t in
+                    Button { tool = t } label: { Label(t.title, systemImage: t.symbol) }
+                }
+            } label: { Label("เครื่องมือ", systemImage: "wrench.and.screwdriver") }
+            .disabled(shell.workspace.isEmpty)
+            .help("ไฟล์ เทอร์มินัล commit/PR checkpoint ค้นแชท Orchestra")
+        }
+        ToolbarItem(placement: .primaryAction) {
             Button { shell.showInspector.toggle() } label: {
                 Label("แผงข้อมูล", systemImage: "sidebar.right")
                     .overlay(alignment: .topTrailing) {
@@ -113,6 +124,11 @@ struct ShellRoot: View {
         case .inspectorTab(let i):
             if InspectorTab.allCases.indices.contains(i) { shell.inspectorTab = InspectorTab.allCases[i] }
             shell.showInspector = true
+        case .toggleExplorer: tool = .files
+        case .toggleTerminal: tool = .terminal
+        case .toggleOrchestrator: tool = .orchestra
+        case .searchSessions: tool = .search
+        case .systemMonitor: tool = .monitor
         case .stop: shell.stop()
         case .send: shell.send()
         default: break
