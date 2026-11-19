@@ -563,6 +563,14 @@ cache ใน `RepoMapCache` (หน่วยความจำ ไม่ลง�
 - เทสต์ตั้ง `CHORUS_SECRETS_BACKEND=memory` — `user_vault()` เช็คทุกครั้ง ไม่งั้น `cargo test` บน Mac จะเขียนค่าปลอมลง Keychain จริงของคนรัน · Keychain ล็อก (CI) → เก็บในหน่วยความจำรอบนี้แทน (`fallback`) ยัง mask และ inject ได้
 - เทสต์สร้าง key ปลอมตอนรัน (`fake()`) ห้ามเขียนเป็น literal — GitHub push protection จะบล็อก push
 
+### 7.30 compare ที่ให้คะแนน · review ข้ามเจ้า · journal ผลข้างเคียง (18 พ.ย. 2026)
+
+- ผลของ compare/review/journal เก็บเป็น `Decision` ที่ body ขึ้นต้นด้วย marker (`chorus:compare` / `chorus:review` / `chorus:intent` / `chorus:intent-done`, ดู `chorus_core::journal`) — **ทุกที่ที่อ่าน Decision เป็น "สิ่งที่ตกลงกันแล้ว" ต้องกรองด้วย `journal::is_marker`** (ตอนนี้: `Brief::build`, `task_state`) ไม่งั้น bookkeeping จะโผล่ใน `done` · ต้องสั้นกว่า 2 KB เพื่อให้ค้นด้วย `LIKE` ได้
+- ผู้ตัดสินกับ reviewer วิ่งเทิร์น `Policy::ReadOnly` → ต้องมี Seatbelt (7.22) เทสต์บน Linux เลยใช้ `judge_policy` / `CrossReview.policy` แทน — ค่าเริ่มต้นห้ามเปลี่ยน
+- เช็คในเลนใช้ consent ของโปรเจกต์แม่ (`LaneTrust`) เพราะ worktree ไม่อยู่ในรายการ trust · ไม่ trust = ไม่รันและ `passed = None` ห้ามนับเป็นผ่าน · `Session::with_lane_confine` มีไว้ให้เทสต์/โฮสต์ที่มี sandbox ของตัวเอง
+- ผลเช็คมาก่อนความเห็นของ judge (`final_order`) · judge เห็นเลนเป็น A/B ตามลำดับหลักฐาน ไม่เห็นชื่อ agent (LLM judge เอนเอียงตามตำแหน่ง/ความยาว: Zheng et al. 2023)
+- journal จดตอน tool observer เห็นการเรียก (ก่อนมันรัน) ด้วย connection แยก จึงรอดแม้เทิร์นตายก่อน `persist_outcome` · ปิดรายการด้วยการจับคู่ชื่อ tool ของ ToolResult ในเทิร์นเดียวกัน
+
 ### 7.29 multi-agent v2 — แผน, ลูกถาม lead, board (18 พ.ย. 2026 · ยังไม่เคยรันกับ agent จริงบน Mac)
 
 - **แผนอยู่ใน ledger** (`chorus-core/src/orchestra_plan.rs`): event `ToolCall` เนื้อ `{"event":"orchestra_plan",...}` (ต้อง < 2 KB ไม่งั้นลง blob แล้วหาไม่เจอ → ตรวจขนาดตอนบันทึก) + checklist ของ lead · `check_spawn` บังคับที่ MCP `chorus_spawn_agent` เท่านั้น (ปุ่ม spawn ของผู้ใช้ผ่าน FFI ไม่ต้องมีแผน) · บังคับเฉพาะ **writer** (มี worktree) ที่จะรันข้าง writer อีกตัว — ผู้อ่านรันขนานได้เหมือนเดิม

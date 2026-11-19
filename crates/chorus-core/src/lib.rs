@@ -27,6 +27,7 @@ pub mod handoff;
 pub mod highlight;
 pub mod history;
 pub mod hooks;
+pub mod journal;
 pub mod inference;
 pub mod integration_catalog;
 pub mod ledger;

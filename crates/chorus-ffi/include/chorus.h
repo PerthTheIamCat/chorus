@@ -390,6 +390,23 @@ char *chorus_model_manager_delete_json(const char *model_id);
 char *chorus_compare(ChorusEngine *e, const char *agents,
                      const char *prompt, int allow);
 
+/* Compare with scoring/judging. `agents` CSV (`codex,codex+orchestra`);
+ * `options_json` e.g. {"score":true,"judge":true,"discriminating_test":false,
+ * "judge_agent":""} or NULL. Same JSON as chorus_compare plus per-branch
+ * "score" and a top-level "verdict" when judged. */
+char *chorus_compare_ex(ChorusEngine *e, const char *agents,
+                        const char *prompt, int allow,
+                        const char *options_json);
+
+/* Stored compare results, newest first, with per-(agent,mode) stats.
+ * JSON: {"ok":true,"results":[...],"stats":[...]} */
+char *chorus_compare_results_json(ChorusEngine *e, int limit);
+
+/* Cross-provider review after a turn that changed files. NULL/empty
+ * reviewer turns it off. criteria_json: JSON string array or NULL. */
+char *chorus_set_cross_review(ChorusEngine *e, const char *reviewer,
+                              const char *criteria_json);
+
 /* Hand the session to `to`. `goal` required; `done_json`/`pending_json`
  * are JSON string arrays or NULL.
  * JSON: {"ok":true,"handoff_seq":N,"from":"...","to":"...",

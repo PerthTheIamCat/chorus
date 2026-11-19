@@ -1,0 +1,1 @@
+{"update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "{\"ranking\": [\"A\", \"B\"], \"reasons\": {\"A\": \"does the work\", \"B\": \"missing the file\"}, \"summary\": \"A wins\"}"}}}
