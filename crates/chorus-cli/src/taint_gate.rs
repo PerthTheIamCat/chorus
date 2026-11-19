@@ -100,7 +100,9 @@ fn question(agent: &str, text: &str) -> Question {
     Question {
         agent: agent.to_string(),
         question: text.to_string(),
+        reason: String::new(),
         options: vec![ALLOW.to_string(), DENY.to_string()],
+        recommended: Some(1),
         allow_other: false,
     }
 }
