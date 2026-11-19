@@ -43,14 +43,12 @@ pub mod embedding;
 pub mod lessons;
 pub mod memory;
 pub mod merge_specialist;
-pub mod merkle;
 pub mod mlx_runtime;
 pub mod model_manager;
 pub mod notify;
 pub mod orchestra_plan;
 pub mod outcomes;
 pub mod permissions;
-pub mod pipeline;
 pub mod project_notes;
 pub mod projector;
 pub mod render;
@@ -64,11 +62,13 @@ pub mod search;
 pub mod secrets;
 pub mod session_cleanup;
 pub mod skill_drafts;
+pub mod skill_scan;
 pub mod skills;
 pub mod store;
 pub mod structural_diff;
 pub mod suggest;
 pub mod swarm;
+pub mod taint;
 pub mod tokens;
 pub mod trust;
 pub mod types;
@@ -88,12 +88,10 @@ pub use checkpoint_dag::{CheckpointDag, RewindMode, RewindSummary, TurnCheckpoin
 pub use darwin_qos::DarwinQoS;
 pub use error::{ChorusError, Result};
 pub use merge_specialist::{ConflictHunk, MergeSpecialist, MergeStrategy};
-pub use merkle::{MerkleDiff, MerkleNode, MerkleTree};
 pub use mlx_runtime::{
     AppleSiliconHardwareInfo, AppleSiliconMlxEngine, MlxInferenceStats, MlxModelConfig,
     QuantizationType,
 };
-pub use pipeline::{ArchitectEditorPipeline, BudgetPolicy, PipelineCostSummary};
 pub use repo_map::{RepoMapEngine, SymbolDef, SymbolExtractor, SymbolGraph};
 pub use roles::AgentRole;
 pub use store::Store;

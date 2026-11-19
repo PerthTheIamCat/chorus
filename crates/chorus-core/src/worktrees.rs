@@ -367,7 +367,12 @@ fn secure_short_id(role: &str) -> String {
         .unwrap_or_default()
         .as_nanos();
     let pid = std::process::id();
-    let hash = blake3::hash(format!("{role}-{t}-{pid}").as_bytes());
+    // macOS clocks tick in microseconds, so two threads asking for the same
+    // role in one tick got the same id (and the second `remove_dir_all`ed the
+    // first one's worktree). A process-wide counter makes the id unique.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let hash = blake3::hash(format!("{role}-{t}-{pid}-{n}").as_bytes());
     hash.to_hex()[..10].to_string()
 }
 
@@ -383,6 +388,13 @@ pub fn discard_worktree_by_branch(root: &Path, branch: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn short_ids_never_repeat_for_the_same_role_in_one_process() {
+        let ids: std::collections::HashSet<String> =
+            (0..2000).map(|_| super::secure_short_id("builder")).collect();
+        assert_eq!(ids.len(), 2000);
+    }
+
     #[test]
     fn a_compare_worktree_starts_from_the_dirty_tree() {
         use std::process::Command;

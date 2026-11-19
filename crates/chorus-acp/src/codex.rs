@@ -131,6 +131,14 @@ pub struct PermissionAsk {
     pub tool: String,
     pub kind: String,
     pub detail: String,
+    /// `(title, kind)` of every tool call the agent made earlier in this turn
+    /// (its subagents' too), in order. Lets the engine tell whether the turn
+    /// has already read something from outside before it answers.
+    pub prior_tools: Vec<(String, String)>,
+    /// Set by the engine, not the bridge: this ask is an action that leaves
+    /// the machine (push, PR, a write through an MCP server) in a turn that
+    /// has read something from outside. Says why, for the dialog.
+    pub tainted_by: Option<String>,
 }
 
 /// A structured thing the agent did this turn, ready to become a ledger
@@ -535,7 +543,12 @@ impl CodexAgent {
                 if let Some(c) = &child {
                     acc.set_waiting(c, true);
                 }
-                let reply = handle_request(&cwd, &method, &params, decide);
+                let prior = if method == "session/request_permission" {
+                    acc.tool_calls()
+                } else {
+                    Vec::new()
+                };
+                let reply = handle_request(&cwd, &method, &params, &prior, decide);
                 if let Some(c) = &child {
                     acc.set_waiting(c, false);
                 }
@@ -713,6 +726,7 @@ fn handle_request(
     cwd: &Path,
     method: &str,
     params: &Value,
+    prior: &[(String, String)],
     decide: &mut dyn FnMut(&PermissionAsk) -> Permission,
 ) -> RequestReply {
     match method {
@@ -729,6 +743,8 @@ fn handle_request(
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .into(),
+                prior_tools: Vec::new(),
+                tainted_by: None,
             };
             if decide(&ask) == Permission::Deny {
                 return RequestReply::Error(-32001, "denied by permission engine".into());
@@ -739,7 +755,8 @@ fn handle_request(
             }
         }
         "session/request_permission" => {
-            let ask = permission_ask(params);
+            let mut ask = permission_ask(params);
+            ask.prior_tools = prior.to_vec();
             let want_kind = match decide(&ask) {
                 Permission::Allow => "allow_once",
                 Permission::Deny => "reject_once",
@@ -783,6 +800,8 @@ fn permission_ask(params: &Value) -> PermissionAsk {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
+        prior_tools: Vec::new(),
+        tainted_by: None,
     }
 }
 
@@ -874,6 +893,10 @@ fn report_progress(update: &Value) {
                 .and_then(Value::as_str)
                 .unwrap_or("tool");
             crate::observe_tool(title, args_digest(update));
+            crate::observe_tool_kind(
+                title,
+                update.get("kind").and_then(Value::as_str).unwrap_or(""),
+            );
             crate::emit_progress("tool", title);
         }
         "tool_call_update" => {
@@ -1133,6 +1156,19 @@ struct Accumulator {
 }
 
 impl Accumulator {
+    /// `(title, kind)` of every tool call so far, the agent's own and its
+    /// subagents' — what a permission ask is judged against.
+    fn tool_calls(&self) -> Vec<(String, String)> {
+        std::iter::once(&self.main)
+            .chain(self.children.iter().map(|c| &c.t))
+            .flat_map(|t| t.events.iter())
+            .filter_map(|e| match e {
+                AgentEvent::ToolCall { title, kind } => Some((title.clone(), kind.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn absorb(&mut self, params: &Value) {
         let update = match params.get("update") {
             Some(u) => u,

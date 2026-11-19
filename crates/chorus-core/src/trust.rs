@@ -137,6 +137,50 @@ impl TrustStore {
     }
 }
 
+/// Projects whose tests are locked ("ล็อกเทสต์", Settings › สิทธิ์): the
+/// sandbox denies the agent writes to test files there. Off for every project
+/// until the user turns it on.
+///
+/// Same storage and same reasoning as [`TrustStore`] — a list of canonical
+/// roots in `$CHORUS_HOME/locked-tests.json`, outside the workspace, so
+/// neither a cloned repo nor a sandboxed agent can flip it.
+#[derive(Debug, Clone)]
+pub struct LockedTests(TrustStore);
+
+impl LockedTests {
+    /// `$CHORUS_HOME/locked-tests.json`, or `~/.chorus/locked-tests.json`.
+    pub fn default_location() -> Self {
+        let TrustStore { path } = TrustStore::default_location();
+        Self::at(path.with_file_name("locked-tests.json"))
+    }
+
+    pub fn at(path: impl Into<PathBuf>) -> Self {
+        Self(TrustStore::at(path))
+    }
+
+    /// Whether tests are locked in `workspace` — or in the checkout it is a
+    /// linked worktree of: an orchestra child works in its own worktree, and
+    /// a lock that stopped at the project's own folder would not reach it.
+    pub fn is_locked(&self, workspace: &Path) -> bool {
+        self.0.is_trusted(workspace)
+            || main_checkout(workspace).is_some_and(|main| self.0.is_trusted(&main))
+    }
+
+    pub fn set_locked(&self, workspace: &Path, locked: bool) -> Result<()> {
+        self.0.set_trusted(workspace, locked)
+    }
+}
+
+/// The checkout a linked git worktree belongs to: `ws/.git` is then a file
+/// reading `gitdir: <main>/.git/worktrees/<name>`.
+fn main_checkout(ws: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(ws.join(".git")).ok()?;
+    let gitdir = PathBuf::from(text.strip_prefix("gitdir:")?.trim());
+    let gitdir = if gitdir.is_absolute() { gitdir } else { ws.join(gitdir) };
+    let common = gitdir.ancestors().find(|a| a.file_name().is_some_and(|n| n == ".git"))?;
+    common.parent().map(Path::to_path_buf)
+}
+
 /// Proof that the user trusted this workspace, plus the sandbox to run in.
 pub struct Consent<'a> {
     workspace: PathBuf,
@@ -205,6 +249,45 @@ mod tests {
         let no_sandbox = |_: &[String], _: &Path| Err("no sandbox-exec".to_string());
         let consent = store.consent(ws.path(), &no_sandbox).unwrap();
         assert!(consent.command(&["true".into()]).is_err());
+    }
+    #[test]
+    fn locked_tests_are_per_project_and_off_by_default() {
+        let home = tempfile::tempdir().unwrap();
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let store = LockedTests::at(home.path().join("locked-tests.json"));
+        assert!(!store.is_locked(a.path()));
+        store.set_locked(a.path(), true).unwrap();
+        assert!(store.is_locked(a.path()));
+        assert!(!store.is_locked(b.path()), "another project is unaffected");
+        store.set_locked(a.path(), false).unwrap();
+        assert!(!store.is_locked(a.path()));
+    }
+
+    #[test]
+    fn locking_tests_does_not_trust_the_project() {
+        let home = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        LockedTests::at(home.path().join("locked-tests.json"))
+            .set_locked(ws.path(), true)
+            .unwrap();
+        let trust = TrustStore::at(home.path().join("trusted-projects.json"));
+        assert!(!trust.is_trusted(ws.path()));
+    }
+    #[test]
+    fn a_linked_worktree_follows_its_checkouts_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let main = tempfile::tempdir().unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(main.path().join(".git/worktrees/w1")).unwrap();
+        std::fs::write(
+            tree.path().join(".git"),
+            format!("gitdir: {}/.git/worktrees/w1\n", main.path().display()),
+        )
+        .unwrap();
+        let store = LockedTests::at(home.path().join("locked-tests.json"));
+        assert!(!store.is_locked(tree.path()));
+        store.set_locked(main.path(), true).unwrap();
+        assert!(store.is_locked(tree.path()), "child worktree must inherit the lock");
     }
 
     #[test]

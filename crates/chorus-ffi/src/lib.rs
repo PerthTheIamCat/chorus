@@ -886,7 +886,9 @@ pub unsafe extern "C" fn chorus_run_turn_with_attachments(
 /// happens to have selected.
 fn ask_payload(agent: &str, ask: &chorus_cli::session::PermissionAsk) -> String {
     serde_json::json!({
-        "agent": agent, "tool": ask.tool, "kind": ask.kind, "detail": ask.detail
+        "agent": agent, "tool": ask.tool, "kind": ask.kind, "detail": ask.detail,
+        // Why this ask is stricter than usual (E2); `null` for an ordinary one.
+        "tainted": ask.tainted_by,
     })
     .to_string()
 }
@@ -2549,6 +2551,25 @@ pub unsafe extern "C" fn chorus_task_state(e: *const ChorusEngine) -> *mut c_cha
     }
 }
 
+/// Turns of this session that read something from outside the project
+/// (web, an imported session, a file outside its folders), derived from their
+/// tool calls in the ledger. JSON: {"ok":true,"turns":[{"user_seq":N,
+/// "last_seq":N,"label":"อ่านของภายนอกแล้ว · เว็บ","sources":["web"]}]}
+///
+/// # Safety
+/// `e` must be a live handle from `chorus_engine_open`/`_reopen`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_turn_taints_json(e: *const ChorusEngine) -> *mut c_char {
+    let Some(engine) = e.as_ref() else {
+        return err("null engine");
+    };
+    match catch_unwind(AssertUnwindSafe(|| engine.session.turn_taints())) {
+        Ok(Ok(turns)) => out(serde_json::json!({"ok": true, "turns": turns}).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in turn_taints"),
+    }
+}
+
 /// The last usage stored for this session, to seed the context meter on
 /// reopen. JSON: {"ok":true,"usage":null | {"context_used":N|null,
 /// "context_window":N|null,"tokens_in":N,"tokens_out":N,"cost_usd":X|null,
@@ -2838,7 +2859,8 @@ pub unsafe extern "C" fn chorus_set_route_preset(
 /// (`.claude/skills`, `.agents/skills`), and the user-global roots — `agents`
 /// (`~/.agents/skills`), `user` (`~/.claude/skills`), `codex`, `gemini`.
 /// See [`chorus_core::skills::visible_roots`]. Read-only.
-/// JSON: {"ok":true,"skills":[{"name","description","path","source"}]}
+/// Each also carries `scripts`, `findings` and a `badge` from the script scan
+/// (`skill_scan`). JSON: {"ok":true,"skills":[{"name","description","path","source","scripts","findings","badge"}]}
 ///
 /// # Safety
 /// `cwd` must be a valid NUL-terminated UTF-8 string.
@@ -2852,9 +2874,12 @@ pub unsafe extern "C" fn chorus_list_skills(cwd: *const c_char) -> *mut c_char {
         chorus_core::skills::list_visible(std::path::Path::new(cwd), home.as_deref())
             .into_iter()
             .map(|s| {
+                // G4: attached scripts and what in them looks dangerous.
+                let scan = chorus_core::skill_scan::scan_dir(&s.dir);
                 serde_json::json!({
                     "name": s.name, "description": s.description,
                     "path": s.dir.join("SKILL.md").to_string_lossy(), "source": s.source,
+                    "scripts": scan.scripts, "findings": scan.findings, "badge": scan.badge(),
                 })
             })
             .collect::<Vec<_>>()
@@ -4285,6 +4310,36 @@ pub unsafe extern "C" fn chorus_set_project_trusted(
     }
 }
 
+/// Whether the user locked this project's tests ("ล็อกเทสต์"): the sandbox
+/// then denies the agent writes to test files. Returns `{"ok":true,"locked":bool}`.
+///
+/// # Safety
+/// `ws` must be null or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_lock_tests_json(ws: *const c_char) -> *mut c_char {
+    let Some(ws) = borrow(ws) else {
+        return err("ws must be valid UTF-8");
+    };
+    let locked = chorus_core::trust::LockedTests::default_location().is_locked(Path::new(ws));
+    out(serde_json::json!({"ok": true, "locked": locked}).to_string())
+}
+
+/// Record the user's "lock tests" choice for a project. Only the UI calls
+/// this; the store is outside the sandbox's writes. Applies from the next turn.
+///
+/// # Safety
+/// `ws` must be null or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_lock_tests(ws: *const c_char, locked: bool) -> *mut c_char {
+    let Some(ws) = borrow(ws) else {
+        return err("ws must be valid UTF-8");
+    };
+    match chorus_core::trust::LockedTests::default_location().set_locked(Path::new(ws), locked) {
+        Ok(()) => out(serde_json::json!({"ok": true, "locked": locked}).to_string()),
+        Err(e) => err(e.to_string()),
+    }
+}
+
 /// Verify workspace via fast linter/compiler checks. Runs only for a project
 /// the user trusted, and only inside the turn's Seatbelt profile.
 ///
@@ -4803,12 +4858,15 @@ mod tests {
             tool: "Edit files".into(),
             kind: "edit".into(),
             detail: "src/a.rs".into(),
+            prior_tools: Vec::new(),
+            tainted_by: None,
         };
         let v: serde_json::Value = serde_json::from_str(&ask_payload("claude@work", &ask)).unwrap();
         assert_eq!(v["agent"], "claude@work");
         assert_eq!(v["tool"], "Edit files");
         assert_eq!(v["kind"], "edit");
         assert_eq!(v["detail"], "src/a.rs");
+        assert!(v["tainted"].is_null());
     }
 
     #[test]

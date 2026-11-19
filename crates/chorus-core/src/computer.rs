@@ -48,6 +48,9 @@ struct Gate {
     access: Option<Access>,
     actions: u32,
     asker: Option<Asker>,
+    /// The turn read something from outside the project (`taint.rs`): from
+    /// here on "ให้ทำเลย" no longer covers actions — they ask.
+    tainted: bool,
 }
 
 static GATES: Mutex<Option<HashMap<(String, i64), Gate>>> = Mutex::new(None);
@@ -74,6 +77,7 @@ pub fn begin_turn(conn: &Connection, sess: i64, access: Access) {
     with_gate(conn, sess, |g| {
         g.access = Some(access);
         g.actions = 0;
+        g.tainted = false;
     });
 }
 
@@ -104,6 +108,35 @@ impl Drop for TurnGuard {
 /// The person to ask during an "ask first" turn; `None` when the turn ends.
 pub fn set_asker(conn: &Connection, sess: i64, asker: Option<Asker>) {
     with_gate(conn, sess, |g| g.asker = asker);
+}
+
+/// Like [`set_asker`], but leaves an asker that is already there: a turn run
+/// with its own dialog keeps it, any other turn gets the fallback.
+pub fn set_asker_default(conn: &Connection, sess: i64, asker: Asker) {
+    with_gate(conn, sess, |g| {
+        if g.asker.is_none() {
+            g.asker = Some(asker);
+        }
+    });
+}
+
+/// The running turn read something from outside the project: an action that
+/// changes state now asks even if the turn was set to act freely. Cleared by
+/// the next [`begin_turn`]. `db` is [`db_key`] of the session's connection —
+/// the caller is the agent's tool-call stream, which holds no connection.
+pub fn taint(db: &str, sess: i64) {
+    let mut guard = GATES.lock().unwrap_or_else(|p| p.into_inner());
+    let map = guard.get_or_insert_with(HashMap::new);
+    map.entry((db.to_string(), sess)).or_default().tainted = true;
+}
+
+/// The `db` argument of [`taint`] for `conn`.
+pub fn gate_key(conn: &Connection) -> String {
+    db_key(conn)
+}
+
+pub fn tainted(conn: &Connection, sess: i64) -> bool {
+    with_gate(conn, sess, |g| g.tainted)
 }
 
 /// Per-turn ceiling on actions (screenshots included).
@@ -571,6 +604,12 @@ pub fn call(
             ));
         }
         g.actions += 1;
+        // A tainted turn does not get to act freely.
+        let access = if access == Access::Act && g.tainted {
+            Access::Ask
+        } else {
+            access
+        };
         Ok((access, g.asker.clone()))
     })?;
     if action.changes_state() {
@@ -1294,6 +1333,51 @@ mod tests {
             "{log:?}"
         );
         assert!(!log.iter().any(|l| l.starts_with("type")));
+    }
+
+    #[test]
+    fn a_tainted_turn_that_was_set_to_act_asks_instead() {
+        let c = conn();
+        let fake = Fake::default();
+        set_enabled(&c, 141, true);
+        begin_turn(&c, 141, Access::Act);
+        let click = json!({"action":"left_click","coordinate":[10,10]});
+        // Clean: acts without anyone to ask.
+        call(&c, 141, &click, &fake).unwrap();
+
+        taint(&gate_key(&c), 141);
+        assert!(tainted(&c, 141));
+        // Tainted and nobody to ask: refused, not allowed through.
+        let err = call(&c, 141, &click, &fake).unwrap_err();
+        assert!(err.contains("no one to ask"), "{err}");
+        // Looking is still free.
+        call(&c, 141, &json!({"action":"screenshot"}), &fake).unwrap();
+
+        let asked = Arc::new(Mutex::new(0));
+        let n = asked.clone();
+        set_asker_default(
+            &c,
+            141,
+            Arc::new(move |_: &str| {
+                *n.lock().unwrap() += 1;
+                false
+            }),
+        );
+        assert!(call(&c, 141, &click, &fake).unwrap_err().contains("declined"));
+        assert_eq!(*asked.lock().unwrap(), 1);
+
+        // The next turn starts clean.
+        begin_turn(&c, 141, Access::Act);
+        assert!(!tainted(&c, 141));
+    }
+
+    #[test]
+    fn the_default_asker_never_replaces_the_turns_own() {
+        let c = conn();
+        set_asker(&c, 151, Some(Arc::new(|_: &str| true)));
+        set_asker_default(&c, 151, Arc::new(|_: &str| false));
+        let ask = with_gate(&c, 151, |g| g.asker.clone()).unwrap();
+        assert!(ask("x"), "the dialog's asker must survive");
     }
 
     #[test]
