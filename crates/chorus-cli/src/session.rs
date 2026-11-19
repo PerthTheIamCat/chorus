@@ -532,6 +532,59 @@ fn run_child_turn(
     Ok((rep.turn.message, stat, files))
 }
 
+fn parent_of(sub: &chorus_core::agent_control::Subagent) -> i64 {
+    sub.parent_sess.unwrap_or_default()
+}
+
+/// Whether `agent` may answer a one-shot opinion: `want` is a provider id, or
+/// `other_than:<asker>` for "anyone but the provider of this agent".
+fn opinion_provider_ok(want: &str, agent: &str) -> bool {
+    let provider = crate::orchestra::provider_for(agent);
+    match want.strip_prefix("other_than:") {
+        Some(asker) => provider != crate::orchestra::provider_for(asker),
+        None => provider == want,
+    }
+}
+
+/// What a finished writing child's work gets before the lead reads it:
+/// a label when it edited outside its `files_owned`, then the project's check
+/// and its `done_when`, sent back to the same child once on failure.
+fn finish_writer(
+    first: crate::child_verify::Work,
+    spec: &Option<chorus_core::agent_control::TaskSpec>,
+    st: &ChildRunnerState,
+    worktree: Option<&str>,
+    has_worktree: bool,
+    run: &dyn Fn(&str) -> Result<crate::child_verify::Work>,
+) -> crate::child_verify::Work {
+    let Some(wt) = worktree.filter(|_| has_worktree) else {
+        return first;
+    };
+    let done_when = spec.as_ref().map(|s| s.done_when.clone()).unwrap_or_default();
+    let (cwd, wt) = (st.cwd.clone(), PathBuf::from(wt));
+    let trust = chorus_core::trust::TrustStore::default_location();
+    let confine = |argv: &[String], dir: &Path| sandbox::wrap(argv, dir, sandbox::Profile::Workspace);
+    let mut verify = || crate::child_verify::verify_child(&trust, &confine, &cwd, &wt, &done_when);
+    let mut rerun = |text: &str| run(text).map_err(|e| format!("{e:#}"));
+    let mut out = crate::child_verify::gate(first, &mut verify, &mut rerun);
+    // Files Chorus itself projects into every checkout are not the child's.
+    let touched: Vec<String> = out
+        .2
+        .iter()
+        .filter(|f| !is_projected_file(f))
+        .cloned()
+        .collect();
+    let owned = spec.as_ref().map(|s| s.files_owned.as_slice()).unwrap_or(&[]);
+    let outside = chorus_core::orchestra_plan::outside_owned(&touched, owned);
+    if !outside.is_empty() {
+        out.0.push_str(&format!(
+            "\n\n{}",
+            chorus_core::orchestra_plan::scope_label(&outside)
+        ));
+    }
+    out
+}
+
 impl SessionChildRunner {
     fn tag_of(&self, subagent_id: i64) -> Option<i64> {
         self.state
@@ -567,6 +620,25 @@ impl chorus_core::agent_control::ChildRunner for SessionChildRunner {
             .candidates
             .clone()
             .unwrap_or_else(|| crate::orchestra::candidates_from(&crate::agents::list_agents()));
+        let spec = ac::TaskSpec::split(&subagent.task).1;
+        // A one-shot opinion goes to another provider, or it is not an opinion.
+        let candidates = match spec.as_ref().map(|s| s.prefer_provider.as_str()) {
+            Some(want) if !want.is_empty() => {
+                let kept: Vec<_> = candidates
+                    .into_iter()
+                    .filter(|c| opinion_provider_ok(want, &c.agent))
+                    .collect();
+                if kept.is_empty() {
+                    return Err(chorus_core::ChorusError::Invalid(
+                        "no ready agent from a different provider to ask (login to a second \
+                         account in Settings › Accounts)"
+                            .into(),
+                    ));
+                }
+                kept
+            }
+            _ => candidates,
+        };
         let role = chorus_core::roles::find_role(&st.cwd, &subagent.role);
         let route = crate::orchestra::route_child(
             &candidates,
@@ -577,10 +649,21 @@ impl chorus_core::agent_control::ChildRunner for SessionChildRunner {
         )
         .map_err(|e| chorus_core::ChorusError::Invalid(format!("{e:#}")))?;
         let chain = crate::orchestra::child_chain(&route, &candidates);
-        let prompt = child_prompt(role.as_ref(), &subagent.task);
+        let mut prompt = child_prompt(role.as_ref(), &subagent.task);
+        // What siblings have already posted, for a child that starts late.
+        if let Ok(store) = Store::open(&st.db_path) {
+            let notes = chorus_core::orchestra_plan::board(store.conn(), parent_of(subagent));
+            if !notes.is_empty() {
+                prompt.push_str(&format!(
+                    "\n\nBoard (changes siblings already made):\n{}",
+                    chorus_core::orchestra_plan::render_board(&notes, Some(subagent.id))
+                ));
+            }
+        }
         let has_worktree = subagent.worktree.is_some();
         let policy = child_policy(st.parent_policy, has_worktree);
         let subagent_id = subagent.id;
+        let worktree_path = subagent.worktree.clone();
         let parent = subagent.parent_sess.unwrap_or_default();
         let deadline = {
             let store = Store::open(&st.db_path)?;
@@ -611,18 +694,23 @@ impl chorus_core::agent_control::ChildRunner for SessionChildRunner {
                     }
                 });
             }
-            let res = run_child_turn(
-                &st.db_path,
-                child_sess_id,
-                tag,
-                st.forced_bridge.clone(),
-                st.route_preset,
-                &route,
-                &chain,
-                &prompt,
-                policy,
-                has_worktree,
-            );
+            let run = |text: &str| {
+                run_child_turn(
+                    &st.db_path,
+                    child_sess_id,
+                    tag,
+                    st.forced_bridge.clone(),
+                    st.route_preset,
+                    &route,
+                    &chain,
+                    text,
+                    policy,
+                    has_worktree,
+                )
+            };
+            let res = run(&prompt).map(|first| {
+                finish_writer(first, &spec, &st, worktree_path.as_deref(), has_worktree, &run)
+            });
             done.store(true, std::sync::atomic::Ordering::SeqCst);
             let Ok(store) = Store::open(&st.db_path) else {
                 return;
@@ -896,6 +984,14 @@ const HONESTY_GUIDANCE: &str = "\n(Chorus: if the task is missing information yo
      to act (which file, which behaviour, which constraint), ask the user before starting instead \
      of guessing. If the spec cannot be met, say so plainly. Do not edit, weaken, skip or delete \
      a test just to make it pass; if a test is wrong, say why and let the user decide.)\n";
+
+/// What a child agent is told about working next to others.
+const CHILD_AGENT_HINT: &str = "(Chorus: you are one of several agents on this task. Stay inside \
+the files you own. If you are blocked or an assumption would be costly to get wrong, ask the lead \
+with `chorus_ask_lead` (at most 3 questions; if no answer comes, go on with your best assumption \
+and say so). If you change an interface others rely on, post one line with `chorus_board_post`. \
+`chorus_board_read` shows what the others posted. For a second opinion from another provider use \
+`chorus_ask_provider`. The lead decides and merges.)\n";
 
 /// Added only when someone is registered to answer: an agent is never told to
 /// call a tool it was not given.
@@ -2661,16 +2757,32 @@ impl Session {
             prompt_text.push_str(
                 "\n\n(Chorus: if the user asks you to remember something, or states a durable \
                  project fact, call the `memory_propose` tool with it. Do not just say you \
-                 remembered it.)\n\
-                 (Chorus: Multi-agent orchestration is enabled, but split only when it pays off: \
-                 spawn with `chorus_spawn_agent` only if there are at least two parts that do not \
-                 depend on each other and do not touch the same files. Sequential coding, or work \
-                 where each step needs the last one's result, stays with you alone. Investigators \
-                 and reviewers only read, so they may run in parallel; give each writer its own \
-                 `files_owned` and never let two writers share a file. Prefer a reviewer from a \
-                 different provider than the builder. Coordinate with `chorus_wait_agent` and \
-                 `chorus_collect_results`, and track progress with `chorus_update_checklist`.)\n",
+                 remembered it.)\n",
             );
+            if chorus_core::orchestra_plan::child_of(self.store.conn(), self.sess).is_some() {
+                prompt_text.push_str(CHILD_AGENT_HINT);
+            } else {
+                prompt_text.push_str(
+                    "(Chorus: Multi-agent orchestration is enabled, but split only when it pays off: \
+                     spawn with `chorus_spawn_agent` only if there are at least two parts that do not \
+                     depend on each other and do not touch the same files. Sequential coding, or work \
+                     where each step needs the last one's result, stays with you alone. Investigators \
+                     and reviewers only read, so they may run in parallel; give each writer its own \
+                     `files_owned` and never let two writers share a file. Before a writer runs next \
+                     to another agent, write the split with `chorus_plan_orchestra` (subtasks, what \
+                     depends on what, files each owns, agreed signatures, a `done_when` each) and \
+                     spawn each writer with its `plan_task`. Prefer a reviewer from a \
+                     different provider than the builder; for a second opinion on a plan use \
+                     `chorus_ask_provider`. Coordinate with `chorus_wait_agent` and \
+                     `chorus_collect_results`, and track progress with `chorus_update_checklist`. \
+                     Questions from your agents arrive as messages; answer with \
+                     `chorus_send_message`.)\n",
+                );
+                prompt_text.push_str(&chorus_core::orchestra_plan::lead_digest(
+                    self.store.conn(),
+                    self.sess,
+                ));
+            }
         }
         if self.plan_turn {
             prompt_text.push_str(PLAN_MODE_GUIDANCE);
@@ -2818,8 +2930,11 @@ impl Session {
                         Some(t) => {
                             chorus_acp::cancel_tag(t);
                         }
+                        // The lead's own loop ends the lead's turn only: its
+                        // children are other agents doing other work, and their
+                        // results wait for the lead's next turn.
                         None => {
-                            chorus_acp::cancel_active();
+                            chorus_acp::cancel_own_turn();
                         }
                     }
                 }

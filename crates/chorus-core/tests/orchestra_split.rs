@@ -63,6 +63,7 @@ fn task_spec_round_trips_and_plain_tasks_stay_plain() {
         out_of_scope: vec!["src/lexer.rs".into()],
         output: "a summary".into(),
         done_when: "cargo test -p parser".into(),
+        ..Default::default()
     };
     let stored = spec.encode();
     let (shown, back) = TaskSpec::split(&stored);

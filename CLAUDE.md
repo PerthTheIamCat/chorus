@@ -547,6 +547,15 @@ cache ใน `RepoMapCache` (หน่วยความจำ ไม่ลง�
 - เทสต์ตั้ง `CHORUS_SECRETS_BACKEND=memory` — `user_vault()` เช็คทุกครั้ง ไม่งั้น `cargo test` บน Mac จะเขียนค่าปลอมลง Keychain จริงของคนรัน · Keychain ล็อก (CI) → เก็บในหน่วยความจำรอบนี้แทน (`fallback`) ยัง mask และ inject ได้
 - เทสต์สร้าง key ปลอมตอนรัน (`fake()`) ห้ามเขียนเป็น literal — GitHub push protection จะบล็อก push
 
+### 7.29 multi-agent v2 — แผน, ลูกถาม lead, board (18 พ.ย. 2026 · ยังไม่เคยรันกับ agent จริงบน Mac)
+
+- **แผนอยู่ใน ledger** (`chorus-core/src/orchestra_plan.rs`): event `ToolCall` เนื้อ `{"event":"orchestra_plan",...}` (ต้อง < 2 KB ไม่งั้นลง blob แล้วหาไม่เจอ → ตรวจขนาดตอนบันทึก) + checklist ของ lead · `check_spawn` บังคับที่ MCP `chorus_spawn_agent` เท่านั้น (ปุ่ม spawn ของผู้ใช้ผ่าน FFI ไม่ต้องมีแผน) · บังคับเฉพาะ **writer** (มี worktree) ที่จะรันข้าง writer อีกตัว — ผู้อ่านรันขนานได้เหมือนเดิม
+- **`TaskSpec` มีฟิลด์เพิ่ม** `plan_task`, `signatures`, `prefer_provider` (เก็บในคอลัมน์ `task` เดิม ไม่แตะ schema) · `prefer_provider` ไม่ว่าง = ลูกแบบ "ขอความเห็น" (read-only, ไม่นับเป็นงานใน plan): `other_than:<agent>` หรือชื่อ provider
+- **ตรวจงานลูก** (`chorus-cli/src/child_verify.rs`): verify ของโปรเจกต์ + `done_when` (`sh -c` ใน worktree) ผ่าน `TrustStore::consent_for_worktree` + sandbox Workspace — โปรเจกต์ไม่ trust หรือไม่มี sandbox = **ไม่ตรวจและบอกว่าไม่ได้ตรวจ** ไม่ใช่ผ่านเงียบ ๆ · ส่งกลับให้ลูกเดิมแก้ 1 ครั้ง · `done_when` มาจาก agent (lead) จึงห้ามรันนอก Consent เด็ดขาด
+- **loop guard ของ lead** ใช้ `chorus_acp::cancel_own_turn()` (ฆ่าเฉพาะ `ACTIVE_PID`) ไม่ใช่ `cancel_active()` · ห้ามตั้ง `CANCELLED` ระดับโปรเซสจากการหยุดของ Chorus เอง เพราะ thread ของลูกอ่านค่าเดียวกันแล้วนึกว่าถูกกด Stop
+- **child→lead / board** เก็บใน `subagent_message` (`child_to_parent`, `board`) และสะท้อนเป็น `Msg` ใน ledger ของ lead (นำหน้า ❓ / 📌 / 🔎) เพื่อให้เห็นในเธรดและเข้า context เทิร์นถัดไปเอง · เพดาน: 3 คำถาม + 5 โน้ต ต่อลูก, 3 ความเห็นต่อเทิร์น · ข้อความ mask ผ่าน `secrets::user_vault()` ก่อนลง ledger
+- เทสต์ลูกที่เป็น read-only (รวม "ขอความเห็น") รันไม่ได้บน Linux (ไม่มี Seatbelt, 7.22) — เทสต์ `orchestra_v2` ของ chorus-cli จึงอ่านว่า agent ไหนรันจากข้อความล้มเหลวเมื่อไม่ใช่ macOS
+
 ### 7.3 repo เงาสำหรับ checkpoint
 ต้องยึด `.gitignore` ของผู้ใช้ ไม่งั้น `.chorus/` จะโตกว่าโปรเจกต์จริง
 

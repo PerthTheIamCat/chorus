@@ -303,6 +303,17 @@ pub struct TaskSpec {
     pub output: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub done_when: String,
+    /// The subtask of the lead's plan this child carries out (see
+    /// [`crate::orchestra_plan`]); empty for a child spawned outside a plan.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub plan_task: String,
+    /// Interfaces the plan fixed up front, so siblings agree without talking.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signatures: Vec<String>,
+    /// Which provider may answer, for a one-shot opinion child
+    /// (`chorus_ask_provider`): a provider id, or `other_than:<agent>`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prefer_provider: String,
 }
 
 impl TaskSpec {
@@ -312,6 +323,9 @@ impl TaskSpec {
             && self.out_of_scope.is_empty()
             && self.output.is_empty()
             && self.done_when.is_empty()
+            && self.plan_task.is_empty()
+            && self.signatures.is_empty()
+            && self.prefer_provider.is_empty()
     }
 
     /// The text stored in `subagent.task`.
@@ -349,6 +363,12 @@ impl TaskSpec {
                 self.out_of_scope.join(", ")
             ));
         }
+        if !self.signatures.is_empty() {
+            s.push_str(&format!(
+                "\nAgreed interfaces (do not change them; ask the lead if they must change): {}",
+                self.signatures.join("; ")
+            ));
+        }
         if !self.output.is_empty() {
             s.push_str(&format!("\nReturn: {}", self.output.trim()));
         }
@@ -367,7 +387,7 @@ pub fn task_text(task: &str) -> &str {
     TaskSpec::split(task).0
 }
 
-fn norm_path(p: &str) -> String {
+pub(crate) fn norm_path(p: &str) -> String {
     let p = p.trim().trim_start_matches("./");
     let p = p
         .trim_end_matches("**")
@@ -378,7 +398,7 @@ fn norm_path(p: &str) -> String {
 
 /// Two ownership entries clash when equal or one contains the other as a
 /// directory (`src` vs `src/a.rs`). Globs are compared by their literal prefix.
-fn paths_overlap(a: &str, b: &str) -> bool {
+pub(crate) fn paths_overlap(a: &str, b: &str) -> bool {
     let (a, b) = (norm_path(a), norm_path(b));
     if a.is_empty() || b.is_empty() {
         return true; // "**" or "*" owns everything

@@ -1503,6 +1503,62 @@ fn a_tool_call_repeated_six_times_stops_the_turn_and_says_why() {
 }
 
 #[test]
+fn a_lead_loop_stop_ends_only_the_lead_turn_and_leaves_a_running_child_alone() {
+    // ACTIVE_PID is process-wide, so this too runs in a process of its own.
+    const CHILD: &str = "CHORUS_TEST_LEAD_LOOP_CHILD";
+    let me = "a_lead_loop_stop_ends_only_the_lead_turn_and_leaves_a_running_child_alone";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", me, "--nocapture"])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let tmp = std::env::temp_dir().join(format!("chorus-lead-loop-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    // The child: a mock holding its turn open for 2 s, filed under a cancel
+    // tag exactly like an orchestra child.
+    let child_dir = tmp.join("child");
+    std::fs::create_dir_all(&child_dir).unwrap();
+    let mut slow = mock_bridge();
+    slow.extend(["--sleep-ms".into(), "2000".into()]);
+    const TAG: i64 = 424_242;
+    let child = std::thread::spawn(move || {
+        let _scope = chorus_acp::scope::cancel_scope(TAG);
+        let mut c = Session::create(&child_dir.join("store.db"), &child_dir, "child")
+            .unwrap()
+            .with_bridge(slow);
+        c.run_turn("codex", "openai", "long child work", Policy::AllowAll)
+    });
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while chorus_acp::scope::pids(TAG).is_empty() && std::time::Instant::now() < end {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(!chorus_acp::scope::pids(TAG).is_empty(), "the child is running");
+
+    // The lead repeats one call until Chorus stops it.
+    let mut lead = Session::create(&tmp.join("store.db"), &tmp, "lead")
+        .unwrap()
+        .with_bridge(looping_bridge(40));
+    let chain = [AgentSpec::new("codex", "openai")];
+    let err = lead
+        .run_relay(&chain, "run the tests", Policy::AllowAll)
+        .err()
+        .expect("the loop is cut off");
+    assert!(format!("{err:#}").contains("หยุดเทิร์น"), "{err:#}");
+
+    let report = child
+        .join()
+        .unwrap()
+        .expect("the child finishes its own turn: the lead's stop was not its stop");
+    assert_eq!(report.stop_reason, "end_turn");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
 fn a_different_call_between_repeats_resets_the_count() {
     use chorus_cli::session::{LoopVerdict, RepeatGuard};
     let mut g = RepeatGuard::new(3, 6);
