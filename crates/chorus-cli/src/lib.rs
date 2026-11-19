@@ -3,6 +3,7 @@
 
 pub mod accounts;
 pub mod agents;
+pub mod child_verify;
 pub mod drafts;
 pub mod limits;
 pub mod metrics;

@@ -24,8 +24,12 @@ pub struct Question {
     /// Who is asking (may carry `@account`); empty when unknown.
     pub agent: String,
     pub question: String,
+    /// Why the agent stopped to ask (one or two sentences); empty = not said.
+    pub reason: String,
     /// Buttons, in order. Empty = free text only.
     pub options: Vec<String>,
+    /// Index into `options` the agent suggests; the card marks it.
+    pub recommended: Option<usize>,
     /// Whether a typed answer is accepted besides the options.
     pub allow_other: bool,
 }
@@ -39,6 +43,7 @@ static ASKERS: Mutex<Option<HashMap<(String, i64), Asker>>> = Mutex::new(None);
 const MAX_QUESTION: usize = 2_000;
 const MAX_OPTIONS: usize = 8;
 const MAX_OPTION: usize = 200;
+const MAX_REASON: usize = 400;
 /// Longer answers are cut, not refused: the person already typed them.
 pub const MAX_ANSWER: usize = 4_000;
 
@@ -76,16 +81,27 @@ the task lacks information you need to act (which approach, which file, which be
 missing requirements): a question costs seconds, a wrong guess costs a turn. Use it too when \
 the spec cannot be met as written, instead of bending a test or the requirement to make a \
 check pass. Give `options` for a quick choice; the user can also type their own answer unless \
-`allow_other` is false. Ask one question at a time and keep it short.",
+`allow_other` is false. Say in `reason` why you stopped (what you cannot decide alone) and \
+point `recommended` at the option you would pick. Ask one question at a time and keep it short.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "question": { "type": "string", "description": "The question, in the user's language" },
+                "reason": {
+                    "type": "string",
+                    "maxLength": MAX_REASON,
+                    "description": "Why you stopped to ask, one or two sentences"
+                },
                 "options": {
                     "type": "array",
                     "items": { "type": "string" },
                     "maxItems": MAX_OPTIONS,
                     "description": "Choices shown as buttons, most likely first"
+                },
+                "recommended": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Index (from 0) of the option you recommend"
                 },
                 "allow_other": {
                     "type": "boolean",
@@ -137,10 +153,34 @@ pub fn parse(args: &Value) -> Result<Question, String> {
     if options.is_empty() && !allow_other {
         return Err("allow_other=false needs at least one option".into());
     }
+    let reason = match args.get("reason").filter(|v| !v.is_null()) {
+        None => String::new(),
+        Some(v) => {
+            let r = v.as_str().ok_or("reason must be a string")?.trim();
+            if r.chars().count() > MAX_REASON {
+                return Err(format!("reason must be at most {MAX_REASON} characters"));
+            }
+            r.to_string()
+        }
+    };
+    let recommended = match args.get("recommended").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => {
+            let i = v
+                .as_u64()
+                .ok_or("recommended must be a non-negative integer")? as usize;
+            if i >= options.len() {
+                return Err("recommended must be the index of one of the options".into());
+            }
+            Some(i)
+        }
+    };
     Ok(Question {
         agent: String::new(),
         question: question.to_string(),
+        reason,
         options,
+        recommended,
         allow_other,
     })
 }
@@ -194,6 +234,19 @@ mod tests {
         assert!(parse(&json!({"question":"x","allow_other":false})).is_err());
         let many: Vec<String> = (0..9).map(|i| i.to_string()).collect();
         assert!(parse(&json!({"question":"x","options":many})).is_err());
+    }
+
+    #[test]
+    fn parse_carries_reason_and_a_recommendation_that_points_at_an_option() {
+        let q = parse(&json!({"question":"x","reason":" two schemas fit ","options":["a","b"],"recommended":1}))
+            .unwrap();
+        assert_eq!(q.reason, "two schemas fit");
+        assert_eq!(q.recommended, Some(1));
+        let q = parse(&json!({"question":"x"})).unwrap();
+        assert!(q.reason.is_empty() && q.recommended.is_none());
+        assert!(parse(&json!({"question":"x","options":["a"],"recommended":1})).is_err());
+        assert!(parse(&json!({"question":"x","recommended":0})).is_err(), "no options to point at");
+        assert!(parse(&json!({"question":"x","reason":"y".repeat(401)})).is_err());
     }
 
     #[test]

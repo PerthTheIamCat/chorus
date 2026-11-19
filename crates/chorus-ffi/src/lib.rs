@@ -1550,6 +1550,130 @@ pub unsafe extern "C" fn chorus_set_question_callback(
     }));
 }
 
+/// Calls a shell callback that fills `buf` with NUL-terminated UTF-8 and
+/// returns a non-zero code. `None` = the shell returned `0` (dismissed).
+/// The buffer is wiped before it is dropped: it may have held a secret.
+fn call_text_callback(
+    cb: extern "C" fn(*mut std::ffi::c_void, *const c_char, *mut c_char, usize) -> c_int,
+    ctx: usize,
+    payload: &str,
+    cap: usize,
+) -> Option<(c_int, String)> {
+    let c = CString::new(payload).unwrap_or_default();
+    let mut buf = vec![0u8; cap];
+    let code = cb(
+        ctx as *mut std::ffi::c_void,
+        c.as_ptr(),
+        buf.as_mut_ptr() as *mut c_char,
+        buf.len(),
+    );
+    let text = if code == 0 {
+        None
+    } else {
+        buf[cap - 1] = 0; // whatever the shell wrote, it ends here
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(0);
+        Some((code, String::from_utf8_lossy(&buf[..end]).into_owned()))
+    };
+    for b in buf.iter_mut() {
+        // Volatile so the wipe is not optimised away.
+        unsafe { std::ptr::write_volatile(b, 0) };
+    }
+    text
+}
+
+/// Takes in a credential for `chorus_request_secret`: given the request as
+/// JSON (`{"agent":"…","name":"STRIPE_API_KEY","reason":"…"}`), write the
+/// value as NUL-terminated UTF-8 into `value` (at most `cap` bytes, NUL
+/// included) and return how long to keep it — `1` this run only, `2` this
+/// project, `3` every project — or return `0` when the person cancelled.
+/// The value goes straight to the Keychain; it is never returned to the
+/// agent or written to the ledger. Called on an MCP server thread.
+pub type SecretCallback = extern "C" fn(
+    ctx: *mut std::ffi::c_void,
+    request_json: *const c_char,
+    value: *mut c_char,
+    cap: usize,
+) -> c_int;
+
+/// Who types in credentials for agents in the open session; `NULL` removes
+/// it. Call again after every open/reopen — it is tied to the session.
+///
+/// # Safety
+/// `e` must be live or null; `callback` and `ctx` must stay valid until
+/// replaced or removed.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_secret_callback(
+    e: *mut ChorusEngine,
+    callback: Option<SecretCallback>,
+    ctx: *mut std::ffi::c_void,
+) {
+    let Some(engine) = e.as_mut() else {
+        return;
+    };
+    let ctx_usize = ctx as usize;
+    let asker = callback.map(|cb| -> chorus_core::request_secret::Asker {
+        std::sync::Arc::new(move |req: &chorus_core::request_secret::Request| {
+            use chorus_core::request_secret::{Answer, Remember, MAX_VALUE};
+            let payload = serde_json::to_string(req).unwrap_or_default();
+            let (code, value) = call_text_callback(cb, ctx_usize, &payload, MAX_VALUE * 4 + 1)?;
+            let remember = match code {
+                2 => Remember::Project,
+                3 => Remember::All,
+                _ => Remember::Once,
+            };
+            Some(Answer { value, remember })
+        })
+    });
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        engine.session.set_secret_asker(asker)
+    }));
+}
+
+/// Answers `chorus_offer_variants`: given the offer as JSON
+/// (`{"agent","title","variants":[{"label","kind":"image"|"url","target","note"}],"recommended"}`),
+/// write the choice as JSON
+/// (`{"chosen":1|null,"comments":[{"variant":0,"x":0.4,"y":0.2,"text":"…"}],"note":"…"}`)
+/// into `answer` (NUL-terminated, at most `cap` bytes) and return non-zero,
+/// or return `0` when the person closed the card. Called on an MCP server thread.
+pub type VariantsCallback = extern "C" fn(
+    ctx: *mut std::ffi::c_void,
+    offer_json: *const c_char,
+    answer: *mut c_char,
+    cap: usize,
+) -> c_int;
+
+/// Room for twenty 500-character comments in any script, with the JSON around them.
+const VARIANTS_ANSWER_CAP: usize = 64 * 1024;
+
+/// Who picks between an agent's variants in the open session; `NULL` removes
+/// it. Call again after every open/reopen.
+///
+/// # Safety
+/// `e` must be live or null; `callback` and `ctx` must stay valid until
+/// replaced or removed.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_variants_callback(
+    e: *mut ChorusEngine,
+    callback: Option<VariantsCallback>,
+    ctx: *mut std::ffi::c_void,
+) {
+    let Some(engine) = e.as_mut() else {
+        return;
+    };
+    let ctx_usize = ctx as usize;
+    let asker = callback.map(|cb| -> chorus_core::variants::Asker {
+        std::sync::Arc::new(move |offer: &chorus_core::variants::Offer| {
+            let payload = serde_json::to_string(offer).unwrap_or_default();
+            let (_, json) = call_text_callback(cb, ctx_usize, &payload, VARIANTS_ANSWER_CAP)?;
+            // A shell that answers with something unreadable counts as a dismissal.
+            serde_json::from_str::<chorus_core::variants::Choice>(&json).ok()
+        })
+    });
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        engine.session.set_variants_asker(asker)
+    }));
+}
+
 /// Claude uses the user's own Chrome through the Claude in Chrome extension
 /// for the open session's next turns (Settings). Off by default.
 ///
@@ -4930,5 +5054,44 @@ mod tests {
             sub_after.status,
             chorus_core::agent_control::SubagentStatus::Cancelled
         );
+    }
+    extern "C" fn fill_secret(
+        ctx: *mut std::ffi::c_void,
+        request: *const c_char,
+        value: *mut c_char,
+        cap: usize,
+    ) -> c_int {
+        // The shell sees the request JSON and writes a value + a code.
+        let req = unsafe { CStr::from_ptr(request) }.to_str().unwrap();
+        assert!(req.contains("STRIPE_API_KEY"), "{req}");
+        let seen = unsafe { &*(ctx as *const std::sync::atomic::AtomicUsize) };
+        seen.store(cap, std::sync::atomic::Ordering::SeqCst);
+        let v = b"sk-test-value-123\0";
+        unsafe { std::ptr::copy_nonoverlapping(v.as_ptr(), value as *mut u8, v.len()) };
+        3
+    }
+
+    extern "C" fn cancel_cb(
+        _: *mut std::ffi::c_void,
+        _: *const c_char,
+        _: *mut c_char,
+        _: usize,
+    ) -> c_int {
+        0
+    }
+
+    #[test]
+    fn text_callback_returns_the_code_and_text_and_none_on_cancel() {
+        let cap = std::sync::atomic::AtomicUsize::new(0);
+        let (code, text) = call_text_callback(
+            fill_secret,
+            &cap as *const _ as usize,
+            r#"{"name":"STRIPE_API_KEY"}"#,
+            chorus_core::request_secret::MAX_VALUE * 4 + 1,
+        )
+        .expect("answered");
+        assert_eq!((code, text.as_str()), (3, "sk-test-value-123"));
+        assert_eq!(cap.load(std::sync::atomic::Ordering::SeqCst), chorus_core::request_secret::MAX_VALUE * 4 + 1);
+        assert!(call_text_callback(cancel_cb, 0, "{}", 64).is_none());
     }
 }
