@@ -35,10 +35,9 @@ final class PreviewModel: NSObject, ObservableObject, WKNavigationDelegate {
         if let u = webView.url?.absoluteString { input = u }
     }
 
-    nonisolated func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
-                             decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
-        let ok = ArtifactPreviewSecurity.allowsNavigation(action.request.url, artifact: false)
-        Task { @MainActor in decisionHandler(ok ? .allow : .cancel) }
+    func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
+                 decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
+        decisionHandler(ArtifactPreviewSecurity.allowsNavigation(action.request.url, artifact: false) ? .allow : .cancel)
     }
 
     nonisolated func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
