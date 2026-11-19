@@ -205,6 +205,8 @@ final class Engine: ObservableObject {
     }
 
     private var handle: Handle?
+    /// Ledger of the open session, for the background learn pass (`LearnIdle`).
+    private var learnDB = ""
     private let queue = DispatchQueue(label: "chorus.engine")
     /// The read-only twin of `handle` (`chorus_reader_open`). Used only on
     /// `readQueue`, never on `queue`: SQLite WAL lets it read while a turn on
@@ -253,6 +255,7 @@ final class Engine: ObservableObject {
     /// workspace tree (checkpoint.rs) — slow on a big folder, so it runs on
     /// `queue`, not the main thread.
     func open(db: String, cwd: String, title: String) {
+        learnDB = db
         checklist = []
         loadSubagents(db: db)
         swap { chorus_engine_open(db, cwd, title) }
@@ -260,6 +263,7 @@ final class Engine: ObservableObject {
 
     /// Reopen a session that already exists, without starting a new one.
     func reopen(db: String, sessionID: Int64) {
+        learnDB = db
         loadChecklist(db: db, sessionID: sessionID)
         loadSubagents(db: db)
         swap { chorus_engine_reopen(db, sessionID) }
@@ -367,6 +371,7 @@ final class Engine: ObservableObject {
                 chorus_set_variants_callback(h, AgentPromptCallbacks.variants, askCtx.raw)
                 chorus_set_computer_use(h, UserDefaults.standard.bool(forKey: Self.computerUseKey) ? 1 : 0)
                 chorus_set_claude_chrome(h, UserDefaults.standard.bool(forKey: Self.claudeChromeKey) ? 1 : 0)
+                chorus_set_claude_auto_memory(h, UserDefaults.standard.bool(forKey: Self.claudeAutoMemoryKey) ? 1 : 0)
                 chorus_set_hide_secret_files(h, Self.hideSecretFiles ? 1 : 0)
             }
             let eventsJSON = h.map { Self.string(from: chorus_transcript_json($0)) } ?? ""
@@ -1702,6 +1707,9 @@ final class Engine: ObservableObject {
     }
 
     nonisolated static let claudeChromeKey = "chorus.claudeChrome"
+    /// Let Claude Code keep its own auto memory. Off unless the user turns it on:
+    /// Chorus memory is the single source (rust: `provider_memory_env`).
+    nonisolated static let claudeAutoMemoryKey = "chorus.claudeAutoMemory"
 
     nonisolated static let hideSecretFilesKey = "chorus.hideSecretFiles"
     /// On unless the user turned it off (`bool(forKey:)` would read unset as off).
@@ -1736,6 +1744,13 @@ final class Engine: ObservableObject {
         UserDefaults.standard.set(on, forKey: Self.claudeChromeKey)
         guard let h = handle else { return }
         queue.async { chorus_set_claude_chrome(h.raw, on ? 1 : 0) }
+    }
+
+    /// Claude's own auto memory (Settings). Stored and applied like `setClaudeChrome`.
+    func setClaudeAutoMemory(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: Self.claudeAutoMemoryKey)
+        guard let h = handle else { return }
+        queue.async { chorus_set_claude_auto_memory(h.raw, on ? 1 : 0) }
     }
 
     /// Settings switch. Stored for the next sessions and applied to the open one.
@@ -1822,7 +1837,7 @@ final class Engine: ObservableObject {
     }
 
     /// Compare mode — fork per agent, run the prompt on each.
-    func compare(_ prompt: String, agents: String, level: Int32,
+    func compare(_ prompt: String, agents: String, level: Int32, options: String? = nil,
                  completion: @escaping (String) -> Void) {
         guard let h = handle, !busy else { return }
         busy = true; lastError = nil
@@ -1830,7 +1845,12 @@ final class Engine: ObservableObject {
         queue.async { [weak self] in
             let json = prompt.withCString { p in
                 agents.withCString { a in
-                    Self.string(from: chorus_compare(h.raw, a, p, level))
+                    if let options {
+                        return options.withCString { o in
+                            Self.string(from: chorus_compare_ex(h.raw, a, p, level, o))
+                        }
+                    }
+                    return Self.string(from: chorus_compare(h.raw, a, p, level))
                 }
             }
             DispatchQueue.main.async {
@@ -2430,6 +2450,7 @@ final class Engine: ObservableObject {
                 if let remaining = r?.remaining {
                     self.uncompacted = Int64(remaining)
                 }
+                LearnIdle.runIfDue(db: self.learnDB)
             }
         }
     }
@@ -2456,6 +2477,11 @@ final class Engine: ObservableObject {
         let id: Int64
         let scope: Int64
         let text: String
+        /// "fact" | "lesson" | "retire" — decided in Rust; absent from older cores.
+        let kind: String?
+        let replaces: Int64?
+        let evidence: String?
+        let suspicious: Bool?
     }
     private struct MemoryState: Codable {
         let ok: Bool?

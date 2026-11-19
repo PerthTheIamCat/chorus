@@ -151,7 +151,15 @@ pub enum AgentEvent {
     /// A tool the agent invoked.
     ToolCall { title: String, kind: String },
     /// The resolution of a tool call.
-    ToolResult { title: String, status: String },
+    ToolResult {
+        title: String,
+        status: String,
+        /// Exit code, when the bridge reports one in `rawOutput`. ACP has no
+        /// standard field for it, so this is best-effort.
+        exit: Option<i32>,
+        /// What the tool printed (text content or `rawOutput`), capped.
+        output: String,
+    },
     /// A provider subagent started (Codex `subagent_spawned`, Claude `Task`).
     /// Its own events are in [`TurnOutcome::children`], not here.
     SubagentSpawned {
@@ -1034,7 +1042,8 @@ impl Transcript {
                     }
                 }
                 if !status.is_empty() {
-                    self.events.push(AgentEvent::ToolResult { title, status });
+                    let (exit, output) = tool_output(update);
+                    self.events.push(AgentEvent::ToolResult { title, status, exit, output });
                 }
             }
             _ => {}
@@ -1623,5 +1632,112 @@ mod usage_tests {
                                       "cost": {"amount": 5.0, "currency": "EUR"}}}),
         );
         assert_eq!(acc.finish().cost_usd, None);
+    }
+}
+
+/// Longest output kept per tool call: head and tail halves, so the start of a
+/// listing and the error at the end of a build both survive.
+const TOOL_OUTPUT_MAX_BYTES: usize = 32 * 1024;
+
+fn cap_output(s: &str) -> String {
+    if s.len() <= TOOL_OUTPUT_MAX_BYTES {
+        return s.to_string();
+    }
+    let half = TOOL_OUTPUT_MAX_BYTES / 2;
+    let mut a = half;
+    while !s.is_char_boundary(a) {
+        a -= 1;
+    }
+    let mut b = s.len() - half;
+    while !s.is_char_boundary(b) {
+        b += 1;
+    }
+    format!("{}\n… [{} bytes omitted] …\n{}", &s[..a], b - a, &s[b..])
+}
+
+/// The exit code and printed output of a `tool_call_update`.
+///
+/// ACP leaves `rawOutput` as "any JSON value" and has no exit-code field
+/// (agentclientprotocol.com/protocol/tool-calls), so this reads the shapes
+/// bridges are known to send and ignores the rest:
+/// - `content: [{type:"content", content:{type:"text", text}}]` — the text;
+/// - `rawOutput` as a string, or an object with `exit_code` / `exitCode` /
+///   `exit_status` and `aggregated_output` / `formatted_output` / `output` /
+///   `stdout` + `stderr`.
+fn tool_output(update: &Value) -> (Option<i32>, String) {
+    let mut text = String::new();
+    if let Some(content) = update.get("content").and_then(Value::as_array) {
+        for c in content {
+            if c.get("type").and_then(Value::as_str) != Some("content") {
+                continue;
+            }
+            let t = c
+                .get("content")
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                .and_then(|b| b.get("text"))
+                .and_then(Value::as_str);
+            if let Some(t) = t {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(t);
+            }
+        }
+    }
+    let mut exit = None;
+    match update.get("rawOutput") {
+        Some(Value::String(s)) if text.trim().is_empty() => text = s.clone(),
+        Some(Value::Object(o)) => {
+            exit = ["exit_code", "exitCode", "exit_status", "exitStatus"]
+                .iter()
+                .find_map(|k| o.get(*k).and_then(Value::as_i64))
+                .and_then(|n| i32::try_from(n).ok());
+            if text.trim().is_empty() {
+                let pick = |k: &str| o.get(k).and_then(Value::as_str).filter(|s| !s.trim().is_empty());
+                if let Some(s) = ["aggregated_output", "formatted_output", "output"]
+                    .iter()
+                    .find_map(|k| pick(k))
+                {
+                    text = s.to_string();
+                } else {
+                    for k in ["stdout", "stderr"] {
+                        if let Some(s) = pick(k) {
+                            if !text.is_empty() {
+                                text.push('\n');
+                            }
+                            text.push_str(s);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    (exit, cap_output(text.trim_end()))
+}
+
+#[cfg(test)]
+mod tool_output_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn reads_text_content_and_exit_code() {
+        let u = json!({
+            "content": [{"type":"content","content":{"type":"text","text":"ok\n"}}],
+            "rawOutput": {"exit_code": 101, "stdout": "ignored when content has text"}
+        });
+        assert_eq!(tool_output(&u), (Some(101), "ok".to_string()));
+        let u = json!({"rawOutput": {"exitCode": 0, "stdout": "a", "stderr": "b"}});
+        assert_eq!(tool_output(&u), (Some(0), "a\nb".to_string()));
+        assert_eq!(tool_output(&json!({"rawOutput": "plain"})), (None, "plain".to_string()));
+        assert_eq!(tool_output(&json!({})), (None, String::new()));
+    }
+
+    #[test]
+    fn huge_output_keeps_both_ends() {
+        let big = format!("START{}END", "x".repeat(100_000));
+        let out = cap_output(&big);
+        assert!(out.len() < 33_000 && out.starts_with("START") && out.ends_with("END"));
     }
 }

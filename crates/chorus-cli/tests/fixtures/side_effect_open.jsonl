@@ -1,0 +1,3 @@
+{"update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "pushing"}}}
+{"update": {"sessionUpdate": "tool_call", "toolCallId": "p1", "title": "git push origin main", "kind": "execute", "status": "pending"}}
+{"update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "(cut off)"}}}

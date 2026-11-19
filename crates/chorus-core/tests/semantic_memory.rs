@@ -96,7 +96,8 @@ fn vectors_from_another_model_are_never_compared() {
     let other = Concepts { id: "fake:other-model", up: true };
     // Nothing stored under `other` yet: it cannot rank, so n-gram decides.
     let got = memory::relevant_with(s.conn(), 1, "how do I log in?", 3, Some(&other)).unwrap();
-    assert_eq!(got.len(), 3);
+    let plain = memory::relevant(s.conn(), 1, "how do I log in?", 3).unwrap();
+    assert_eq!(got.iter().map(|f| f.id).collect::<Vec<_>>(), plain.iter().map(|f| f.id).collect::<Vec<_>>());
     // And `other` does not merge with facts embedded by MODEL.
     assert!(!memory::add_with(s.conn(), 1, "deployment: docker compose containers", Some(&other)).unwrap().merged);
 }

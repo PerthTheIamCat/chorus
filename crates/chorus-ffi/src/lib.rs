@@ -273,7 +273,20 @@ pub unsafe extern "C" fn chorus_route_json(
         }
         let router = Router::new(RouterConfig::local(model).with_preset(preset))
             .map_err(|e| format!("invalid router configuration: {e}"))?;
-        Ok::<_, String>(router.route_with_fallback(&task, &candidates))
+        let route = router.route_with_fallback(&task, &candidates);
+        // Measured outcomes (L4) may swap in a better-proven candidate of the
+        // same cost tier. Any trouble opening the store leaves the proposal as is.
+        Ok::<_, String>(match (route, open_router_store(None)) {
+            (chorus_core::router::RouteResult::Proposal(p), Ok(store)) => {
+                chorus_core::router::RouteResult::Proposal(chorus_core::outcomes::refine_proposal(
+                    store.conn(),
+                    &task,
+                    &candidates,
+                    p,
+                ))
+            }
+            (route, _) => route,
+        })
     })) {
         Ok(Ok(route)) => out(serde_json::json!({"ok":true,"route":route}).to_string()),
         Ok(Err(e)) => err(e),
@@ -1165,8 +1178,12 @@ pub unsafe extern "C" fn chorus_restore(e: *const ChorusEngine, sha: *const c_ch
 // ---- memory ----------------------------------------------------
 
 /// The memory inspector's data: approved facts + the pending proposal
-/// queue. JSON: {"ok":true,"facts":["...", ...],
-///               "pending":[{"id":N,"scope":N,"text":"..."}, ...]}
+/// queue. JSON: {"ok":true,"facts":["...", ...],"pending_count":N,
+///               "pending":[{"id":N,"scope":N,"text":"...",
+///                           "kind":"fact"|"lesson"|"retire","replaces":N|null,
+///                           "evidence":"..."|null,"suspicious":bool}, ...]}
+/// `pending_count` is the "รอคุณดู N ข้อ" badge; `kind`/`replaces`/`evidence`/
+/// `suspicious` are additive (schema v9) and absent-safe for older shells.
 ///
 /// # Safety
 /// `e` must be a live engine handle.
@@ -1177,14 +1194,27 @@ pub unsafe extern "C" fn chorus_memory_state(e: *const ChorusEngine) -> *mut c_c
     };
     let r = catch_unwind(AssertUnwindSafe(|| engine.session.memory_state()));
     match r {
-        Ok(Ok((facts, pending))) => out(serde_json::json!({
-            "ok": true,
-            "facts": facts,
-            "pending": pending.iter().map(|(id, scope, text)| {
-                serde_json::json!({ "id": id, "scope": scope, "text": text })
-            }).collect::<Vec<_>>(),
-        })
-        .to_string()),
+        Ok(Ok((facts, pending))) => {
+            // Detail per entry comes from the queue itself; the tuple above
+            // stays for its older callers.
+            let detail = engine.session.memory_proposals().unwrap_or_default();
+            out(serde_json::json!({
+                "ok": true,
+                "facts": facts,
+                "pending_count": pending.len(),
+                "pending": pending.iter().map(|(id, scope, text)| {
+                    let d = detail.iter().find(|p| p.id == *id);
+                    serde_json::json!({
+                        "id": id, "scope": scope, "text": text,
+                        "kind": d.map_or("fact", |p| p.kind.as_str()),
+                        "replaces": d.and_then(|p| p.replaces),
+                        "evidence": d.and_then(|p| p.evidence.clone()),
+                        "suspicious": d.is_some_and(|p| p.suspicious),
+                    })
+                }).collect::<Vec<_>>(),
+            })
+            .to_string())
+        }
         Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in memory_state"),
     }
@@ -1671,6 +1701,19 @@ pub unsafe extern "C" fn chorus_set_claude_chrome(e: *mut ChorusEngine, on: c_in
     }
 }
 
+/// Allow Claude Code's own auto memory for the open session's next turns
+/// instead of switching it off (Settings). Off by default: Chorus memory is
+/// the single source.
+///
+/// # Safety
+/// `e` must be live or null.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_claude_auto_memory(e: *mut ChorusEngine, on: c_int) {
+    if let Some(engine) = e.as_mut() {
+        engine.session.set_claude_auto_memory(on != 0);
+    }
+}
+
 /// Every folder of the session's project, as a JSON array of paths. Agents
 /// are told about the ones other than the working directory every turn, and
 /// the sandbox lets them write there like in the working directory.
@@ -1902,6 +1945,9 @@ pub unsafe extern "C" fn chorus_run_orchestra(
 struct CompareJson {
     ok: bool,
     branches: Vec<CompareBranchJson>,
+    /// Present when the compare was judged (additive).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verdict: Option<chorus_cli::session::judge::Verdict>,
 }
 #[derive(Serialize)]
 struct CompareBranchJson {
@@ -1916,6 +1962,9 @@ struct CompareBranchJson {
     cost_usd: Option<f64>,
     worktree: Option<String>,
     worktree_branch: Option<String>,
+    /// Evidence and rank when the compare was scored (additive).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    score: Option<chorus_cli::session::judge::LaneScore>,
 }
 
 /// Compare mode: fork per agent, run `prompt` on each, return each branch.
@@ -1941,13 +1990,27 @@ pub unsafe extern "C" fn chorus_compare(
     }
     let policy = Policy::from_level(allow);
 
+    let lanes: Vec<chorus_cli::session::Lane> =
+        specs.into_iter().map(chorus_cli::session::Lane::single).collect();
+    compare_run(engine, &lanes, prompt, policy, &chorus_cli::session::CompareOptions::default())
+}
+
+fn compare_run(
+    engine: &mut ChorusEngine,
+    lanes: &[chorus_cli::session::Lane],
+    prompt: &str,
+    policy: Policy,
+    opts: &chorus_cli::session::CompareOptions,
+) -> *mut c_char {
     let r = catch_unwind(AssertUnwindSafe(|| {
-        engine.session.compare(&specs, prompt, policy)
+        engine.session.compare_with(lanes, prompt, policy, opts)
     }));
     match r {
-        Ok(Ok(branches)) => out(serde_json::to_string(&CompareJson {
+        Ok(Ok(report)) => out(serde_json::to_string(&CompareJson {
             ok: true,
-            branches: branches
+            verdict: report.verdict,
+            branches: report
+                .branches
                 .into_iter()
                 .map(|b| {
                     let (message, stop_reason, error) = match b.result {
@@ -1966,6 +2029,7 @@ pub unsafe extern "C" fn chorus_compare(
                         cost_usd: b.cost_usd,
                         worktree: b.worktree,
                         worktree_branch: b.worktree_branch,
+                        score: b.score,
                     }
                 })
                 .collect(),
@@ -1974,6 +2038,93 @@ pub unsafe extern "C" fn chorus_compare(
         Ok(Err(e)) => err(format!("{e:#}")),
         Err(_) => err("panic in compare"),
     }
+}
+
+/// Compare mode with scoring and judging (gap map E4, F6). `agents` is a CSV;
+/// an entry ending `+orchestra` runs as an orchestra lead. `options_json` is
+/// `{"score":bool,"judge":bool,"discriminating_test":bool,"judge_agent":"..."}`
+/// or NULL for a plain compare. JSON as [`chorus_compare`], plus `score` per
+/// branch and a `verdict` when judged.
+///
+/// # Safety
+/// `e` live; `agents`, `prompt` valid NUL-terminated UTF-8; `options_json` null or the same.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_compare_ex(
+    e: *mut ChorusEngine,
+    agents: *const c_char,
+    prompt: *const c_char,
+    allow: c_int,
+    options_json: *const c_char,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let (Some(agents), Some(prompt)) = (borrow(agents), borrow(prompt)) else {
+        return err("agents/prompt must be valid UTF-8");
+    };
+    let opts: chorus_cli::session::CompareOptions = match borrow(options_json) {
+        Some(j) if !j.trim().is_empty() => match serde_json::from_str(j) {
+            Ok(o) => o,
+            Err(e) => return err(format!("bad options: {e}")),
+        },
+        _ => Default::default(),
+    };
+    let lanes = chorus_cli::session::judge::lanes_from_csv(agents, |n| {
+        chorus_cli::orchestra::provider_for(n).to_string()
+    });
+    if lanes.len() < 2 {
+        return err("compare needs at least two lanes");
+    }
+    compare_run(engine, &lanes, prompt, Policy::from_level(allow), &opts)
+}
+
+/// Stored compare results for the router, newest first, with per
+/// (agent, mode) totals. JSON: `{"ok":true,"results":[...],"stats":[...]}`.
+///
+/// # Safety
+/// `e` must be a live engine.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_compare_results_json(e: *mut ChorusEngine, limit: c_int) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        chorus_cli::session::judge::compare_results(engine.session.store(), limit.max(1) as usize)
+    }));
+    match r {
+        Ok(Ok(rows)) => {
+            let stats = chorus_cli::session::judge::lane_stats(&rows);
+            out(serde_json::json!({ "ok": true, "results": rows, "stats": stats }).to_string())
+        }
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in compare results"),
+    }
+}
+
+/// Turn the cross-provider review on: after a turn that changed files,
+/// `reviewer` (an agent of another provider) checks the change against
+/// `criteria_json` (a JSON string array, may be empty) and answers into the
+/// ledger. A NULL or empty `reviewer` turns it off.
+///
+/// # Safety
+/// `reviewer` and `criteria_json` must be null or valid NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_set_cross_review(
+    e: *mut ChorusEngine,
+    reviewer: *const c_char,
+    criteria_json: *const c_char,
+) -> *mut c_char {
+    let Some(engine) = e.as_mut() else {
+        return err("null engine");
+    };
+    let review = borrow(reviewer).map(str::trim).filter(|r| !r.is_empty()).map(|name| {
+        let spec = specs_from_csv(name).into_iter().next();
+        spec.map(|spec| {
+            chorus_cli::session::CrossReview::new(spec, parse_str_array(borrow(criteria_json)))
+        })
+    });
+    engine.session.set_cross_review(review.flatten());
+    out(serde_json::json!({ "ok": true }).to_string())
 }
 
 fn parse_str_array(s: Option<&str>) -> Vec<String> {
@@ -2365,6 +2516,9 @@ pub unsafe extern "C" fn chorus_compact(e: *const ChorusEngine, limit: i32) -> *
             // True when the pass stopped on the clock rather than finishing.
             // Not an error: it is how a slow summariser is meant to behave.
             "hit_budget": r.hit_budget,
+            // What the learning pass queued for review (additive).
+            "lessons": r.learned.lessons,
+            "retirements": r.learned.retirements,
         })
         .to_string()),
         Ok(Err(e)) => err(format!("{e:#}")),
@@ -3354,6 +3508,136 @@ pub unsafe extern "C" fn chorus_router_clear_learned_json(db_path: *const c_char
     match chorus_core::local_router::clear_learned_routes(store.conn()) {
         Ok(()) => out(serde_json::json!({ "ok": true }).to_string()),
         Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// Learn screen (L3 + L4 + E6): everything the app has learned and may learn.
+///
+/// `db_path` is the project's ledger (`<project>/.chorus/store.db`), `cwd` the
+/// project folder. JSON: `{"ok":true,"autonomy":"ask|auto_with_tests|off",
+/// "drafts":[{name,description,signature,steps,sessions,body}],
+/// "outcomes":{cells,counted_turns,min_samples,enabled,steering},
+/// "notes":null|"…","notes_enabled":bool}`.
+///
+/// # Safety
+/// `db_path` and `cwd` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_learn_state_json(db_path: *const c_char, cwd: *const c_char) -> *mut c_char {
+    let (Some(db), Some(cwd)) = (borrow(db_path), borrow(cwd)) else {
+        return err("db_path and cwd are required");
+    };
+    match catch_unwind(AssertUnwindSafe(|| -> std::result::Result<String, String> {
+        let settings = chorus_core::learn::settings_path()
+            .map(|p| chorus_core::learn::load_settings(&p))
+            .unwrap_or_default();
+        let router = open_router_store(None)?;
+        let outcomes = chorus_core::outcomes::summary(router.conn()).map_err(|e| format!("{e:#}"))?;
+        let ledger = open_router_store(Some(db))?;
+        let notes = chorus_core::project_notes::load(ledger.conn(), cwd);
+        Ok(serde_json::json!({
+            "ok": true,
+            "autonomy": settings.autonomy.as_str(),
+            "drafts": chorus_core::skill_drafts::list(Path::new(cwd)),
+            "outcomes": outcomes,
+            "notes": notes,
+            "notes_enabled": chorus_core::project_notes::model_from_env().is_some(),
+        })
+        .to_string())
+    })) {
+        Ok(Ok(json)) => out(json),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in learn_state"),
+    }
+}
+
+/// The idle learning pass: score recent turns for the router, queue skill
+/// drafts, refresh project notes (only if `CHORUS_SUMMARY_MODEL` is set).
+///
+/// **Off the engine queue:** it opens its own connections, so run it on a
+/// separate queue after the user goes quiet. Bounded by a few seconds, plus
+/// one local-model call when notes are enabled.
+/// JSON: `{"ok":true,"outcome_turns":N,"new_drafts":["…"],"notes":"…","hit_budget":false}`
+///
+/// # Safety
+/// `db_path` and `cwd` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_learn_idle_json(db_path: *const c_char, cwd: *const c_char) -> *mut c_char {
+    let (Some(db), Some(cwd)) = (borrow(db_path), borrow(cwd)) else {
+        return err("db_path and cwd are required");
+    };
+    match catch_unwind(AssertUnwindSafe(|| -> std::result::Result<String, String> {
+        let settings = chorus_core::learn::settings_path()
+            .map(|p| chorus_core::learn::load_settings(&p))
+            .unwrap_or_default();
+        let ledger = open_router_store(Some(db))?;
+        let router = open_router_store(None)?;
+        let report = chorus_core::learn::idle_pass(
+            ledger.conn(),
+            router.conn(),
+            db,
+            Path::new(cwd),
+            &settings,
+            std::time::Duration::from_secs(3),
+        );
+        let mut v = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+        v["ok"] = serde_json::Value::Bool(true);
+        Ok(v.to_string())
+    })) {
+        Ok(Ok(json)) => out(json),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in learn_idle"),
+    }
+}
+
+/// Set how much the app may learn without asking: `ask` (default),
+/// `auto_with_tests` or `off`. Skill drafts are always reviewed by hand.
+///
+/// # Safety
+/// `mode` must be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_learn_set_autonomy(mode: *const c_char) -> *mut c_char {
+    let Some(mode) = borrow(mode).and_then(chorus_core::learn::Autonomy::parse) else {
+        return err("mode must be ask, auto_with_tests or off");
+    };
+    let Some(path) = chorus_core::learn::settings_path() else {
+        return err("HOME environment variable not set");
+    };
+    match chorus_core::learn::save_settings(&path, &chorus_core::learn::Settings { autonomy: mode }) {
+        Ok(()) => out(serde_json::json!({"ok": true, "autonomy": mode.as_str()}).to_string()),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// Accept or reject a queued skill draft. Accepting copies it to
+/// `<cwd>/.chorus/skills/<name>/SKILL.md`, where the projector picks it up.
+/// `action` is `accept` or `reject`. JSON: `{"ok":true,"path":"…"}` on accept.
+///
+/// # Safety
+/// `cwd`, `name` and `action` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_learn_draft_json(
+    cwd: *const c_char,
+    name: *const c_char,
+    action: *const c_char,
+) -> *mut c_char {
+    let (Some(cwd), Some(name), Some(action)) = (borrow(cwd), borrow(name), borrow(action)) else {
+        return err("cwd, name and action are required");
+    };
+    let cwd = Path::new(cwd);
+    match action {
+        "accept" => match chorus_core::skill_drafts::accept(cwd, name) {
+            Ok(p) => out(serde_json::json!({"ok": true, "path": p}).to_string()),
+            Err(e) => err(format!("{e:#}")),
+        },
+        "reject" => match chorus_core::skill_drafts::reject(cwd, name) {
+            Ok(()) => out(serde_json::json!({"ok": true}).to_string()),
+            Err(e) => err(format!("{e:#}")),
+        },
+        _ => err("action must be accept or reject"),
     }
 }
 

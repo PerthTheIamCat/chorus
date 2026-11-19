@@ -132,6 +132,8 @@ struct ContentView: View {
     @State private var lastPrompt = ""
     @State private var comparing = false
     @State private var confirmCompare = false
+    @State private var compareJudge = false
+    @State private var compareOrchestra = false
 
     @State private var rightTab = RightTab.context
     @State private var showPalette = false
@@ -2869,6 +2871,9 @@ struct ContentView: View {
                 Text(agents.map(\.label).joined(separator: " · ")).font(.callout)
             }
             Text("แต่ละตัวใช้โควตา/โทเคนของตัวเองหนึ่งเทิร์น").font(.caption).foregroundStyle(.secondary)
+            Toggle("ตัดสินด้วยหลักฐาน — รันเช็ค+เทสต์ในแต่ละสำเนา แล้วให้อีกเจ้าจัดอันดับ", isOn: $compareJudge)
+                .help("ใช้เวลารันเทสต์และโควตาของผู้ตัดสินอีกหนึ่งเทิร์น · เปิดได้เมื่อโปรเจกต์ trust แล้ว · คุณเลือกผู้ชนะเองเสมอ")
+            Toggle("เทียบ agent เดี่ยว กับ orchestra ของ agent เดียวกัน", isOn: $compareOrchestra)
             HStack {
                 Button("ยกเลิก") { confirmCompare = false }.keyboardShortcut(.cancelAction)
                 Spacer()
@@ -2894,10 +2899,13 @@ struct ContentView: View {
             composerFocus &+= 1
         }
         let level = max(permission.rawValue, 0)
-        let agents = others.joined(separator: ",")
+        var lanes = others
+        if compareOrchestra, let first = others.first { lanes.append(first + "+orchestra") }
+        let agents = lanes.joined(separator: ",")
+        let options: String? = compareJudge ? "{\"judge\":true}" : nil
         let start = {
             comparing = true
-            engine.compare(prompt, agents: agents, level: level) { comparing = false; compareOutput = $0 }
+            engine.compare(prompt, agents: agents, level: level, options: options) { comparing = false; compareOutput = $0 }
         }
         if engine.sessionID < 0 && engine.draft != nil {
             engine.commitDraft { applyModel(model); start() }
@@ -3012,6 +3020,19 @@ struct ContentView: View {
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
+    /// The small label above a queued entry. What the entry *is* was decided in
+    /// Rust (`kind`, `replaces`, `suspicious`); this only words it.
+    private static func proposalTag(_ p: Engine.Proposal) -> String? {
+        var parts: [String] = []
+        if p.suspicious == true { parts.append("⚠ อาจถูกวางยา — มาจากเว็บหรือ session ที่นำเข้า") }
+        switch p.kind {
+        case "lesson": parts.append("บทเรียนจากที่ผ่านมา")
+        case "retire": parts.append("เสนอให้เลิกจำข้อนี้")
+        default: if p.replaces != nil { parts.append("แทนที่ข้อที่จำไว้เดิม") }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     private var memoryPane: some View {
         VStack(spacing: 0) {
             PaneHeader(title: engine.memoryScope.map { "ความจำร่วม · \($0)" } ?? "ความจำของโฟลเดอร์นี้",
@@ -3023,10 +3044,20 @@ struct ContentView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         if !engine.pending.isEmpty {
-                            SectionLabel("รออนุมัติ", count: engine.pending.count, tint: .orange)
+                            SectionLabel("รอคุณดู \(engine.pending.count) ข้อ", count: nil, tint: .orange)
                             ForEach(engine.pending) { p in
                                 HStack(alignment: .top, spacing: 8) {
-                                    Text(p.text).font(.callout).frame(maxWidth: .infinity, alignment: .leading)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        if let tag = Self.proposalTag(p) {
+                                            Text(tag).font(.caption2.weight(.semibold))
+                                                .foregroundStyle(p.suspicious == true ? Color.red : Color.orange)
+                                        }
+                                        Text(p.text).font(.callout)
+                                        if let why = p.evidence {
+                                            Text(why).font(.caption2).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                                     Button { engine.review(p.id, approve: false) } label: { Image(systemName: "xmark") }
                                         .buttonStyle(InteractiveStyle(cornerRadius: 6, padding: .init(top: 4, leading: 6, bottom: 4, trailing: 6)))
                                         .foregroundStyle(.red).help("ปฏิเสธ")
@@ -4367,9 +4398,23 @@ struct CompareResultsSheet: View {
         var worktree: String? = nil
         var worktree_branch: String? = nil
         var cost_usd: Double? = nil
+        var score: Score? = nil
         var id: Int64 { session_id }
     }
-    struct Payload: Codable { let ok: Bool?; let branches: [Branch]? ; let error: String? }
+    /// One check of a scored lane; `passed` is nil when it did not run.
+    struct Check: Codable { var name: String? = nil; var ran: Bool? = nil; var passed: Bool? = nil; var note: String? = nil }
+    struct Score: Codable {
+        var rank: Int? = nil
+        var reason: String? = nil
+        var mode: String? = nil
+        var passed: Bool? = nil
+        var verify: Check? = nil
+        var tests: Check? = nil
+        var discriminating: Check? = nil
+        var rewinds: Int? = nil
+    }
+    struct Verdict: Codable { var judge: String? = nil; var judged: Bool? = nil; var summary: String? = nil; var note: String? = nil }
+    struct Payload: Codable { let ok: Bool?; let branches: [Branch]? ; let error: String?; var verdict: Verdict? = nil }
 
     private var payload: Payload? {
         guard let d = json.data(using: .utf8) else { return nil }
@@ -4408,6 +4453,13 @@ struct CompareResultsSheet: View {
             if let err = payload?.error {
                 Text(err).foregroundStyle(.red)
             }
+            if let v = payload?.verdict {
+                let who = (v.judge ?? "").isEmpty ? "" : "ผู้ตัดสิน \(v.judge ?? "")"
+                let said = [who, v.summary ?? "", v.note ?? ""].filter { !$0.isEmpty }.joined(separator: " · ")
+                if !said.isEmpty {
+                    Text(said).font(.callout).foregroundStyle(.secondary)
+                }
+            }
             ScrollView([.horizontal, .vertical]) {
                 HStack(alignment: .top, spacing: 12) {
                     ForEach(payload?.branches ?? []) { b in column(b) }
@@ -4419,9 +4471,35 @@ struct CompareResultsSheet: View {
         .frame(minWidth: 620, minHeight: 360)
     }
 
+    /// Rank, the checks that ran and why — evidence the human weighs; the
+    /// choice stays theirs.
+    @ViewBuilder private func scoreBadge(_ sc: Score) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                if let r = sc.rank, r > 0 { Text("#\(r)").font(.caption.weight(.bold)) }
+                checkChip("build", sc.verify)
+                checkChip("tests", sc.tests)
+                if sc.discriminating?.ran == true { checkChip("เทสต์แยก", sc.discriminating) }
+            }
+            if let why = sc.reason, !why.isEmpty {
+                Text(why).font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder private func checkChip(_ name: String, _ c: Check?) -> some View {
+        let ran = c?.ran ?? false
+        let ok = c?.passed
+        Label(name, systemImage: !ran ? "minus.circle" : (ok == true ? "checkmark.circle.fill" : "xmark.circle.fill"))
+            .font(.caption2)
+            .foregroundStyle(!ran ? Color.secondary : (ok == true ? Color.green : Color.red))
+            .help(ran ? (c?.note ?? "") : (c?.note ?? "ไม่ได้รัน"))
+    }
+
     @ViewBuilder private func column(_ b: Branch) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(b.agent).font(.headline)
+            if let sc = b.score { scoreBadge(sc) }
             let stats = Self.stats(b)
             if !stats.isEmpty {
                 Text(stats).font(.caption.monospacedDigit()).foregroundStyle(.secondary)

@@ -308,6 +308,11 @@ void chorus_set_computer_use(ChorusEngine *e, int on);
  * (sets CLAUDE_CODE_ENABLE_CFC=1 on the Claude bridge). Off by default. */
 void chorus_set_claude_chrome(ChorusEngine *e, int on);
 
+/* Allow Claude Code's own auto memory (~/.claude/projects/<p>/memory) instead
+ * of setting CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 on the Claude bridge. Off by
+ * default so Chorus memory stays the single source. */
+void chorus_set_claude_auto_memory(ChorusEngine *e, int on);
+
 /* Every folder of the session's project as a JSON array of paths; agents see
  * and (outside read-only turns) may edit the others too.
  * {"ok":true,"folders":[kept…]} or {"error":...}. */
@@ -384,6 +389,23 @@ char *chorus_model_manager_delete_json(const char *model_id);
  *        "message":"...","stop_reason":"...","error":null}, ...]} */
 char *chorus_compare(ChorusEngine *e, const char *agents,
                      const char *prompt, int allow);
+
+/* Compare with scoring/judging. `agents` CSV (`codex,codex+orchestra`);
+ * `options_json` e.g. {"score":true,"judge":true,"discriminating_test":false,
+ * "judge_agent":""} or NULL. Same JSON as chorus_compare plus per-branch
+ * "score" and a top-level "verdict" when judged. */
+char *chorus_compare_ex(ChorusEngine *e, const char *agents,
+                        const char *prompt, int allow,
+                        const char *options_json);
+
+/* Stored compare results, newest first, with per-(agent,mode) stats.
+ * JSON: {"ok":true,"results":[...],"stats":[...]} */
+char *chorus_compare_results_json(ChorusEngine *e, int limit);
+
+/* Cross-provider review after a turn that changed files. NULL/empty
+ * reviewer turns it off. criteria_json: JSON string array or NULL. */
+char *chorus_set_cross_review(ChorusEngine *e, const char *reviewer,
+                              const char *criteria_json);
 
 /* Hand the session to `to`. `goal` required; `done_json`/`pending_json`
  * are JSON string arrays or NULL.
@@ -489,6 +511,19 @@ char *chorus_router_list_learned_json(const char *db_path);
  * router's own pick. */
 char *chorus_router_record_learned_json(const char *db_path, const char *prompt, const char *model, const char *agent, const char *reason, const char *preset);
 char *chorus_router_clear_learned_json(const char *db_path);
+
+/* Learn (skill drafts, measured routing, project notes). db_path = the
+   project's ledger, cwd = its folder. State JSON: {ok, autonomy:"ask"|
+   "auto_with_tests"|"off", drafts:[{name,description,signature,steps,sessions,
+   body}], outcomes:{cells,counted_turns,min_samples,enabled,steering},
+   notes?, notes_enabled}. */
+char *chorus_learn_state_json(const char *db_path, const char *cwd);
+/* Idle pass on its OWN connections — run it on a separate queue, never the
+   engine queue. JSON: {ok, outcome_turns, new_drafts:[…], notes, hit_budget}. */
+char *chorus_learn_idle_json(const char *db_path, const char *cwd);
+char *chorus_learn_set_autonomy(const char *mode);
+/* action: "accept" (copies into .chorus/skills/) or "reject". */
+char *chorus_learn_draft_json(const char *cwd, const char *name, const char *action);
 
 /* Cross-session search and export */
 char *chorus_search_sessions_json(const char *db_path, const char *query);

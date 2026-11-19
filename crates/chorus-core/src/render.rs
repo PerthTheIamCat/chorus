@@ -125,3 +125,165 @@ pub fn dedup_window(items: &mut [ContextItem]) {
         }
     }
 }
+
+// ---- tool results (R1) --------------------------------------------------
+//
+// A tool result is stored as `title → status`, then optionally `[exit N]`,
+// then the tool's own output. The first line is the same shape it always had,
+// so a result with no output is byte-for-byte what older sessions hold.
+
+/// A parsed tool-result body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolResultView<'a> {
+    pub title: &'a str,
+    pub status: &'a str,
+    pub exit: Option<i32>,
+    pub output: &'a str,
+}
+
+/// Build the stored body of a tool result. Newlines in the title would
+/// swallow the output boundary, so they become spaces.
+pub fn encode_tool_result(title: &str, status: &str, exit: Option<i32>, output: &str) -> String {
+    let title = title.replace(['\r', '\n'], " ");
+    let mut s = format!("{title} → {status}");
+    if let Some(code) = exit {
+        s.push_str(&format!("\n[exit {code}]"));
+    }
+    let out = output.trim_end();
+    if !out.is_empty() {
+        s.push('\n');
+        s.push_str(out);
+    }
+    s
+}
+
+/// Parse a body written by [`encode_tool_result`] (or an older `title → status`).
+/// `None` for anything else, e.g. the JSON bodies subagent events use.
+pub fn parse_tool_result(body: &str) -> Option<ToolResultView<'_>> {
+    let (head, rest) = body.split_once('\n').unwrap_or((body, ""));
+    if head.starts_with('{') {
+        return None;
+    }
+    let (title, status) = head.rsplit_once(" → ")?;
+    let status = status.trim();
+    if status.is_empty() || status.contains(' ') {
+        return None;
+    }
+    let (exit, output) = match rest.split_once('\n').unwrap_or((rest, "")) {
+        (first, tail) if first.starts_with("[exit ") && first.ends_with(']') => {
+            match first[6..first.len() - 1].parse::<i32>() {
+                Ok(code) => (Some(code), tail),
+                Err(_) => (None, rest),
+            }
+        }
+        _ => (None, rest),
+    };
+    Some(ToolResultView { title, status, exit, output })
+}
+
+impl ToolResultView<'_> {
+    /// Failed by status or by a non-zero exit code.
+    pub fn failed(&self) -> bool {
+        self.status == "failed" || self.exit.is_some_and(|c| c != 0)
+    }
+
+    /// Says nothing the tool call above it did not already say.
+    pub fn is_bare_success(&self) -> bool {
+        self.output.trim().is_empty()
+            && self.exit.unwrap_or(0) == 0
+            && matches!(self.status, "completed" | "success" | "ok")
+    }
+}
+
+/// A tool result no longer than this is kept whole at every rung.
+const TOOL_RESULT_SHORT_BYTES: usize = 240;
+/// What a recent (L0) result shows of its output: head and tail lines.
+const TOOL_RESULT_HEAD: usize = 8;
+const TOOL_RESULT_TAIL: usize = 8;
+const TOOL_RESULT_L0_MAX_CHARS: usize = 1500;
+
+/// The rungs of one tool result: `(l0, older)`. `None` means "render the body
+/// as it is" — no output to speak of, or short enough that a reference line
+/// would not be shorter.
+///
+/// `older` is what a result past the L0 window becomes: one line naming the
+/// call, its outcome, how many lines it printed and the blob that holds them
+/// (`read src/x.ts → completed, 212 lines (blob:ab12cd34)`), so the agent
+/// knows what was there and can run it again. A failure keeps the last lines of
+/// its output, where the error is. Pure render; no model call.
+pub fn tool_result_rungs(body: &str, blob: Option<&str>) -> Option<(String, String)> {
+    let v = parse_tool_result(body)?;
+    if v.output.trim().is_empty() || body.len() <= TOOL_RESULT_SHORT_BYTES {
+        return None;
+    }
+    let lines = v.output.lines().count();
+    let mut head = format!("{} → {}", v.title, v.status);
+    if let Some(code) = v.exit {
+        head.push_str(&format!(" (exit {code})"));
+    }
+
+    let mut l0 = format!("{head}\n{}", truncate_middle(v.output, TOOL_RESULT_HEAD, TOOL_RESULT_TAIL));
+    if l0.chars().count() > TOOL_RESULT_L0_MAX_CHARS {
+        l0 = l0.chars().take(TOOL_RESULT_L0_MAX_CHARS).collect::<String>() + " …";
+    }
+
+    let mut older = format!("{head}, {lines} lines");
+    if let Some(id) = blob {
+        older.push_str(&format!(" (blob:{})", &id[..id.len().min(8)]));
+    }
+    if v.failed() {
+        let tail: Vec<&str> = v.output.lines().rev().take(3).collect();
+        let tail: Vec<&str> = tail.into_iter().rev().collect();
+        let tail = tail.join("\n");
+        let tail: String = tail.chars().take(300).collect();
+        older.push('\n');
+        older.push_str(&tail);
+    }
+    Some((l0, older))
+}
+
+#[cfg(test)]
+mod tool_result_tests {
+    use super::*;
+
+    #[test]
+    fn encode_parse_roundtrip_and_old_shape() {
+        assert_eq!(encode_tool_result("cargo test", "completed", None, ""), "cargo test → completed");
+        let b = encode_tool_result("cargo test\n-q", "failed", Some(101), "boom\nline2\n");
+        let v = parse_tool_result(&b).unwrap();
+        assert_eq!(v.title, "cargo test -q");
+        assert_eq!(v.status, "failed");
+        assert_eq!(v.exit, Some(101));
+        assert_eq!(v.output, "boom\nline2");
+        assert!(v.failed());
+        assert_eq!(parse_tool_result("{\"event\":\"x → y\"}"), None);
+    }
+
+    #[test]
+    fn output_that_looks_like_an_arrow_does_not_break_the_header() {
+        let b = encode_tool_result("read a.ts", "completed", None, "a → b\nc");
+        let v = parse_tool_result(&b).unwrap();
+        assert_eq!((v.title, v.status), ("read a.ts", "completed"));
+        assert!(!v.is_bare_success());
+    }
+
+    #[test]
+    fn old_results_become_one_line_with_blob_ref() {
+        let out: String = (0..212).map(|i| format!("line {i} of the file\n")).collect();
+        let b = encode_tool_result("read src/x.ts", "completed", None, &out);
+        let (l0, old) = tool_result_rungs(&b, Some("ab12cd34ef56")).unwrap();
+        assert_eq!(old, "read src/x.ts → completed, 212 lines (blob:ab12cd34)");
+        assert!(l0.contains("lines omitted") && l0.len() < b.len() / 4);
+    }
+
+    #[test]
+    fn failures_keep_the_tail_and_short_results_stay_whole() {
+        let out: String = (0..50).map(|i| format!("noise {i}\n")).collect::<String>() + "error: it broke\n";
+        let b = encode_tool_result("cargo build", "failed", Some(101), &out);
+        let (_, old) = tool_result_rungs(&b, None).unwrap();
+        assert!(old.starts_with("cargo build → failed (exit 101), 51 lines"));
+        assert!(old.ends_with("error: it broke"));
+        let short = encode_tool_result("ls", "completed", None, "a\nb");
+        assert!(tool_result_rungs(&short, None).is_none());
+    }
+}
