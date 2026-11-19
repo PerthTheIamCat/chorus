@@ -47,11 +47,11 @@ Swift ทำแค่วาดกับรับ input เพื่อให้�
 **Phase 0–2 ครบ + macOS shell ครบ + warm tier + UX v2 (workbench / orchestra / sub sessions / live updates) ครบ**
 — บน Linux: เทสต์ผ่าน 382 · ล้ม 6 ตัวที่ต้องมี Seatbelt (ดู 7.22) · clippy `-D warnings` สะอาด · build 0 warning · bench invariant ครบ
 — CI (`.github/workflows/ci.yml`, macOS) รัน test/clippy/bench/swift ทุก push+PR — **ยังไม่เคยเห็นมันรันจริง** ดูผลรอบแรกก่อนเชื่อ
-(ตัวเลขนี้ verify บน container Linux 19 ต.ค. — ยังไม่ได้รันซ้ำบน macOS · `SCHEMA_VERSION` = 8)
+(ตัวเลขนี้ verify บน container Linux 19 ต.ค. — ยังไม่ได้รันซ้ำบน macOS · `SCHEMA_VERSION` = 9)
 
 | crate | ทำอะไร |
 |---|---|
-| `chorus-core` | ledger (+ fork-chain `history()`), blob store, memory + approve queue (v2), token counter, render, context assembler, handoff brief, projector, checkpoint (shadow git + `apply_reverse`), compaction (Extractive + **Ollama**) — **รังส์ L1/L2 เก็บลงตาราง `summary` (เพิ่มใน schema v3 · ตอนนี้ `SCHEMA_VERSION` = 8) ไม่ generate ตอน assemble**, **mcp (Streamable-HTTP: `memory_propose` — ทำงานกับ Codex)** |
+| `chorus-core` | ledger (+ fork-chain `history()`), blob store, memory + approve queue (v2), token counter, render, context assembler, handoff brief, projector, checkpoint (shadow git + `apply_reverse`), compaction (Extractive + **Ollama**) — **รังส์ L1/L2 เก็บลงตาราง `summary` (เพิ่มใน schema v3 · ตอนนี้ `SCHEMA_VERSION` = 9) ไม่ generate ตอน assemble**, **mcp (Streamable-HTTP: `memory_propose` — ทำงานกับ Codex)** |
 | `chorus-acp` | ACP client + `acp-probe` + mock (`--fail`) + `CodexAgent` + `bridge_for` (codex/claude/antigravity) · strip `CLAUDECODE` |
 | `chorus-cli` | lib+bin · `bench`/`run`(+`--chain`/`--read-only`)/`handoff`/`memory`/`compare` · `Session` engine |
 | `chorus-ffi` | C ABI (`chorus.h`) — engine/run_turn(+interactive callback)/run_relay/compare/handoff/events_since/working_diff/snapshot/restore/reject_hunks/memory_state+review/**compact/uncompacted/task_state** · JSON ล้วน · panic-guarded |
@@ -123,6 +123,7 @@ cargo run -p chorus-cli -- memory pending --db /tmp/s.db          # approve queu
 cargo run -p chorus-cli -- compact --db /tmp/s.db --session 1 [--limit N]   # เติม warm tier (L1/L2)
 cargo run -p chorus-cli -- demo          # เล่าทั้งเรื่องด้วย agent ปลอม ไม่ต้องมี API key
 scripts/smoke-real-agents.sh            # e2e กับ agent จริงที่ login ไว้ (ส่ง request จริง ไม่กี่ครั้ง)
+python3 evals/handoff/live/eval.py --dry-run   # ตรวจ 16 เคส handoff สด (ไม่เรียก agent) · ไม่มี --dry-run = รันจริงกับ claude/codex ที่ login ไว้ · --matrix = ปิดทีละส่วน (evals/handoff/live/README.md)
 cargo run -p chorus-cli -- secrets [list|forget NAME|scan FILE]   # ชื่อ secret ที่จำไว้ (ไม่มีค่า) · scan บอกแค่บรรทัด+ชนิด
 cargo run -p chorus-cli -- doctor        # ทำไมเทิร์นถึงรัน/ไม่รัน — agent, login, bridge, env, error ที่ failover ไม่รู้จัก
 cargo run -p chorus-cli -- sessions list                     # session ของ Claude Code / Codex / Gemini CLI ในเครื่อง
@@ -150,6 +151,8 @@ crates/chorus-core/src/
   blob.rs       content-addressed: BLAKE3 + zstd + dedup + GC
   ledger.rs     append/get/tail/fork/search + history() (fork-chain walk) — DAG, fork ไม่ copy อะไรเลย
   memory.rs     fact store (≤140 ตัวอักษร) + render ไม่มี metadata + propose/pending/approve/reject
+                + propose_with (ขัดของเดิม = replace #id) + ตัวนับ injected/referenced + suggest_retirements (7.30)
+  lessons.rs    ร่างบทเรียนจาก ledger เข้าคิวอนุมัติ — นอก turn path เท่านั้น (7.30)
   tokens.rs     ตัวประมาณ token ที่รู้จักภาษาไทย + cache
   render.rs     table/manifest/truncate/dedup_window — รูปแบบที่ส่งเข้าโมเดล
   context.rs    budget allocator + rung ladder L0→L1→L2
@@ -206,9 +209,12 @@ evals/handoff/                          สไปก์ที่ 2 (README + เ
 | secrets | 3 ชั้นใน `chorus-core/src/secrets.rs`: **mask** ทุกข้อความที่ผ่าน Chorus (user/agent/แนบไฟล์/memory/import/ชื่อ session) เป็น `$CHORUS_SECRET_<KIND>_<N>` · **inject** ค่าจริงเป็น env ของ bridge เฉพาะชื่อที่ prompt อ้าง · **block** Seatbelt `deny file-read-data` บน `.env*`/`*.pem|key|p12|pfx|jks|keystore` ใน workspace แล้ว Chorus อ่าน `.env` เองส่งเป็น env | ค่าอยู่ใน login Keychain (`security -i` ทาง stdin, hex) · ดิสก์มีแค่ชื่อ+BLAKE3 (`~/.chorus/secrets.json`) · ไม่มี regex dep — scanner เขียนมือ |
 | โปรเจกต์หลายโฟลเดอร์ | Swift ส่ง `p.folders` ทั้งหมด (`chorus_set_project_folders`) → `Session::project_folders` (ตัด cwd/ซ้ำ/หายไป) · ทุกเทิร์นต่อท้าย prompt ด้วยรายชื่อ+absolute path (`project_folders_guidance`, ไม่ลง ledger) · Seatbelt ให้แต่ละโฟลเดอร์เหมือน cwd: Workspace เขียนได้พร้อม carve-out `.git/hooks`/`.git/config`/`.chorus`/`.env` · ReadOnly deny | เพื่อนเลือก "อ่านและแก้ได้" 20 ต.ค. 2026 · **ห้ามให้ `/`, `$HOME` หรือบรรพบุรุษของมันเป็นโฟลเดอร์ที่เขียนได้** (`too_broad`) · rewind/Changes/shadow repo ยังครอบแค่ cwd |
 | embedding ของความจำ | **เปิดเองด้วย `CHORUS_EMBED_MODEL`** (โมเดล embedding ของ Ollama เช่น `nomic-embed-text`) · ไม่ตั้ง/Ollama ล่ม = n-gram เดิมทุกอย่าง · vector เก็บตาราง `fact_embedding` (v8, ข้อมูลที่สร้างใหม่ได้ ลบทิ้งได้) แยกตาม `model` ห้ามเทียบข้ามโมเดล · fact ใหม่ที่ cosine ≥ 0.92 กับของเดิมถูก merge · `chorus memory embed` เติม vector ให้ fact เก่า | spec §6 · query ต้องถูก embed บน path ของเทิร์น (ข้อ 7.2b ห้าม network) จึงเปิดแบบ opt-in + timeout 600 ms + พัก 60 วิหลังล้มเหลว ไม่ให้ Ollama ที่ดับมาหน่วงทุกเทิร์น |
-| agent ถาม user | MCP tool `chorus_ask_user` (`chorus-core/src/ask_user.rs`) ไม่ใช่ฟีเจอร์ของ provider · list เฉพาะ session ที่ shell ลงทะเบียนคนตอบ (`chorus_set_question_callback`) · ใช้ได้ทุกโหมดสิทธิ์ · ปิดโดยไม่ตอบ = บอก agent ให้ตัดสินใจเองแล้วบอกสมมติฐาน · คำตอบ mask ก่อนเข้า ledger | ACP มีแค่ `session/request_permission` (yes/no) · ⚠️ Codex ตั้ง MCP tool timeout เอง (ดีฟอลต์ ~60 วิ) คำตอบที่ช้ากว่านั้นอาจไม่ถึง — ยังไม่ได้วัด |
+| agent ถาม user | MCP tool `chorus_ask_user` (`chorus-core/src/ask_user.rs`) ไม่ใช่ฟีเจอร์ของ provider · การ์ด inline ในแชท (ไม่ใช่ sheet) พร้อม `reason`/`recommended` · list เฉพาะ session ที่ shell ลงทะเบียนคนตอบ (`chorus_set_question_callback`) · ใช้ได้ทุกโหมดสิทธิ์ · ปิดโดยไม่ตอบ = บอก agent ให้ตัดสินใจเองแล้วบอกสมมติฐาน · คำตอบ mask ก่อนเข้า ledger | ACP มีแค่ `session/request_permission` (yes/no) · ⚠️ Codex ตั้ง MCP tool timeout เอง (ดีฟอลต์ ~60 วิ) คำตอบที่ช้ากว่านั้นอาจไม่ถึง — ยังไม่ได้วัด |
+| agent ขอ secret / เสนอหลายแบบ | MCP tool `chorus_request_secret` (`request_secret.rs`) กับ `chorus_offer_variants` (`variants.rs`) · list เฉพาะ session ที่ shell ลงทะเบียนคนตอบ (`chorus_set_secret_callback` / `chorus_set_variants_callback`) · secret: ค่าไหล shell → Rust → `Vault::put_requested` (Keychain) เท่านั้น — ไม่อยู่ใน args/ผลของ tool/ledger, `Answer` ไม่พิมพ์ค่าใน `{:?}` · ฉีดเป็น env ตั้งแต่ **เทิร์นถัดไป** (env ของ bridge ที่รันอยู่เปลี่ยนไม่ได้) ทั้งชื่อที่ขอและ `CHORUS_SECRET_<NAME>` · scope เก็บใน `secrets.json` ฟิลด์ `env`+`scope` (`all` / `project:<cwd>`) ส่วน "แค่ตอนนี้" อยู่ในหน่วยความจำเท่านั้นไม่ลง Keychain/index · ชื่อที่ `reserved_env` ขอไม่ได้ · variants: รูปต้องอยู่ในโฟลเดอร์โปรเจกต์ (canonicalize) ส่วน URL ต้องเป็น loopback · ผลกลับเป็นข้อความล้วน | ห้ามใช้ MCP elicitation form mode ขอ secret (สเปกห้าม) · ⚠️ Codex ตั้ง MCP tool timeout เอง (~60 วิ) พิมพ์ key ช้ากว่านั้นอาจไม่ถึง — ยังไม่ได้วัด · Swift: `SecretRequestSheet` ใช้ `SecureField` และห้าม log/เก็บค่า (เทสต์ `macos_app_contract` กันไว้) |
 | อนุญาตตลอด session | callback คืน `2` → `PermissionGrants` (ใน `ChorusEngine`, หน่วยความจำเท่านั้น) key = tool title + kind · Claude ตั้ง title ของ shell เป็นตัวคำสั่ง → คำสั่งใหม่ยังถาม | logic อยู่ Rust ไม่ใช่ Swift (2.3) |
 | syntax highlight | lexer ในตัว (`highlight.rs`) เป็นค่าเริ่มต้น · grammar tree-sitter **ติดตั้ง/ลบได้** จาก Settings › ภาษา (`grammars.rs`): `curl`+`tar` source จาก GitHub (HEAD) → `tree-sitter-loader` compile `parser.c` เป็น dylib ด้วย C compiler ของเครื่อง → `~/.chorus/grammars/<id>/` (marker `installed` เขียนท้ายสุด) · ติดตั้งแล้วแทน lexer เฉพาะภาษานั้น | เพื่อนเลือกทาง ก 26 ต.ค. 2026 (เพิ่ม dep tree-sitter/-highlight/-loader) · catalog มีเฉพาะ repo ที่ commit `src/parser.c` ไว้ (ไม่ต้องมี tree-sitter CLI/Node) — Swift/SQL/Markdown ยังใช้ lexer · ยังไม่เคยติดตั้งจริงบน Mac (`cargo test -- --ignored installs_compiles`) |
+| ความจำที่เรียนรู้ได้ | ทุกอย่างผ่านคิวอนุมัติเดิม (`fact_proposal` + คอลัมน์ `kind` fact/lesson/retire, `replaces`, `evidence`, `suspicious`) · **ไม่มีอะไรกลายเป็นความจำเอง** · บทเรียนมาจากกฎล้วน ๆ บน ledger (Ollama เกลาถ้อยคำได้เฉพาะเมื่อตั้ง `CHORUS_SUMMARY_MODEL`) · ตัวนับ `injected`/`referenced` เขียนหลังเทิร์นใน `persist_outcome` ไม่ใช่ใน `assemble_context` | schema v9 (Perth อนุมัติ 18 พ.ย. 2026) · ข้อที่มาจาก session นำเข้า/เว็บ = `suspicious` ห้ามรับอัตโนมัติ |
+| auto memory ของ Claude Code | ปิดดีฟอลต์ด้วย `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` บน bridge ของ Claude (`provider_memory_env`) · Settings › ความปลอดภัย เปิดกลับได้ | ความจำต้องมีแหล่งเดียว (กฎ 2.2) — ตามเอกสาร env-vars + agent-sdk/claude-code-features 18 พ.ย. 2026 · ⚠ ยังไม่ได้เช็คบน Mac ว่า claude-agent-acp ทำงานกับ auto memory จริงไหม |
 | bridge ของแต่ละเจ้า | override ได้ด้วย env (`CHORUS_CLAUDE_BRIDGE` ฯลฯ) | package ถูก rename มาแล้วครั้งหนึ่ง ไม่ควรต้อง rebuild เพื่อตามชื่อ |
 
 ---
@@ -545,13 +551,32 @@ cache ใน `RepoMapCache` (หน่วยความจำ ไม่ลง�
 - เทสต์ตั้ง `CHORUS_SECRETS_BACKEND=memory` — `user_vault()` เช็คทุกครั้ง ไม่งั้น `cargo test` บน Mac จะเขียนค่าปลอมลง Keychain จริงของคนรัน · Keychain ล็อก (CI) → เก็บในหน่วยความจำรอบนี้แทน (`fallback`) ยัง mask และ inject ได้
 - เทสต์สร้าง key ปลอมตอนรัน (`fake()`) ห้ามเขียนเป็น literal — GitHub push protection จะบล็อก push
 
-### 7.29 เรียนรู้จากงานที่ผ่านมา — สิ่งที่ต้องรู้ (18 พ.ย. 2026 · ยังไม่เคยรันกับ agent จริงบน Mac)
+### 7.29 multi-agent v2 — แผน, ลูกถาม lead, board (18 พ.ย. 2026 · ยังไม่เคยรันกับ agent จริงบน Mac)
+
+- **แผนอยู่ใน ledger** (`chorus-core/src/orchestra_plan.rs`): event `ToolCall` เนื้อ `{"event":"orchestra_plan",...}` (ต้อง < 2 KB ไม่งั้นลง blob แล้วหาไม่เจอ → ตรวจขนาดตอนบันทึก) + checklist ของ lead · `check_spawn` บังคับที่ MCP `chorus_spawn_agent` เท่านั้น (ปุ่ม spawn ของผู้ใช้ผ่าน FFI ไม่ต้องมีแผน) · บังคับเฉพาะ **writer** (มี worktree) ที่จะรันข้าง writer อีกตัว — ผู้อ่านรันขนานได้เหมือนเดิม
+- **`TaskSpec` มีฟิลด์เพิ่ม** `plan_task`, `signatures`, `prefer_provider` (เก็บในคอลัมน์ `task` เดิม ไม่แตะ schema) · `prefer_provider` ไม่ว่าง = ลูกแบบ "ขอความเห็น" (read-only, ไม่นับเป็นงานใน plan): `other_than:<agent>` หรือชื่อ provider
+- **ตรวจงานลูก** (`chorus-cli/src/child_verify.rs`): verify ของโปรเจกต์ + `done_when` (`sh -c` ใน worktree) ผ่าน `TrustStore::consent_for_worktree` + sandbox Workspace — โปรเจกต์ไม่ trust หรือไม่มี sandbox = **ไม่ตรวจและบอกว่าไม่ได้ตรวจ** ไม่ใช่ผ่านเงียบ ๆ · ส่งกลับให้ลูกเดิมแก้ 1 ครั้ง · `done_when` มาจาก agent (lead) จึงห้ามรันนอก Consent เด็ดขาด
+- **loop guard ของ lead** ใช้ `chorus_acp::cancel_own_turn()` (ฆ่าเฉพาะ `ACTIVE_PID`) ไม่ใช่ `cancel_active()` · ห้ามตั้ง `CANCELLED` ระดับโปรเซสจากการหยุดของ Chorus เอง เพราะ thread ของลูกอ่านค่าเดียวกันแล้วนึกว่าถูกกด Stop
+- **child→lead / board** เก็บใน `subagent_message` (`child_to_parent`, `board`) และสะท้อนเป็น `Msg` ใน ledger ของ lead (นำหน้า ❓ / 📌 / 🔎) เพื่อให้เห็นในเธรดและเข้า context เทิร์นถัดไปเอง · เพดาน: 3 คำถาม + 5 โน้ต ต่อลูก, 3 ความเห็นต่อเทิร์น · ข้อความ mask ผ่าน `secrets::user_vault()` ก่อนลง ledger
+- เทสต์ลูกที่เป็น read-only (รวม "ขอความเห็น") รันไม่ได้บน Linux (ไม่มี Seatbelt, 7.22) — เทสต์ `orchestra_v2` ของ chorus-cli จึงอ่านว่า agent ไหนรันจากข้อความล้มเหลวเมื่อไม่ใช่ macOS
+
+### 7.30 ความจำที่เรียนรู้ได้ — กับดักที่ต้องรู้ (18 พ.ย. 2026 · วัดบน Linux เท่านั้น)
+
+- **ตัวนับห้ามขยับใน `assemble_context`** (7.2b) — มันแค่จดว่า fact ไหนเข้า prompt จริง (เช็คว่าข้อความอยู่ในผลที่ประกอบ ไม่ใช่แค่ถูกดึงมา) ลง `injected_facts` แล้ว `account_memory` ใน `persist_outcome` เป็นคนเขียน · เทิร์นที่ล้ม/relay ที่ยังไม่ได้ persist ไม่นับ · assemble ซ้ำระหว่างเทิร์น (ปุ่มดู context) **แทน**ชุดเดิม ไม่สะสม · ไฟล์ที่ฉาย (CLAUDE.md/AGENTS.md) ไม่นับเป็น injected
+- **`referenced` เป็นการเดาแบบหยาบ:** fact ที่มีศัพท์ละติน → path/identifier ยาว ≥10 ตัวปรากฏ หรือคำสำคัญครึ่งหนึ่งขึ้นไปปรากฏ · fact ไทยล้วนใช้ 5-gram ซ้อนกัน ≥50% · fact ที่เป็นแค่ stop word ไม่เคยถูกนับ · ปรับเกณฑ์ที่ `memory::mentions` พร้อมเทสต์ `an_output_mentions…`
+- **เกณฑ์ "ขัดกัน" ของ `propose_with`:** n-gram cosine ≥ 0.55 (วัด: "ใช้ pnpm ไม่ใช่ npm" vs "ใช้ yarn ไม่ใช่ npm" = 0.69, "Postgres 15" vs "16" = 0.92, คำสั่งต่างกัน ≈0.5) · เปิด embedding ใช้ cosine ≥ `DEDUP_COSINE` (0.92) กับ vector ที่เก็บไว้ · ประโยคเดียวกันเป๊ะ = ไม่เพิ่ม · **บทเรียนไม่ผ่านทางนี้** (บทเรียนไม่ใช่ถ้อยคำใหม่ของ fact เดิม ห้ามกลายเป็น "แทนที่")
+- **L1 อ่านต่อจาก watermark** (`session.lessons_seq/lessons_ms`) ที่ขยับหลังคิวสำเร็จเท่านั้น — ข้อที่ถูกปฏิเสธเลยไม่กลับมา · ข้อที่เกินเพดานรอบนั้น (5) ถูกทิ้ง ไม่เลื่อนไปรอบหน้า (ตั้งใจ) · ต้องมี `exit code` จริงถึงจะแม่นกว่านี้: ตอนนี้ ledger เก็บแค่ `title → failed|completed` ของ tool (R5 จะเพิ่มหลักฐาน) · Diff event มีเฉพาะตอน client เป็นคนเขียนไฟล์ (7.11) บทเรียน "ล้มแล้วผ่านหลังแก้ไฟล์…" จึงอาจไม่มีรายชื่อไฟล์
+- **`reject_hunks` เขียน Decision** `ผู้ใช้ปฏิเสธการแก้ไข <ไฟล์>` ลง ledger (ไม่มี event ชนิดใหม่) — มันเข้า `task_state.done` เหมือน Decision อื่น ซึ่งตั้งใจ: agent ถัดไปควรรู้ว่าส่วนนั้นถูกทิ้ง
+- ใช้ `chorus_core::lessons::session_tainted` ตัดสิน `suspicious` ของข้อที่ agent เสนอ: นำเข้า session หรือเรียก tool `fetch` ตั้งแต่ข้อความล่าสุดของผู้ใช้
+
+### 7.31 เรียนรู้จากงานที่ผ่านมา — สิ่งที่ต้องรู้ (18 พ.ย. 2026 · ยังไม่เคยรันกับ agent จริงบน Mac)
 
 - **router เรียนรู้จากผลจริง** (`outcomes.rs`): คะแนนเทิร์น = เทสต์ผ่าน ∧ ไม่ถูก rewind (fork ชื่อลงท้าย `(ย้อนกลับ)`) ∧ ไม่มี handoff แบบ context_exhausted/failover · handoff เพราะโควตา/rate limit/ผู้ใช้ขอ = เป็นกลาง ข้ามทั้งเทิร์น · เทิร์นไม่มีหลักฐาน (ไม่รันเทสต์ ไม่ถูก rewind ไม่ถูกส่งต่อ) ไม่ถูกเก็บ · "เทสต์ผ่าน" ดูจาก status `completed` ของคำสั่งทดสอบ ไม่มี exit code (bridge ไม่ส่งมา) — ถ้า bridge ไหนรายงาน completed ทั้งที่ exit≠0 ตัวเลขจะเอนเอียง
 - **ห้ามข้ามระดับราคา**: ข้อเสนอจาก outcome ต้องอยู่ tier เดียวกับตัวที่ router เลือก (`tier_of` = ราคา output ≥ $15/M) — นโยบายเจ้าของ: คิดหนัก→ใหญ่ ตามแผน→เล็ก · ต้อง ≥5 เทิร์น/เซลล์ และ Wilson lower bound ชนะตัวเดิม ≥0.05 และ ≥0.5
 - ledger เป็นรายโปรเจกต์ (`<โปรเจกต์>/.chorus/store.db`) แต่ router เป็น global → idle pass คัดลอกคะแนนไป `~/.chorus/store.db` (`router_outcome`, key มี `src`) · `chorus_route_json` อ่านที่นั่นผ่าน `outcomes::refine_proposal` · `chorus_route_fast_json` ไม่ได้ถูก Swift เรียก
 - **ร่าง skill ไม่เปิดใช้เอง** (`skill_drafts.rs`) อยู่ `.chorus/skill-drafts/` (agent เขียนไม่ได้ — carve-out `.chorus` ของ Seatbelt) · autonomy ไม่มีผลกับ skill
 - idle pass (`chorus_learn_idle_json`) เปิด connection ของตัวเอง รันบน queue แยก ไม่แตะ queue ของ engine (7.7) · โน้ตโปรเจกต์อ่านใน `assemble_context` ได้เฉพาะตอนตั้ง `CHORUS_SUMMARY_MODEL` และเป็นการอ่านแถวที่เก็บไว้เท่านั้น (7.2b)
+- ตาราง `project_notes` สร้างใน `schema.rs` (บล็อก v9, `CREATE TABLE IF NOT EXISTS`) ไม่ใช่ lazy · บทเรียนจาก `Session::learn` ผ่าน `learn::decide()` ตามโหมดอัตโนมัติ: ถามก่อน = เข้าคิว · ปิด = ทิ้ง · ยอมรับเมื่อเทสต์ผ่าน = รับเองเฉพาะ `FixedAfterFailing` ที่คำสั่งเป็นเทสต์ และไม่ `suspicious`
 
 ### 7.3 repo เงาสำหรับ checkpoint
 ต้องยึด `.gitignore` ของผู้ใช้ ไม่งั้น `.chorus/` จะโตกว่าโปรเจกต์จริง

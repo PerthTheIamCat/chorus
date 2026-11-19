@@ -36,19 +36,6 @@ pub fn model_from_env() -> Option<String> {
         .filter(|m| !m.is_empty())
 }
 
-fn init(c: &Connection) -> Result<()> {
-    c.execute_batch(
-        "CREATE TABLE IF NOT EXISTS project_notes (
-            cwd        TEXT PRIMARY KEY,
-            notes      TEXT NOT NULL,
-            basis      TEXT NOT NULL,
-            model      TEXT NOT NULL,
-            created_ms INTEGER NOT NULL
-        );",
-    )?;
-    Ok(())
-}
-
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -215,7 +202,6 @@ pub fn refresh_with(
     generate: &dyn Fn(&str) -> Option<String>,
     mask: &dyn Fn(&str) -> String,
 ) -> Result<Refresh> {
-    init(c)?;
     let facts = gather(c, cwd)?;
     if facts.is_thin() {
         return Ok(Refresh::Thin);
@@ -274,7 +260,6 @@ pub fn for_context(c: &Connection, cwd: &str) -> Option<String> {
 
 /// The stored note regardless of the switch (for the Learn screen).
 pub fn load(c: &Connection, cwd: &str) -> Option<String> {
-    init(c).ok()?;
     c.query_row("SELECT notes FROM project_notes WHERE cwd = ?1", [cwd], |r| r.get(0))
         .optional()
         .ok()
@@ -284,7 +269,6 @@ pub fn load(c: &Connection, cwd: &str) -> Option<String> {
 
 /// Forget the stored note for a project.
 pub fn clear(c: &Connection, cwd: &str) -> Result<()> {
-    init(c)?;
     c.execute("DELETE FROM project_notes WHERE cwd = ?1", [cwd])?;
     Ok(())
 }

@@ -96,3 +96,6 @@ graphify-out/
 *.dmg
 apps/macos/dist/
 dist/
+
+# ── live handoff eval output (per-run JSON; contains workspace paths) ──
+evals/handoff/live/runs/
