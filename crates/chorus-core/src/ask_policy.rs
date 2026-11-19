@@ -64,7 +64,9 @@ impl AskPolicy {
     }
 
     pub fn current() -> Self {
-        Self::path().map(|p| Self::load_from(&p)).unwrap_or_default()
+        Self::path()
+            .map(|p| Self::load_from(&p))
+            .unwrap_or_default()
     }
 
     pub fn save_to(&self, path: &Path) -> Result<()> {
@@ -98,7 +100,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("p.json");
         assert_eq!(AskPolicy::load_from(&f), AskPolicy::default());
-        let p = AskPolicy { children: ChildQuestions::User, lead: LeadEscalation::Often };
+        let p = AskPolicy {
+            children: ChildQuestions::User,
+            lead: LeadEscalation::Often,
+        };
         p.save_to(&f).unwrap();
         assert_eq!(AskPolicy::load_from(&f), p);
         std::fs::write(&f, "not json").unwrap();
