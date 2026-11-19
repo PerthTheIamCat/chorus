@@ -34,12 +34,14 @@ struct SettingsGroup<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        Section {
-            content()
-        } header: {
-            Text(title)
-        } footer: {
-            if let footer { Text(footer) }
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.headline).padding(.horizontal, 4)
+            VStack(alignment: .leading, spacing: 12) { content() }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.primary.opacity(0.08)))
+            if let footer { Text(footer).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4) }
         }
     }
 }
