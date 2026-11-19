@@ -63,6 +63,9 @@ extension ContentView {
             if let planAgents = engine.pendingPlanAgents, !engine.busy {
                 planApprovalBar(agents: planAgents)
             }
+            HandoffPrepStrip(prep: engine.handoffPrep) { id in
+                engine.agents.first { $0.id == id }?.label ?? id
+            }
             ComposerField(box: draftBox, suggestions: suggest, onSubmit: submit,
                           onImportURLs: importFiles,
                           onPasteImage: { data, mime in importPastedImage(data, mime: mime) },
@@ -531,6 +534,7 @@ extension ContentView {
             engine.setModel(agent: agentID, model: target)
         }
         engine.liveAgent = agentID
+        engine.consumeHandoffPrep(for: agentID)
         var names = chain(for: agentID)
         var notice: String?
         if names.first.map({ accounts_split($0) }) != agentID {

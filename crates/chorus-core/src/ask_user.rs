@@ -65,7 +65,15 @@ pub fn set_asker(conn: &Connection, sess: i64, asker: Option<Asker>) {
 /// Listed only when someone can answer: an agent that never sees the tool
 /// never waits on a question nobody will read.
 pub fn available(conn: &Connection, sess: i64) -> bool {
-    asker(conn, sess).is_some()
+    asker(conn, sess).is_some() && !routed_to_lead(conn, sess)
+}
+
+/// Under the default policy an agent working for an orchestrator does not talk
+/// to the person: it asks its lead (`chorus_ask_lead`), and the lead decides,
+/// escalating only when it cannot. See [`crate::ask_policy`].
+pub fn routed_to_lead(conn: &Connection, sess: i64) -> bool {
+    !crate::ask_policy::AskPolicy::current().child_may_ask_user()
+        && crate::orchestra_plan::child_of(conn, sess).is_some()
 }
 
 /// Who answers questions for `sess` right now, if anyone.
@@ -191,6 +199,12 @@ pub fn parse(args: &Value) -> Result<Question, String> {
 pub fn call(conn: &Connection, sess: i64, agent: &str, args: &Value) -> Result<Value, String> {
     let mut q = parse(args)?;
     q.agent = agent.to_string();
+    if routed_to_lead(conn, sess) {
+        return Err("You work for a lead agent: ask it with chorus_ask_lead instead. The lead \
+                    decides, and asks the user only if it cannot. If no answer comes, go on with \
+                    your best assumption and state it in your final summary."
+            .into());
+    }
     let ask = asker(conn, sess).ok_or("no one is available to answer right now; decide yourself and say what you assumed")?;
     let text = match ask(&q) {
         Some(a) => {

@@ -435,7 +435,11 @@ struct ContentView: View {
             }
         }
         .onChange(of: engine.agents) { _, _ in syncModelSelection(); engine.refreshModels() }
-        .onChange(of: model) { _, m in applyModel(m) }
+        .onChange(of: model) { _, m in
+            applyModel(m)
+            prepareHandoffIfSwitched(to: m)
+        }
+        .onChange(of: engine.sessionID) { _, _ in engine.handoffPrep = .none }
         .sheet(isPresented: $showPalette) { palette }
         .alert("เปลี่ยนชื่อ session", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("ชื่อ", text: $renameText)

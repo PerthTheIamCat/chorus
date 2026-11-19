@@ -953,6 +953,46 @@ fn handoff_auto_carries_the_session_goal_with_no_argument_passed_in() {
 }
 
 #[test]
+fn a_prepared_handoff_rides_with_the_next_message_to_that_agent_and_only_that_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("s.db");
+    let cwd = dir.path().join("w");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let mut s = Session::create(&db, &cwd, "prepared").unwrap().with_bridge(mock_bridge());
+    s.run_turn("codex", "openai", "make the order list load under 200ms", Policy::AllowAll).unwrap();
+    let handoffs = |s: &Session| {
+        s.transcript().unwrap().iter().filter(|(e, _)| e.kind == chorus_core::EventKind::Handoff).count()
+    };
+
+    // Preparing writes nothing: no model call, no ledger row.
+    let before = handoffs(&s);
+    let brief = s.prepare_handoff("claude").unwrap();
+    assert!(brief.goal.contains("order list"), "{}", brief.goal);
+    assert_eq!(handoffs(&s), before);
+
+    // Switching back drops it.
+    s.cancel_prepared_handoff();
+    s.run_turn("claude", "anthropic", "go on", Policy::AllowAll).unwrap();
+    assert_eq!(handoffs(&s), before, "a cancelled handoff must not be sent");
+
+    // A handoff for claude is not used by a turn to someone else.
+    s.prepare_handoff("claude").unwrap();
+    s.run_turn("codex", "openai", "and then?", Policy::AllowAll).unwrap();
+    assert_eq!(handoffs(&s), before);
+
+    // For the right agent it is written once, before the user's message.
+    s.prepare_handoff("claude").unwrap();
+    s.run_turn("claude", "anthropic", "write the tests", Policy::AllowAll).unwrap();
+    assert_eq!(handoffs(&s), before + 1);
+    let t = s.transcript().unwrap();
+    let h = t.iter().rposition(|(e, _)| e.kind == chorus_core::EventKind::Handoff).unwrap();
+    let m = t.iter().rposition(|(_, b)| b == "write the tests").unwrap();
+    assert!(h < m, "the Handoff divider comes before the message that carried it");
+    s.run_turn("claude", "anthropic", "again", Policy::AllowAll).unwrap();
+    assert_eq!(handoffs(&s), before + 1, "it is used up after one message");
+}
+
+#[test]
 fn list_agents_always_returns_both_known_agents_and_never_panics() {
     // Assert on shape, not on this machine's actual auth state.
     let agents = chorus_cli::agents::list_agents();
@@ -1633,7 +1673,7 @@ fn every_prompt_carries_the_honesty_guidance_but_the_ledger_does_not() {
     s.run_turn("codex", "openai", "MOCK_ECHO_SECRETS add a feature", Policy::AllowAll).unwrap();
 
     let saw = std::fs::read_to_string(tmp.join("mock-saw.txt")).expect("mock recorded the prompt");
-    assert!(saw.contains("ask the user before starting") && saw.contains("Do not edit, weaken, skip or delete a test"), "{saw}");
+    assert!(saw.contains("Ask the user only when a wrong guess") && saw.contains("Do not edit, weaken, skip or delete a test"), "{saw}");
     assert!(!saw.contains("chorus_ask_user"), "no answerer registered, so no tool named: {saw}");
     // Rule 2.1: guidance rides with the prompt, it is not something anyone said.
     for (_, body) in s.transcript().unwrap() {

@@ -486,6 +486,13 @@ char *chorus_auth_status(const char *agent_id);
  * (0 deny · 1 read-only · 2 allow, same mapping as chorus_run_turn's
  * `allow`) is asked of the caller.
  * JSON: {"ok":true,"to":"...","goal":"...","echo_back":"..."} */
+/* Prepare a handoff in the background when the user picks another provider's
+   model: brief from the ledger by rules (no model call, no ledger write), held
+   until the next turn to `to`, which carries it. {ok,to,from,goal,done,
+   pending,constraints,markdown}. */
+char *chorus_prepare_handoff(ChorusEngine *e, const char *to);
+/* Drop the prepared handoff (switched back). */
+char *chorus_cancel_handoff(ChorusEngine *e);
 char *chorus_handoff_auto(ChorusEngine *e, const char *to, int level);
 
 /* File tree and workspace navigation */
@@ -518,7 +525,7 @@ char *chorus_router_record_learned_json(const char *db_path, const char *prompt,
 char *chorus_router_clear_learned_json(const char *db_path);
 
 /* Learn (skill drafts, measured routing, project notes). db_path = the
-   project's ledger, cwd = its folder. State JSON: {ok, autonomy:"ask"|
+   project's ledger, cwd = its folder. State JSON: {ok, autonomy:"auto"|"ask"|
    "auto_with_tests"|"off", drafts:[{name,description,signature,steps,sessions,
    body}], outcomes:{cells,counted_turns,min_samples,enabled,steering},
    notes?, notes_enabled}. */
@@ -527,6 +534,8 @@ char *chorus_learn_state_json(const char *db_path, const char *cwd);
    engine queue. JSON: {ok, outcome_turns, new_drafts:[…], notes, hit_budget}. */
 char *chorus_learn_idle_json(const char *db_path, const char *cwd);
 char *chorus_learn_set_autonomy(const char *mode);
+char *chorus_ask_policy_json(void);
+char *chorus_set_ask_policy(const char *json);
 /* action: "accept" (copies into .chorus/skills/) or "reject". */
 char *chorus_learn_draft_json(const char *cwd, const char *name, const char *action);
 

@@ -64,32 +64,12 @@ extension ContentView {
         }
     }
 
-    /// Four things at the trailing edge, nothing else: hand over, search,
-    /// "more" (everything occasional) and the side panel. Files, terminal,
-    /// preview, focus mode and Orchestra used to be one button each.
+    /// Three things at the trailing edge, nothing else: search, "more"
+    /// (everything occasional) and the side panel. Files, terminal, preview,
+    /// focus mode and Orchestra used to be one button each. Handing over to
+    /// another agent is not here: pick its model in the composer.
     @ToolbarContentBuilder
     var actionToolbar: some ToolbarContent {
-        ToolbarItemGroup(placement: .primaryAction) {
-            // Handing over is one click per agent. Everything the next
-            // agent needs is already in the ledger, so asking the user to
-            // fill in a form would be asking them to retype what we know.
-            let targets = engine.agents.filter { $0.ready && $0.id != currentAgentID }
-            if engine.sessionID >= 0 && !targets.isEmpty {
-                Menu {
-                    ForEach(targets) { a in
-                        Button {
-                            engine.handoffAuto(to: a.id, level: max(permission.rawValue, 0))
-                        } label: {
-                            Label("ส่งต่อให้ \(a.label)", systemImage: "arrowshape.turn.up.right")
-                        }
-                    }
-                } label: {
-                    Label("ส่งต่อ", systemImage: "arrowshape.turn.up.right")
-                }
-                .disabled(engine.busy)
-                .help("ส่งงานต่อให้ agent อื่น พร้อมเป้าหมาย สิ่งที่ทำไปแล้ว และ diff (ไม่ต้องพิมพ์อะไร)")
-            }
-        }
         ToolbarItem(placement: .primaryAction) {
             Button { showSearchSheet = true } label: {
                 Label("ค้นหา", systemImage: "magnifyingglass")

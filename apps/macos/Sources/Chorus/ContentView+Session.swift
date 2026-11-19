@@ -58,6 +58,20 @@ extension ContentView {
         engine.setModel(agent: a.id, model: modelID)
     }
 
+    /// Picking another provider's model in the composer prepares the handoff
+    /// right away; picking the same provider's other model (Opus → Sonnet) or
+    /// going back to the agent that is already working cancels it. There is no
+    /// "hand over" button: the next message is the handoff.
+    func prepareHandoffIfSwitched(to m: String) {
+        guard engine.sessionID >= 0, let last = engine.lastAnsweringAgent,
+              let target = agentFor(m)?.id, !target.isEmpty else { return }
+        if target == last {
+            engine.cancelHandoffPrep()
+        } else {
+            engine.prepareHandoff(to: target)
+        }
+    }
+
     func syncModelSelection() {
         let known = engine.agents.flatMap { $0.models.map(\.id) }
         guard !known.isEmpty else { return }

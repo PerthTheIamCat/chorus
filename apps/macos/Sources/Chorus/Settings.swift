@@ -12,7 +12,7 @@ struct SettingsSheet: View {
     @AppStorage("chorus.autoCatalogUpdates") private var autoCatalogUpdates = true
 
     enum Section: String, CaseIterable, Identifiable {
-        case general, display, accounts, routing, orchestration
+        case general, display, accounts, routing, orchestration, asking
         case agents, safety, integrations, skills
         case review, cost, storage, languages, learn
         case companion, about, changelog
@@ -25,6 +25,7 @@ struct SettingsSheet: View {
             case .accounts: "บัญชี"
             case .routing: "การส่งงาน"
             case .orchestration: "Orchestra"
+            case .asking: "การถามและอัตโนมัติ"
             case .agents: "โมเดล"
             case .safety: "สิทธิ์และความปลอดภัย"
             case .integrations: "เครื่องมือเสริม (MCP)"
@@ -47,6 +48,7 @@ struct SettingsSheet: View {
             case .accounts: "บัญชีของแต่ละเจ้าและโควตาที่เหลือ"
             case .routing: "เทิร์นของคุณถูกส่งไปที่ไหน"
             case .orchestration: "โมเดลหลักที่วางแผนและแจกงาน"
+            case .asking: "agent ถามคุณบ่อยแค่ไหน"
             case .agents: "agent ที่ติดตั้งและโมเดลที่มันมี"
             case .safety: "agent ทำอะไรได้บ้าง"
             case .integrations: "MCP server ที่ทุก agent ใช้ร่วมกัน"
@@ -69,6 +71,7 @@ struct SettingsSheet: View {
             case .accounts: "person.2"
             case .routing: "arrow.triangle.branch"
             case .orchestration: "point.3.connected.trianglepath.dotted"
+            case .asking: "bubble.left.and.exclamationmark.bubble.right"
             case .agents: "cpu"
             case .safety: "lock.shield"
             case .integrations: "puzzlepiece.extension"
@@ -91,6 +94,7 @@ struct SettingsSheet: View {
             case .accounts: .teal
             case .routing: .blue
             case .orchestration: .purple
+            case .asking: .orange
             case .agents: .indigo
             case .safety: .red
             case .integrations: .orange
@@ -105,10 +109,11 @@ struct SettingsSheet: View {
         }
 
         static let groups: [(title: String, items: [Section])] = [
-            ("ใช้งาน", [.general, .display, .accounts, .routing, .orchestration]),
-            ("Agent", [.agents, .safety, .integrations, .skills]),
-            ("ข้อมูล", [.review, .cost, .storage, .languages, .learn]),
-            ("ระบบ", [.companion, .about, .changelog]),
+            ("ทั่วไป", [.general, .display, .languages]),
+            ("เอเจนต์", [.accounts, .agents, .routing, .orchestration, .asking]),
+            ("ความจำและเครื่องมือ", [.learn, .skills, .integrations]),
+            ("ความปลอดภัย", [.safety, .review]),
+            ("ระบบ", [.cost, .storage, .companion, .about, .changelog]),
         ]
     }
 
@@ -186,6 +191,7 @@ struct SettingsSheet: View {
         case .accounts: AccountsSettings()
         case .routing: RoutingSettings(workspace: workspace)
         case .orchestration: OrchestrationSettings(workspace: workspace)
+        case .asking: AskingSettings(workspace: workspace)
         case .agents: AgentsSettings()
         case .safety: SafetySettings(workspace: workspace)
         case .integrations: integrations
