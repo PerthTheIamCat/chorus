@@ -39,13 +39,14 @@ fn a_turn_counts_the_facts_it_carried_and_the_ones_the_agent_used() {
     s.assemble_context(200_000).unwrap();
     assert_eq!(counters(&s, used), (0, 0));
 
-    // …the turn that follows does. The mock touches README.md and says nothing
-    // about deploying.
-    s.run_turn("codex", "openai", "ต่อ", Policy::AllowAll).unwrap();
+    // …the turn that follows does, for the facts that are about what the user
+    // just said (R2: an unrelated fact is no longer topped up). The mock touches
+    // README.md and says nothing about deploying.
+    s.run_turn("codex", "openai", "แก้ README.md ต่อ", Policy::AllowAll).unwrap();
     assert_eq!(counters(&s, used), (1, 1));
+    assert_eq!(counters(&s, idle), (0, 0), "an unrelated fact is not carried");
+    s.run_turn("codex", "openai", "deploy ด้วย fly deploy เลย", Policy::AllowAll).unwrap();
     assert_eq!(counters(&s, idle), (1, 0));
-    s.run_turn("codex", "openai", "ต่ออีก", Policy::AllowAll).unwrap();
-    assert_eq!(counters(&s, idle), (2, 0));
 }
 
 #[test]

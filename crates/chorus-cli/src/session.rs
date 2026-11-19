@@ -1638,7 +1638,7 @@ impl Session {
         // Assemble history from the ledger *before* adding this turn, so the
         // new instruction isn't also fed back as the last thing said.
         let prompt = if has_history {
-            let ctx = self.assemble_context(120_000)?;
+            let ctx = self.assemble_context_for(120_000, Some(user_text))?;
             format!(
                 "{ctx}\n\n---\nThat is the session so far, reconstructed from the shared \
                  ledger. Continue from here.\n\nNew instruction:\n{user_text}"
@@ -2368,6 +2368,14 @@ impl Session {
     }
 
     pub fn assemble_context(&self, budget: i64) -> Result<String> {
+        self.assemble_context_for(budget, None)
+    }
+
+    /// [`Self::assemble_context`] for a turn about to run: `instruction` is the
+    /// user's new message, not yet in the ledger, and is what memory is ranked
+    /// against (R2). Without it the query would be the *previous* message, so a
+    /// fact about what the user is asking now would be left out.
+    pub fn assemble_context_for(&self, budget: i64, instruction: Option<&str>) -> Result<String> {
         let c = self.store.conn();
         let events = ledger::history(c, self.sess, 400)?;
         let bodies: Vec<(Event, String)> = events
@@ -2476,6 +2484,7 @@ impl Session {
             .find(|(e, _)| e.kind == EventKind::Msg && e.actor == self.user)
             .map(|(_, b)| b.as_str())
             .unwrap_or("");
+        let query = instruction.filter(|t| !t.trim().is_empty()).unwrap_or(query);
         let embedder = chorus_core::embedding::from_env();
         let facts = memory::relevant_with(self.mem_store().conn(), 1, query, 12, embedder.as_deref())?;
         let memory_items: Vec<ContextItem> = memory::render(&facts)
@@ -3160,7 +3169,7 @@ impl Session {
         let agent_actor = actor::intern(self.store.conn(), agent_name, provider)?;
         let has_history = !ledger::history(self.store.conn(), self.sess, 1)?.is_empty();
         let prompt = if has_history {
-            let ctx = self.assemble_context(120_000)?;
+            let ctx = self.assemble_context_for(120_000, Some(user_text))?;
             format!(
                 "{ctx}\n\n---\nThat is the session so far, reconstructed from the shared \
                  ledger. Continue from here.\n\nNew instruction:\n{user_text}"

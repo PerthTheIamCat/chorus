@@ -130,7 +130,7 @@ cargo run -p chorus-cli -- sessions list                     # session ของ
 cargo run -p chorus-cli -- sessions search "<คำ>"            # ค้นชื่อ/โฟลเดอร์/เนื้อหา
 cargo run -p chorus-cli -- sessions import codex <ID> --db /tmp/s.db   # นำเข้าเป็น session แล้ว `run --session N` คุยต่อ
 
-# ปิดทีละส่วนเพื่อเทียบ (ค่า off = ปิด): CHORUS_REPO_MAP · CHORUS_R1_TOOL_REFS · CHORUS_R2_MIN_RELEVANCE · CHORUS_BRIEF_EVIDENCE (ดู 7.26, 7.29)
+# ปิดทีละส่วนเพื่อเทียบ (ค่า off = ปิด): CHORUS_REPO_MAP · CHORUS_R1_TOOL_REFS · CHORUS_R2_MIN_RELEVANCE · CHORUS_BRIEF_EVIDENCE (ดู 7.26, 7.31)
 
 # macOS shell
 apps/macos/build.sh                     # cargo build -p chorus-ffi + swift build + bundle + open
@@ -520,10 +520,11 @@ JSON บนดิสก์ไม่แตะ (`task_state` ต้องอ่า
 bench `handoff in later turns' context` กันไว้: เพดาน 30 token + ห้ามมี `` ```diff `` / `"constraints"` ใน context
 + pending/constraints ต้องยังอยู่ (นับแยกเป็นของ task state)
 
-### 7.29 tool result มี output แล้ว — เก็บเต็ม ส่งเข้าโมเดลแค่บรรทัดเดียว (18 พ.ย. 2026)
+### 7.31 tool result มี output แล้ว — เก็บเต็ม ส่งเข้าโมเดลแค่บรรทัดเดียว (18 พ.ย. 2026)
 
 ledger เคยเก็บ `ToolResult` แค่ `ชื่อ → สถานะ` ไม่มี output/exit code (R1 เลยทำไม่ได้ และ brief บอกไม่ได้ว่ารันอะไรผ่าน) ตอนนี้ `render::encode_tool_result`: บรรทัดแรกเดิม · `[exit N]` ถ้า bridge รายงาน · output (cap 32 KB หัว+ท้าย) — ACP ไม่มีฟิลด์ exit code มาตรฐาน อ่านจาก `rawOutput` เท่าที่รู้จัก (`tool_output` ใน codex.rs) **ยังไม่ได้ยืนยันกับ frame จริง**
 - ใน context (`tool_result_rungs`): เทิร์นอายุ < 10 = หัว 8 + ท้าย 8 บรรทัด · เก่ากว่า = `ชื่อ → สถานะ, N lines (blob:xxxxxxxx)` (ล้มเหลวเก็บ 3 บรรทัดท้าย) · body ≤ 240 ไบต์ไม่แตะ · ใช้ rung L1/L2 จาก compaction ไม่ได้เพราะมันตัดกลางบรรทัด
+- ความจำถูกจัดอันดับตามข้อความ**ใหม่**ของผู้ใช้ (`assemble_context_for(budget, Some(user_text))`) ไม่ใช่ข้อความก่อนหน้าใน ledger — ไม่งั้นเกณฑ์ด้านล่างเลือก fact ของเทิร์นที่แล้ว
 - ความจำ: มีเกณฑ์ relevance ขั้นต่ำ (0.30 lexical) และ**ไม่เติม**ด้วย fact ที่ถูกใช้บ่อยเมื่อมีคำถาม — เกณฑ์วัดจาก store 6 fact เล็ก ๆ ถ้าเจอคำถามสั้น ๆ ที่ fact ควรเข้าแต่ไม่เข้า ปรับ `CHORUS_MEMORY_MIN_RELEVANCE`
 - brief: `evidence`/`unverified` มาจาก `handoff::evidence` (กฎล้วน ๆ) · `context_line` ยังบรรทัดเดียว (7.25)
 - flag ablation (ค่า `off` ปิด): `CHORUS_R1_TOOL_REFS` · `CHORUS_R2_MIN_RELEVANCE` · `CHORUS_BRIEF_EVIDENCE`
