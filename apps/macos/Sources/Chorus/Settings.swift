@@ -14,7 +14,7 @@ struct SettingsSheet: View {
     enum Section: String, CaseIterable, Identifiable {
         case general, accounts, routing, orchestration
         case agents, safety, integrations, skills
-        case review, cost, storage, languages
+        case review, cost, storage, languages, learn
         case companion, about, changelog
         var id: String { rawValue }
 
@@ -32,6 +32,7 @@ struct SettingsSheet: View {
             case .cost: "การใช้งานและค่าใช้จ่าย"
             case .storage: "พื้นที่และประสิทธิภาพ"
             case .languages: "ภาษา (Syntax)"
+            case .learn: "เรียนรู้"
             case .companion: "Mobile Companion"
             case .about: "เกี่ยวกับ"
             case .changelog: "มีอะไรใหม่"
@@ -52,6 +53,7 @@ struct SettingsSheet: View {
             case .cost: "token โควตา และเงิน"
             case .storage: "โมเดลในเครื่อง หน่วยความจำ และข้อมูล"
             case .languages: "สีตามไวยากรณ์ของแต่ละภาษาในตัวดูโค้ด"
+            case .learn: "สิ่งที่ Chorus เรียนรู้จากงานที่ผ่านมา"
             case .companion: "สั่งงานจาก iPhone"
             case .about: "เวอร์ชันและสัญญาอนุญาต"
             case .changelog: "สิ่งที่เปลี่ยนในแต่ละเวอร์ชัน"
@@ -72,6 +74,7 @@ struct SettingsSheet: View {
             case .cost: "bahtsign.circle"
             case .storage: "internaldrive"
             case .languages: "chevron.left.forwardslash.chevron.right"
+            case .learn: "graduationcap"
             case .companion: "iphone"
             case .about: "info.circle"
             case .changelog: "clock.arrow.circlepath"
@@ -92,6 +95,7 @@ struct SettingsSheet: View {
             case .cost: .mint
             case .storage: .brown
             case .languages: .pink
+            case .learn: .green
             case .companion: .cyan
             }
         }
@@ -99,7 +103,7 @@ struct SettingsSheet: View {
         static let groups: [(title: String, items: [Section])] = [
             ("ใช้งาน", [.general, .accounts, .routing, .orchestration]),
             ("Agent", [.agents, .safety, .integrations, .skills]),
-            ("ข้อมูล", [.review, .cost, .storage, .languages]),
+            ("ข้อมูล", [.review, .cost, .storage, .languages, .learn]),
             ("ระบบ", [.companion, .about, .changelog]),
         ]
     }
@@ -185,6 +189,7 @@ struct SettingsSheet: View {
         case .cost: CostSettings()
         case .storage: StorageSettings()
         case .languages: LanguagesSettings()
+        case .learn: LearnSettings(workspace: workspace)
         case .companion: RemotePairingView()
         case .about: AboutSettings(showChangelog: { section = .changelog })
         case .changelog: ChangelogSettings()

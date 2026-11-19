@@ -493,6 +493,19 @@ char *chorus_router_list_learned_json(const char *db_path);
 char *chorus_router_record_learned_json(const char *db_path, const char *prompt, const char *model, const char *agent, const char *reason, const char *preset);
 char *chorus_router_clear_learned_json(const char *db_path);
 
+/* Learn (skill drafts, measured routing, project notes). db_path = the
+   project's ledger, cwd = its folder. State JSON: {ok, autonomy:"ask"|
+   "auto_with_tests"|"off", drafts:[{name,description,signature,steps,sessions,
+   body}], outcomes:{cells,counted_turns,min_samples,enabled,steering},
+   notes?, notes_enabled}. */
+char *chorus_learn_state_json(const char *db_path, const char *cwd);
+/* Idle pass on its OWN connections — run it on a separate queue, never the
+   engine queue. JSON: {ok, outcome_turns, new_drafts:[…], notes, hit_budget}. */
+char *chorus_learn_idle_json(const char *db_path, const char *cwd);
+char *chorus_learn_set_autonomy(const char *mode);
+/* action: "accept" (copies into .chorus/skills/) or "reject". */
+char *chorus_learn_draft_json(const char *cwd, const char *name, const char *action);
+
 /* Cross-session search and export */
 char *chorus_search_sessions_json(const char *db_path, const char *query);
 char *chorus_export_session_md(const char *db_path, int64_t session_id);

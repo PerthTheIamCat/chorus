@@ -2303,7 +2303,37 @@ impl Session {
             }
         }
         let mem = self.mem_store().conn();
-        let queued = chorus_core::lessons::queue(mem, drafts)?;
+        // The Learn screen's autonomy decides each lesson's fate (`learn::decide`).
+        // Tainted drafts and drafts without a passing test are always queued.
+        let mode = chorus_core::learn::settings_path()
+            .map(|p| chorus_core::learn::load_settings(&p).autonomy)
+            .unwrap_or_default();
+        let (mut keep, mut auto) = (Vec::new(), Vec::new());
+        for d in drafts {
+            let ev = chorus_core::learn::LessonEvidence {
+                tests_passed: d.signal == chorus_core::lessons::Signal::FixedAfterFailing
+                    && chorus_core::outcomes::is_test_command(&d.text),
+                tainted: d.suspicious,
+            };
+            match chorus_core::learn::decide(mode, &ev) {
+                chorus_core::learn::Decision::Drop => {}
+                chorus_core::learn::Decision::Queue => keep.push(d),
+                chorus_core::learn::Decision::AutoAccept => auto.push(d),
+            }
+        }
+        let mut queued = chorus_core::lessons::queue(mem, keep)?;
+        if !auto.is_empty() {
+            let before: std::collections::HashSet<i64> =
+                memory::pending(mem)?.iter().map(|p| p.id).collect();
+            let q = chorus_core::lessons::queue(mem, auto)?;
+            queued.queued += q.queued;
+            for p in memory::pending(mem)? {
+                if !before.contains(&p.id) && !p.suspicious {
+                    memory::approve(mem, p.id)?;
+                    queued.queued -= 1;
+                }
+            }
+        }
         // Only now: if queueing failed, the next pass reads the same events again.
         chorus_core::lessons::mark_scanned(self.store.conn(), self.sess, &scan)?;
         let retirements = memory::suggest_retirements(mem, &self.cwd, 3)?.len();
@@ -2474,6 +2504,19 @@ impl Session {
                     label: "repo-map".into(),
                 },
             );
+        }
+
+        // Optional project notes written at idle by a local model (E6). A plain
+        // read of a stored row: off unless CHORUS_SUMMARY_MODEL is set, and
+        // never generated here (7.2b).
+        if let Some(notes) =
+            chorus_core::project_notes::for_context(c, &self.cwd.to_string_lossy())
+        {
+            code.push(ContextItem {
+                text: format!("project notes:\n{notes}"),
+                key: None,
+                label: "project-notes".into(),
+            });
         }
 
         // Facts relevant to what the user last said come first; with no user

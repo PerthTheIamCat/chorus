@@ -273,7 +273,20 @@ pub unsafe extern "C" fn chorus_route_json(
         }
         let router = Router::new(RouterConfig::local(model).with_preset(preset))
             .map_err(|e| format!("invalid router configuration: {e}"))?;
-        Ok::<_, String>(router.route_with_fallback(&task, &candidates))
+        let route = router.route_with_fallback(&task, &candidates);
+        // Measured outcomes (L4) may swap in a better-proven candidate of the
+        // same cost tier. Any trouble opening the store leaves the proposal as is.
+        Ok::<_, String>(match (route, open_router_store(None)) {
+            (chorus_core::router::RouteResult::Proposal(p), Ok(store)) => {
+                chorus_core::router::RouteResult::Proposal(chorus_core::outcomes::refine_proposal(
+                    store.conn(),
+                    &task,
+                    &candidates,
+                    p,
+                ))
+            }
+            (route, _) => route,
+        })
     })) {
         Ok(Ok(route)) => out(serde_json::json!({"ok":true,"route":route}).to_string()),
         Ok(Err(e)) => err(e),
@@ -3362,6 +3375,136 @@ pub unsafe extern "C" fn chorus_router_clear_learned_json(db_path: *const c_char
     match chorus_core::local_router::clear_learned_routes(store.conn()) {
         Ok(()) => out(serde_json::json!({ "ok": true }).to_string()),
         Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// Learn screen (L3 + L4 + E6): everything the app has learned and may learn.
+///
+/// `db_path` is the project's ledger (`<project>/.chorus/store.db`), `cwd` the
+/// project folder. JSON: `{"ok":true,"autonomy":"ask|auto_with_tests|off",
+/// "drafts":[{name,description,signature,steps,sessions,body}],
+/// "outcomes":{cells,counted_turns,min_samples,enabled,steering},
+/// "notes":null|"…","notes_enabled":bool}`.
+///
+/// # Safety
+/// `db_path` and `cwd` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_learn_state_json(db_path: *const c_char, cwd: *const c_char) -> *mut c_char {
+    let (Some(db), Some(cwd)) = (borrow(db_path), borrow(cwd)) else {
+        return err("db_path and cwd are required");
+    };
+    match catch_unwind(AssertUnwindSafe(|| -> std::result::Result<String, String> {
+        let settings = chorus_core::learn::settings_path()
+            .map(|p| chorus_core::learn::load_settings(&p))
+            .unwrap_or_default();
+        let router = open_router_store(None)?;
+        let outcomes = chorus_core::outcomes::summary(router.conn()).map_err(|e| format!("{e:#}"))?;
+        let ledger = open_router_store(Some(db))?;
+        let notes = chorus_core::project_notes::load(ledger.conn(), cwd);
+        Ok(serde_json::json!({
+            "ok": true,
+            "autonomy": settings.autonomy.as_str(),
+            "drafts": chorus_core::skill_drafts::list(Path::new(cwd)),
+            "outcomes": outcomes,
+            "notes": notes,
+            "notes_enabled": chorus_core::project_notes::model_from_env().is_some(),
+        })
+        .to_string())
+    })) {
+        Ok(Ok(json)) => out(json),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in learn_state"),
+    }
+}
+
+/// The idle learning pass: score recent turns for the router, queue skill
+/// drafts, refresh project notes (only if `CHORUS_SUMMARY_MODEL` is set).
+///
+/// **Off the engine queue:** it opens its own connections, so run it on a
+/// separate queue after the user goes quiet. Bounded by a few seconds, plus
+/// one local-model call when notes are enabled.
+/// JSON: `{"ok":true,"outcome_turns":N,"new_drafts":["…"],"notes":"…","hit_budget":false}`
+///
+/// # Safety
+/// `db_path` and `cwd` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_learn_idle_json(db_path: *const c_char, cwd: *const c_char) -> *mut c_char {
+    let (Some(db), Some(cwd)) = (borrow(db_path), borrow(cwd)) else {
+        return err("db_path and cwd are required");
+    };
+    match catch_unwind(AssertUnwindSafe(|| -> std::result::Result<String, String> {
+        let settings = chorus_core::learn::settings_path()
+            .map(|p| chorus_core::learn::load_settings(&p))
+            .unwrap_or_default();
+        let ledger = open_router_store(Some(db))?;
+        let router = open_router_store(None)?;
+        let report = chorus_core::learn::idle_pass(
+            ledger.conn(),
+            router.conn(),
+            db,
+            Path::new(cwd),
+            &settings,
+            std::time::Duration::from_secs(3),
+        );
+        let mut v = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+        v["ok"] = serde_json::Value::Bool(true);
+        Ok(v.to_string())
+    })) {
+        Ok(Ok(json)) => out(json),
+        Ok(Err(e)) => err(e),
+        Err(_) => err("panic in learn_idle"),
+    }
+}
+
+/// Set how much the app may learn without asking: `ask` (default),
+/// `auto_with_tests` or `off`. Skill drafts are always reviewed by hand.
+///
+/// # Safety
+/// `mode` must be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_learn_set_autonomy(mode: *const c_char) -> *mut c_char {
+    let Some(mode) = borrow(mode).and_then(chorus_core::learn::Autonomy::parse) else {
+        return err("mode must be ask, auto_with_tests or off");
+    };
+    let Some(path) = chorus_core::learn::settings_path() else {
+        return err("HOME environment variable not set");
+    };
+    match chorus_core::learn::save_settings(&path, &chorus_core::learn::Settings { autonomy: mode }) {
+        Ok(()) => out(serde_json::json!({"ok": true, "autonomy": mode.as_str()}).to_string()),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// Accept or reject a queued skill draft. Accepting copies it to
+/// `<cwd>/.chorus/skills/<name>/SKILL.md`, where the projector picks it up.
+/// `action` is `accept` or `reject`. JSON: `{"ok":true,"path":"…"}` on accept.
+///
+/// # Safety
+/// `cwd`, `name` and `action` must each be null or point to a NUL-terminated string.
+/// The returned string must be freed with `chorus_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_learn_draft_json(
+    cwd: *const c_char,
+    name: *const c_char,
+    action: *const c_char,
+) -> *mut c_char {
+    let (Some(cwd), Some(name), Some(action)) = (borrow(cwd), borrow(name), borrow(action)) else {
+        return err("cwd, name and action are required");
+    };
+    let cwd = Path::new(cwd);
+    match action {
+        "accept" => match chorus_core::skill_drafts::accept(cwd, name) {
+            Ok(p) => out(serde_json::json!({"ok": true, "path": p}).to_string()),
+            Err(e) => err(format!("{e:#}")),
+        },
+        "reject" => match chorus_core::skill_drafts::reject(cwd, name) {
+            Ok(()) => out(serde_json::json!({"ok": true}).to_string()),
+            Err(e) => err(format!("{e:#}")),
+        },
+        _ => err("action must be accept or reject"),
     }
 }
 

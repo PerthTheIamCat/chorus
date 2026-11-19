@@ -293,6 +293,17 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             conn.execute_batch(ddl)?;
         }
     }
+    // Opt-in project notes written at idle (project_notes.rs). Derived data in
+    // the warm tier, not the ledger: safe to drop, rebuilt from the ledger.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS project_notes (
+            cwd        TEXT PRIMARY KEY,
+            notes      TEXT NOT NULL,
+            basis      TEXT NOT NULL,
+            model      TEXT NOT NULL,
+            created_ms INTEGER NOT NULL
+        );",
+    )?;
 
     // v7: `subagent.kind` and a `waiting` status. SQLite cannot alter a CHECK
     // constraint, so the table is rebuilt. Foreign keys go off for the swap:
