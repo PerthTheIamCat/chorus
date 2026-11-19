@@ -176,7 +176,11 @@ func chatBubbleShape(isUser: Bool) -> UnevenRoundedRectangle {
 /// A run of finished tool calls from the ledger, collapsed to one line.
 struct ToolGroupRow: View {
     let events: [LedgerEvent]
-    @State private var open = false
+    @AppStorage(DisplayKey.detail) private var detail = DetailLevel.normal.rawValue
+    /// nil = the detail level decides; a click overrides it for this row.
+    @State private var userOpen: Bool?
+    private var level: DetailLevel { DetailLevel.from(detail) }
+    private var open: Bool { userOpen ?? level.toolsOpenByDefault }
 
     private var calls: Int {
         let n = events.filter { $0.kind == "tool_call" }.count
@@ -192,12 +196,12 @@ struct ToolGroupRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { open.toggle() }
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { userOpen = !open }
             } label: {
                 HStack(spacing: 7) {
                     Image(systemName: "wrench.and.screwdriver").font(.caption2).foregroundStyle(.secondary)
                     Text("ใช้เครื่องมือ \(calls) ครั้ง").font(.caption.weight(.medium))
-                    if !open, !preview.isEmpty {
+                    if !open, level.showsPreviews, !preview.isEmpty {
                         Text(preview)
                             .font(.caption2).foregroundStyle(.tertiary)
                             .lineLimit(1).truncationMode(.tail)
@@ -229,14 +233,16 @@ struct ToolGroupRow: View {
 /// the full list a click away.
 struct LiveToolsView: View {
     let tools: [Engine.LiveTurn.Tool]
-    @State private var open = false
+    @AppStorage(DisplayKey.detail) private var detail = DetailLevel.normal.rawValue
+    @State private var userOpen: Bool?
+    private var open: Bool { userOpen ?? DetailLevel.from(detail).toolsOpenByDefault }
 
     var body: some View {
         let current = tools.last(where: { $0.state == "running" })
         let shown = current ?? tools.last
         VStack(alignment: .leading, spacing: 6) {
             Button {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { open.toggle() }
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { userOpen = !open }
             } label: {
                 HStack(spacing: 7) {
                     if current != nil {

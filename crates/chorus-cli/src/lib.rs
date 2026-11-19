@@ -5,6 +5,7 @@ pub mod accounts;
 pub mod agents;
 pub mod child_verify;
 pub mod drafts;
+pub mod inspector;
 pub mod limits;
 pub mod metrics;
 pub mod orchestra;

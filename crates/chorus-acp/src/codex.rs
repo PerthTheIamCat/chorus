@@ -214,7 +214,47 @@ pub struct TurnOutcome {
     /// (gaps over [`STREAM_GAP_MS`] — tool runs, waiting — are not counted).
     /// With the streamed text this gives an *estimated* tokens/second.
     pub stream_ms: u64,
+    /// Milliseconds from sending the prompt to the first text/thought chunk
+    /// (time to first token). `None` when the turn streamed nothing.
+    pub ttft_ms: Option<u64>,
+    /// The token counts the bridge put in the `session/prompt` reply, when it
+    /// sent any (`usage`: both Claude and Codex bridges do).
+    pub prompt_usage: Option<PromptUsage>,
     pub stop_reason: String,
+}
+
+/// `session/prompt` reply `usage` (ACP `Usage`). Every field is optional: a
+/// bridge reports what it has. Both bridges report `input` **without** cache
+/// reads/writes, so the cache hit rate is `cached_read / (input + cached_read
+/// + cached_write)`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PromptUsage {
+    pub input: Option<i64>,
+    pub output: Option<i64>,
+    pub cached_read: Option<i64>,
+    pub cached_write: Option<i64>,
+}
+
+impl PromptUsage {
+    pub fn from_json(v: &Value) -> Option<Self> {
+        let n = |k: &str| v.get(k).and_then(Value::as_i64).filter(|n| *n >= 0);
+        let u = Self {
+            input: n("inputTokens"),
+            output: n("outputTokens"),
+            cached_read: n("cachedReadTokens"),
+            cached_write: n("cachedWriteTokens"),
+        };
+        (u != Self::default()).then_some(u)
+    }
+
+    /// Share of the prompt that came from the provider's cache, 0–100.
+    /// `None` unless the bridge reported cache reads at all (a reported 0 is
+    /// a real 0%): no number is better than a guessed one.
+    pub fn cache_hit_pct(&self) -> Option<f64> {
+        let read = self.cached_read?;
+        let total = self.input.unwrap_or(0) + read + self.cached_write.unwrap_or(0);
+        (total > 0).then(|| read as f64 * 100.0 / total as f64)
+    }
 }
 
 /// A silence longer than this between two text chunks is not generation time.
@@ -468,6 +508,7 @@ impl CodexAgent {
         }
         let mut acc = Accumulator {
             root_session_id: self.session_id.clone(),
+            started: Some(std::time::Instant::now()),
             ..Default::default()
         };
         let cwd = self.cwd.clone();
@@ -516,6 +557,7 @@ impl CodexAgent {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        acc.prompt_usage = res.get("usage").and_then(PromptUsage::from_json);
         let mut outcome = acc.finish();
         outcome.model = self.model.clone();
         Ok(outcome)
@@ -1083,6 +1125,10 @@ struct Accumulator {
     plan: Option<Vec<PlanEntry>>,
     stream_ms: u64,
     last_chunk: Option<std::time::Instant>,
+    /// When the prompt went out, and how long until the first chunk.
+    started: Option<std::time::Instant>,
+    ttft_ms: Option<u64>,
+    prompt_usage: Option<PromptUsage>,
     stop_reason: String,
 }
 
@@ -1361,6 +1407,9 @@ impl Accumulator {
     /// unless the gap is long enough to be a tool run or a wait.
     fn note_stream(&mut self) {
         let now = std::time::Instant::now();
+        if self.ttft_ms.is_none() {
+            self.ttft_ms = self.started.map(|t| now.duration_since(t).as_millis() as u64);
+        }
         if let Some(prev) = self.last_chunk {
             let gap = now.duration_since(prev).as_millis();
             if gap <= STREAM_GAP_MS {
@@ -1436,6 +1485,8 @@ impl Accumulator {
             cost_usd: self.cost_usd,
             plan: self.plan,
             stream_ms: self.stream_ms,
+            ttft_ms: self.ttft_ms,
+            prompt_usage: self.prompt_usage,
             stop_reason: self.stop_reason,
         }
     }
@@ -1596,6 +1647,45 @@ mod usage_tests {
                                       "cost": {"amount": 5.0, "currency": "EUR"}}}),
         );
         assert_eq!(acc.finish().cost_usd, None);
+    }
+
+    #[test]
+    fn time_to_first_token_is_measured_from_the_prompt_to_the_first_chunk() {
+        let mut acc = Accumulator {
+            started: Some(std::time::Instant::now() - Duration::from_millis(300)),
+            ..Default::default()
+        };
+        let chunk = json!({"update": {"sessionUpdate": "agent_message_chunk",
+                                       "content": {"type": "text", "text": "hi"}}});
+        acc.absorb(&chunk);
+        let first = acc.ttft_ms.expect("first chunk sets it");
+        assert!((300..2_000).contains(&first), "ttft {first}");
+        // A later chunk, however slow, never moves it.
+        std::thread::sleep(Duration::from_millis(20));
+        acc.absorb(&chunk);
+        assert_eq!(acc.finish().ttft_ms, Some(first));
+        // No chunk at all (tool-only turn) = no figure, not 0.
+        let quiet = Accumulator { started: Some(std::time::Instant::now()), ..Default::default() };
+        assert_eq!(quiet.finish().ttft_ms, None);
+    }
+
+    #[test]
+    fn prompt_usage_reads_the_reply_and_derives_the_cache_hit_rate() {
+        // Both bridges: `inputTokens` excludes cache reads/writes.
+        let u = PromptUsage::from_json(&json!({
+            "inputTokens": 100, "outputTokens": 40, "cachedReadTokens": 800, "cachedWriteTokens": 100
+        }))
+        .unwrap();
+        assert_eq!(u.cache_hit_pct(), Some(80.0));
+        // Cache reads reported as 0 is a real 0%.
+        let cold = PromptUsage::from_json(&json!({"inputTokens": 50, "cachedReadTokens": 0})).unwrap();
+        assert_eq!(cold.cache_hit_pct(), Some(0.0));
+        // The bridge did not say anything about the cache: no figure.
+        let none = PromptUsage::from_json(&json!({"inputTokens": 50, "outputTokens": 5})).unwrap();
+        assert_eq!(none.cache_hit_pct(), None);
+        // Nothing usable at all.
+        assert!(PromptUsage::from_json(&json!({})).is_none());
+        assert!(PromptUsage::from_json(&json!({"inputTokens": -1})).is_none());
     }
 }
 

@@ -2600,6 +2600,40 @@ pub unsafe extern "C" fn chorus_assembled_context(
     }
 }
 
+/// The context inspector's data: what the agent saw this turn (tokens per
+/// tier, which turns were demoted or dropped and why, memory facts with their
+/// relevance score, code items kept/repeated/replaced) and, when `target` is
+/// an agent name, what that agent would get if the user switched to it now
+/// (its first message and the context at its window).
+///
+/// Read-only: unlike a real turn it does not bump memory usage counters, and
+/// it makes no model or network call. `target` may be null or `""`.
+///
+/// JSON: {"ok":true,"inspection":{budget,text,tokens,report:{budget,
+/// total_tokens,tiers[],conversation{},memory[],code[]},target?:{…}}}
+///
+/// # Safety
+/// `e` must be a live handle; `target` null or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn chorus_context_inspect(
+    e: *const ChorusEngine,
+    budget: i64,
+    target: *const c_char,
+) -> *mut c_char {
+    let Some(engine) = e.as_ref() else {
+        return err("null engine");
+    };
+    let budget = if budget <= 0 { 120_000 } else { budget };
+    let target = borrow(target).unwrap_or("").to_string();
+    match catch_unwind(AssertUnwindSafe(|| {
+        chorus_cli::inspector::inspect(&engine.session, budget, &target, None)
+    })) {
+        Ok(Ok(i)) => out(serde_json::json!({ "ok": true, "inspection": i }).to_string()),
+        Ok(Err(e)) => err(format!("{e:#}")),
+        Err(_) => err("panic in context_inspect"),
+    }
+}
+
 // ---- session picker + agent inventory ---------------------------
 
 #[derive(Serialize)]

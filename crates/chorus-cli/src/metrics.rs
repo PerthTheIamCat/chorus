@@ -6,10 +6,23 @@
 //! What *is* derived (tok/s) says so with an `_estimated` flag.
 //!
 //! None of this is written to the ledger or the database (CLAUDE.md 2.1):
-//! cost and context come from `session_usage` as before, tok/s lives in
-//! memory only and is gone when the app quits.
+//! cost and context come from `session_usage` as before, tok/s, time to
+//! first token and cache hit live in memory only and are gone when the app
+//! quits.
+//!
+//! Where each number comes from (checked against the published bridges,
+//! `@agentclientprotocol/codex-acp` 2.7 and `claude-agent-acp` 0.108):
+//! - TTFT: measured here, from sending `session/prompt` to the first text or
+//!   thought chunk (wall clock on our side, so it includes the bridge's own
+//!   start-up of the turn).
+//! - tok/s: estimated from streamed text over streaming time.
+//! - cache hit: the `usage` object of the `session/prompt` reply
+//!   (`cachedReadTokens` against `inputTokens + cachedRead + cachedWrite`).
+//!   `usage_update` carries no cache counters — only `used`/`size`/`cost`.
+//! - cost: `usage_update.cost`; Codex sends none.
 
 use crate::limits::AccountUsage;
+use chorus_acp::codex::PromptUsage;
 use chorus_core::tokens::{HeuristicCounter, TokenCounter};
 use chorus_core::usage::SessionUsage;
 use serde::Serialize;
@@ -21,6 +34,41 @@ const MIN_STREAM_MS: u64 = 500;
 const MIN_TOKENS: i64 = 8;
 
 static SPEED: Mutex<Option<HashMap<i64, f64>>> = Mutex::new(None);
+
+/// What the latest turn of a session measured besides speed.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TurnTiming {
+    pub ttft_ms: Option<u64>,
+    pub cache_hit_pct: Option<f64>,
+}
+
+static TIMING: Mutex<Option<HashMap<i64, TurnTiming>>> = Mutex::new(None);
+
+/// Remember `sess`'s latest turn timing. A turn that measured nothing (a
+/// tool-only turn, a bridge with no `usage`) leaves the previous reading in
+/// place rather than blanking the strip.
+pub fn record_timing(sess: i64, ttft_ms: Option<u64>, usage: Option<&PromptUsage>) {
+    let t = TurnTiming {
+        ttft_ms,
+        cache_hit_pct: usage.and_then(PromptUsage::cache_hit_pct),
+    };
+    if t == TurnTiming::default() {
+        return;
+    }
+    if let Ok(mut m) = TIMING.lock() {
+        let slot = m.get_or_insert_with(HashMap::new).entry(sess).or_default();
+        slot.ttft_ms = t.ttft_ms.or(slot.ttft_ms);
+        slot.cache_hit_pct = t.cache_hit_pct.or(slot.cache_hit_pct);
+    }
+}
+
+fn last_timing(sess: i64) -> TurnTiming {
+    TIMING
+        .lock()
+        .ok()
+        .and_then(|m| m.as_ref()?.get(&sess).copied())
+        .unwrap_or_default()
+}
 
 /// Tokens per second over the time the agent was actually streaming text.
 /// `None` for a turn too short to measure.
@@ -68,12 +116,20 @@ pub struct Metrics {
     /// Output speed. Always an estimate (see `tok_per_s_estimated`).
     pub tok_per_s: Option<f64>,
     pub tok_per_s_estimated: bool,
-    /// Prompt-cache hit rate, 0–100. ACP's `usage_update` carries no cache
-    /// counters, so this stays `None` until a bridge reports one.
+    /// Time to first token of the latest turn that streamed text, in ms.
+    pub ttft_ms: Option<u64>,
+    /// Prompt-cache hit rate of the latest turn, 0–100, from the bridge's
+    /// `session/prompt` usage. `None` when the bridge sent no cache numbers.
     pub cache_hit_pct: Option<f64>,
     /// Session total in USD, exactly as the bridge reported it (Codex
     /// reports none, so it is `None` there rather than a price-list guess).
+    /// Also `None` on a subscription account (see `subscription`): there the
+    /// share of the plan's limit is the number that matters, and an
+    /// API-equivalent price is not what the person pays.
     pub cost_usd: Option<f64>,
+    /// The account has a plan limit we can read — a subscription login. An
+    /// API-key account has no such window, so it keeps `cost_usd`.
+    pub subscription: bool,
     pub context_pct: Option<f64>,
     pub limit_pct: Option<f64>,
     pub limit_window: Option<String>,
@@ -85,6 +141,16 @@ pub fn build(
     speed: Option<f64>,
     limit: Option<(f64, &str)>,
 ) -> Metrics {
+    build_with(usage, speed, limit, TurnTiming::default())
+}
+
+/// [`build`] plus the latest turn's timing.
+pub fn build_with(
+    usage: Option<&SessionUsage>,
+    speed: Option<f64>,
+    limit: Option<(f64, &str)>,
+    timing: TurnTiming,
+) -> Metrics {
     let context_pct = usage.and_then(|u| match (u.context_used, u.context_window) {
         (Some(used), Some(win)) if win > 0 => Some((used as f64 * 100.0 / win as f64).min(100.0)),
         _ => None,
@@ -92,8 +158,10 @@ pub fn build(
     Metrics {
         tok_per_s: speed,
         tok_per_s_estimated: speed.is_some(),
-        cache_hit_pct: None,
-        cost_usd: usage.and_then(|u| u.cost_usd),
+        ttft_ms: timing.ttft_ms,
+        cache_hit_pct: timing.cache_hit_pct,
+        cost_usd: usage.and_then(|u| u.cost_usd).filter(|_| limit.is_none()),
+        subscription: limit.is_some(),
         context_pct,
         limit_pct: limit.map(|l| l.0),
         limit_window: limit.map(|l| l.1.to_string()),
@@ -114,7 +182,7 @@ pub fn session_metrics(
     } else {
         limit_of(&crate::limits::usage_report(), account)
     };
-    Ok(build(usage.as_ref(), last_speed(sess), limit))
+    Ok(build_with(usage.as_ref(), last_speed(sess), limit, last_timing(sess)))
 }
 
 #[cfg(test)]
@@ -179,5 +247,37 @@ mod tests {
         // a tiny turn does not overwrite a good reading with noise
         record_speed(990_001, "hi", 100);
         assert!(last_speed(990_001).is_some());
+    }
+
+    #[test]
+    fn a_subscription_shows_its_limit_instead_of_a_price() {
+        let u = SessionUsage { cost_usd: Some(1.5), ..Default::default() };
+        let sub = build(Some(&u), None, Some((30.0, "5h")));
+        assert!(sub.subscription);
+        assert_eq!(sub.cost_usd, None);
+        assert_eq!(sub.limit_pct, Some(30.0));
+        // No readable limit = an API-key account: the price stays.
+        let api = build(Some(&u), None, None);
+        assert!(!api.subscription);
+        assert_eq!(api.cost_usd, Some(1.5));
+    }
+
+    #[test]
+    fn timing_is_remembered_and_a_silent_turn_does_not_blank_it() {
+        let usage = PromptUsage { input: Some(100), cached_read: Some(300), ..Default::default() };
+        record_timing(990_010, Some(850), Some(&usage));
+        let t = last_timing(990_010);
+        assert_eq!(t.ttft_ms, Some(850));
+        assert_eq!(t.cache_hit_pct, Some(75.0));
+        // A turn that measured nothing keeps the last readings...
+        record_timing(990_010, None, None);
+        assert_eq!(last_timing(990_010), t);
+        // ...a turn that measured something replaces only what it measured.
+        record_timing(990_010, Some(400), None);
+        assert_eq!(last_timing(990_010).ttft_ms, Some(400));
+        assert_eq!(last_timing(990_010).cache_hit_pct, Some(75.0));
+        assert_eq!(last_timing(990_011), TurnTiming::default());
+        let m = build_with(None, None, None, t);
+        assert_eq!((m.ttft_ms, m.cache_hit_pct), (Some(850), Some(75.0)));
     }
 }

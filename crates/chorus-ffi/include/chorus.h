@@ -449,6 +449,11 @@ char *chorus_session_usage(const ChorusEngine *e);
  * the ledger. Not a description of it — the thing itself. */
 char *chorus_assembled_context(const ChorusEngine *e, long long budget);
 
+/* Context inspector data (tokens per tier, demoted/dropped turns, memory facts
+ * with score, and — for a non-empty `target` agent — a preview of what that
+ * agent would get now). Read-only. JSON {"ok":true,"inspection":{...}}. */
+char *chorus_context_inspect(const ChorusEngine *e, long long budget, const char *target);
+
 /* Every session in db_path, newest activity first. Does not need a
  * ChorusEngine — a store-level query, no shadow-git/MCP handles opened.
  * JSON: {"ok":true,"sessions":[{"id":N,"title":"...","cwd":"...",

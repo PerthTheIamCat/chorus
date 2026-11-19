@@ -12,7 +12,7 @@ struct SettingsSheet: View {
     @AppStorage("chorus.autoCatalogUpdates") private var autoCatalogUpdates = true
 
     enum Section: String, CaseIterable, Identifiable {
-        case general, accounts, routing, orchestration
+        case general, display, accounts, routing, orchestration
         case agents, safety, integrations, skills
         case review, cost, storage, languages, learn
         case companion, about, changelog
@@ -21,6 +21,7 @@ struct SettingsSheet: View {
         var title: String {
             switch self {
             case .general: "ทั่วไป"
+            case .display: "การแสดงผล"
             case .accounts: "บัญชี"
             case .routing: "การส่งงาน"
             case .orchestration: "Orchestra"
@@ -41,7 +42,8 @@ struct SettingsSheet: View {
 
         var subtitle: String {
             switch self {
-            case .general: "การพิมพ์ การแสดงผล และหน้าต่าง"
+            case .general: "การพิมพ์และหน้าต่าง"
+            case .display: "รายละเอียดของเทิร์น ตัวชี้วัด สกุลเงิน ธีม และสีเน้น"
             case .accounts: "บัญชีของแต่ละเจ้าและโควตาที่เหลือ"
             case .routing: "เทิร์นของคุณถูกส่งไปที่ไหน"
             case .orchestration: "โมเดลหลักที่วางแผนและแจกงาน"
@@ -63,6 +65,7 @@ struct SettingsSheet: View {
         var icon: String {
             switch self {
             case .general: "gearshape"
+            case .display: "paintpalette"
             case .accounts: "person.2"
             case .routing: "arrow.triangle.branch"
             case .orchestration: "point.3.connected.trianglepath.dotted"
@@ -84,6 +87,7 @@ struct SettingsSheet: View {
         var tint: Color {
             switch self {
             case .general, .about, .changelog: .gray
+            case .display: .pink
             case .accounts: .teal
             case .routing: .blue
             case .orchestration: .purple
@@ -94,14 +98,14 @@ struct SettingsSheet: View {
             case .review: .green
             case .cost: .mint
             case .storage: .brown
-            case .languages: .pink
+            case .languages: .purple
             case .learn: .green
             case .companion: .cyan
             }
         }
 
         static let groups: [(title: String, items: [Section])] = [
-            ("ใช้งาน", [.general, .accounts, .routing, .orchestration]),
+            ("ใช้งาน", [.general, .display, .accounts, .routing, .orchestration]),
             ("Agent", [.agents, .safety, .integrations, .skills]),
             ("ข้อมูล", [.review, .cost, .storage, .languages, .learn]),
             ("ระบบ", [.companion, .about, .changelog]),
@@ -178,6 +182,7 @@ struct SettingsSheet: View {
     @ViewBuilder private var pane: some View {
         switch section {
         case .general: GeneralSettings()
+        case .display: DisplaySettingsView()
         case .accounts: AccountsSettings()
         case .routing: RoutingSettings(workspace: workspace)
         case .orchestration: OrchestrationSettings(workspace: workspace)
@@ -385,38 +390,8 @@ struct GeneralSettings: View {
     @AppStorage("chorus.explorerWidth") private var explorerWidth: Double = 260
     @AppStorage("chorus.inspectorWidth") private var inspectorWidth: Double = 330
     @AppStorage("chorus.codeViewerShare") private var codeViewerShare: Double = WorkbenchLayout.defaultViewerShare
-    @AppStorage(MetricsKey.tokPerS) private var showTokPerS = true
-    @AppStorage(MetricsKey.cache) private var showCache = true
-    @AppStorage(MetricsKey.cost) private var showCost = true
-    @AppStorage(MetricsKey.context) private var showContext = true
-    @AppStorage(MetricsKey.limit) private var showLimit = true
 
     var body: some View {
-        SettingsGroup(title: "แถบตัวชี้วัด") {
-            SettingsRow(title: "ความเร็ว (tok/s)",
-                        info: "ประมาณจากข้อความที่ agent ส่งออกมา ไม่ใช่ตัวเลขจาก provider") {
-                Toggle("ความเร็ว", isOn: $showTokPerS).labelsHidden().toggleStyle(.switch)
-            }
-            RowDivider()
-            SettingsRow(title: "Cache hit",
-                        info: "ขึ้นเมื่อ provider รายงานเท่านั้น ตอนนี้ยังไม่มีเจ้าไหนส่งมา") {
-                Toggle("Cache hit", isOn: $showCache).labelsHidden().toggleStyle(.switch)
-            }
-            RowDivider()
-            SettingsRow(title: "ค่าใช้จ่าย",
-                        info: "ตามที่ provider รายงาน เจ้าที่ไม่รายงาน (เช่น Codex) จะไม่ขึ้น ไม่เดาราคาเอง") {
-                Toggle("ค่าใช้จ่าย", isOn: $showCost).labelsHidden().toggleStyle(.switch)
-            }
-            RowDivider()
-            SettingsRow(title: "หน้าต่างบริบท", info: "สัดส่วนบริบทที่ใช้ไปของ session นี้") {
-                Toggle("หน้าต่างบริบท", isOn: $showContext).labelsHidden().toggleStyle(.switch)
-            }
-            RowDivider()
-            SettingsRow(title: "% ของโควตา",
-                        info: "โควตา 5 ชั่วโมงหรือรายสัปดาห์ อันที่ใกล้เต็มกว่า · ขึ้นเมื่ออ่านโควตาของบัญชีนั้นได้") {
-                Toggle("% ของโควตา", isOn: $showLimit).labelsHidden().toggleStyle(.switch)
-            }
-        }
         SettingsGroup(title: "การพิมพ์") {
             SettingsRow(title: "Enter เพื่อส่ง",
                         info: enterSends ? "Shift+Enter ขึ้นบรรทัดใหม่" : "⌘Enter ส่ง · Enter ขึ้นบรรทัดใหม่") {
