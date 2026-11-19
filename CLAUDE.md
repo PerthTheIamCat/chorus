@@ -123,6 +123,7 @@ cargo run -p chorus-cli -- memory pending --db /tmp/s.db          # approve queu
 cargo run -p chorus-cli -- compact --db /tmp/s.db --session 1 [--limit N]   # เติม warm tier (L1/L2)
 cargo run -p chorus-cli -- demo          # เล่าทั้งเรื่องด้วย agent ปลอม ไม่ต้องมี API key
 scripts/smoke-real-agents.sh            # e2e กับ agent จริงที่ login ไว้ (ส่ง request จริง ไม่กี่ครั้ง)
+python3 evals/handoff/live/eval.py --dry-run   # ตรวจ 16 เคส handoff สด (ไม่เรียก agent) · ไม่มี --dry-run = รันจริงกับ claude/codex ที่ login ไว้ · --matrix = ปิดทีละส่วน (evals/handoff/live/README.md)
 cargo run -p chorus-cli -- secrets [list|forget NAME|scan FILE]   # ชื่อ secret ที่จำไว้ (ไม่มีค่า) · scan บอกแค่บรรทัด+ชนิด
 cargo run -p chorus-cli -- doctor        # ทำไมเทิร์นถึงรัน/ไม่รัน — agent, login, bridge, env, error ที่ failover ไม่รู้จัก
 cargo run -p chorus-cli -- sessions list                     # session ของ Claude Code / Codex / Gemini CLI ในเครื่อง
