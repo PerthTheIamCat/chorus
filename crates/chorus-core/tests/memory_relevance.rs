@@ -40,5 +40,17 @@ fn empty_query_and_small_k_behave_like_top() {
     let s = store();
     assert_eq!(memory::relevant(s.conn(), 1, "  ", 4).unwrap().len(), 4);
     assert_eq!(memory::relevant(s.conn(), 1, "deploy", 0).unwrap().len(), 0);
-    assert_eq!(memory::relevant(s.conn(), 1, "deploy", 100).unwrap().len(), 6);
+    // A large k returns the matches, not the whole store (R2).
+    let got = memory::relevant(s.conn(), 1, "deploy", 100).unwrap();
+    assert!(got.len() < 6 && got[0].text.contains("GitHub Actions"));
+}
+
+#[test]
+fn unrelated_facts_are_left_out_even_when_there_is_room() {
+    let s = store();
+    // Room for 6, but only the deploy fact is about the question.
+    let got = memory::relevant(s.conn(), 1, "how do we deploy a release with actions?", 6).unwrap();
+    assert!(got[0].text.contains("GitHub Actions"));
+    assert!(got.len() < 6, "topped up with unrelated facts: {:?}", got.iter().map(|f| &f.text).collect::<Vec<_>>());
+    assert!(!got.iter().any(|f| f.text.contains("SvelteKit")));
 }

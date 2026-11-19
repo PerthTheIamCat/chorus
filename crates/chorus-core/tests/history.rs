@@ -27,14 +27,17 @@ fn project_reads_also_see_global_and_legacy_session_facts() {
     assert!(top.iter().any(|t| t.contains("migrations")));
 
     // Ranked retrieval sees the same set, not just scope 1.
+    // (Only what is about the query comes back — R2 — so ask for each.)
     let rel = memory::relevant(c, 1, "ภาษาไทย", 10).unwrap();
-    assert_eq!(rel.len(), 3);
     assert!(rel[0].text.contains("ภาษาไทย"));
+    let rel = memory::relevant(c, 1, "ห้ามแตะ migrations", 10).unwrap();
+    assert!(rel[0].text.contains("migrations"), "{rel:?}");
 
     // The same sentence in two scopes is listed once.
     memory::add(c, 2, "ใช้ pnpm ไม่ใช่ npm").unwrap();
     assert_eq!(memory::top(c, 1, 10).unwrap().len(), 3);
-    assert_eq!(memory::relevant(c, 1, "pnpm", 10).unwrap().len(), 3);
+    let pnpm = memory::relevant(c, 1, "ใช้ pnpm ไม่ใช่ npm", 10).unwrap();
+    assert_eq!(pnpm.iter().filter(|f| f.text.contains("pnpm")).count(), 1);
 
     // Other scopes still read only themselves.
     assert_eq!(memory::top(c, 7, 10).unwrap().len(), 1);

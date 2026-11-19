@@ -1649,6 +1649,40 @@ fn every_prompt_carries_the_honesty_guidance_but_the_ledger_does_not() {
 }
 
 #[test]
+fn old_tool_output_becomes_one_line_with_a_blob_reference() {
+    use chorus_core::{actor, ledger, types::{EventKind, NewEvent}, Store};
+    let dir = ShortDir::new("toolout");
+    let db = dir.path().join("s.db");
+    let cwd = dir.path().join("w");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let s = Session::create(&db, &cwd, "tool output").unwrap();
+    let sid = s.session_id();
+    {
+        let store = Store::open(&db).unwrap();
+        let c = store.conn();
+        let user = actor::intern(c, "user", "user").unwrap();
+        let agent = actor::intern(c, "codex", "openai").unwrap();
+        ledger::append(c, &NewEvent::new(sid, EventKind::Msg, user, "read the file")).unwrap();
+        let big: String = (0..212).map(|i| format!("line {i} of src/x.ts\n")).collect();
+        for body in [
+            chorus_core::render::encode_tool_result("read src/x.ts", "completed", None, &big),
+            chorus_core::render::encode_tool_result("cargo test", "failed", Some(101), &big),
+        ] {
+            ledger::append(c, &NewEvent::new(sid, EventKind::ToolResult, agent, body)).unwrap();
+        }
+        // Twelve newer turns push both results past the 10-turn raw window.
+        for i in 0..12 {
+            ledger::append(c, &NewEvent::new(sid, EventKind::Msg, agent, format!("note {i}"))).unwrap();
+        }
+    }
+    let s = Session::open(&db, sid).unwrap();
+    let ctx = s.assemble_context(200_000).unwrap();
+    assert!(ctx.contains("read src/x.ts → completed, 212 lines (blob:"), "{ctx}");
+    assert!(ctx.contains("cargo test → failed (exit 101), 212 lines"), "{ctx}");
+    assert!(!ctx.contains("line 100 of src/x.ts"), "old output leaked into context");
+}
+
+#[test]
 fn a_secret_the_agent_asked_for_reaches_the_next_turn_and_never_the_ledger() {
     std::env::set_var("CHORUS_SECRETS_BACKEND", "memory");
     let tmp = std::env::temp_dir().join(format!("chorus-reqsecret-{}", std::process::id()));

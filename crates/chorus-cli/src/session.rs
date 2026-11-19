@@ -283,10 +283,7 @@ fn str_list(v: &serde_json::Value, key: &str) -> Vec<String> {
 /// seen — reaches the next agent unchanged, because the cost of dropping a
 /// line that mattered is much higher than the tokens it saves.
 fn is_bare_success(body: &str) -> bool {
-    let Some((_, status)) = body.rsplit_once(" → ") else {
-        return false;
-    };
-    matches!(status.trim(), "completed" | "success" | "ok")
+    chorus_core::render::parse_tool_result(body).is_some_and(|v| v.is_bare_success())
 }
 
 /// `CHORUS_ACP_LOG=<path>` writes every JSON-RPC frame, both directions, to a
@@ -787,9 +784,15 @@ fn event_row(
     match ev {
         AgentEvent::Message(m) => (EventKind::Msg, m.clone()),
         AgentEvent::ToolCall { title, kind } => (EventKind::ToolCall, format!("{kind}: {title}")),
-        AgentEvent::ToolResult { title, status } => {
-            (EventKind::ToolResult, format!("{title} → {status}"))
-        }
+        AgentEvent::ToolResult {
+            title,
+            status,
+            exit,
+            output,
+        } => (
+            EventKind::ToolResult,
+            chorus_core::render::encode_tool_result(title, status, *exit, output),
+        ),
         AgentEvent::SubagentSpawned {
             session_id,
             parent_session_id,
@@ -1635,7 +1638,7 @@ impl Session {
         // Assemble history from the ledger *before* adding this turn, so the
         // new instruction isn't also fed back as the last thing said.
         let prompt = if has_history {
-            let ctx = self.assemble_context(120_000)?;
+            let ctx = self.assemble_context_for(120_000, Some(user_text))?;
             format!(
                 "{ctx}\n\n---\nThat is the session so far, reconstructed from the shared \
                  ledger. Continue from here.\n\nNew instruction:\n{user_text}"
@@ -2365,6 +2368,14 @@ impl Session {
     }
 
     pub fn assemble_context(&self, budget: i64) -> Result<String> {
+        self.assemble_context_for(budget, None)
+    }
+
+    /// [`Self::assemble_context`] for a turn about to run: `instruction` is the
+    /// user's new message, not yet in the ledger, and is what memory is ranked
+    /// against (R2). Without it the query would be the *previous* message, so a
+    /// fact about what the user is asking now would be left out.
+    pub fn assemble_context_for(&self, budget: i64, instruction: Option<&str>) -> Result<String> {
         let c = self.store.conn();
         let events = ledger::history(c, self.sess, 400)?;
         let bodies: Vec<(Event, String)> = events
@@ -2392,6 +2403,7 @@ impl Session {
             .collect();
 
         let n = bodies.len();
+        let tool_refs = !std::env::var("CHORUS_R1_TOOL_REFS").is_ok_and(|v| v == "off");
         let turns: Vec<TurnItem> = bodies
             .iter()
             .enumerate()
@@ -2410,6 +2422,24 @@ impl Session {
                     }
                 }
                 let who = actor::name(c, e.actor).unwrap_or_else(|_| "?".into());
+                // A tool result that printed something: recent ones keep an
+                // excerpt, older ones become one line with a blob reference.
+                // The compacted rungs are for prose; they would only cut the
+                // output mid-line.
+                if tool_refs && e.kind == EventKind::ToolResult {
+                    if let Some((l0, older)) = chorus_core::render::tool_result_rungs(
+                        body,
+                        e.blob.as_ref().map(|b| b.0.as_str()),
+                    ) {
+                        return TurnItem {
+                            text_l0: format!("{who}: {l0}"),
+                            text_l1: Some(format!("{who}: {older}")),
+                            text_l2: Some(format!("{who}: {older}")),
+                            age: n - 1 - i,
+                            key: None,
+                        };
+                    }
+                }
                 let r = match rungs.get(&e.seq) {
                     Some(r) => r.clone(),
                     None => compaction::rungs_for(&compaction::Extractive, body),
@@ -2454,6 +2484,7 @@ impl Session {
             .find(|(e, _)| e.kind == EventKind::Msg && e.actor == self.user)
             .map(|(_, b)| b.as_str())
             .unwrap_or("");
+        let query = instruction.filter(|t| !t.trim().is_empty()).unwrap_or(query);
         let embedder = chorus_core::embedding::from_env();
         let facts = memory::relevant_with(self.mem_store().conn(), 1, query, 12, embedder.as_deref())?;
         let memory_items: Vec<ContextItem> = memory::render(&facts)
@@ -3138,7 +3169,7 @@ impl Session {
         let agent_actor = actor::intern(self.store.conn(), agent_name, provider)?;
         let has_history = !ledger::history(self.store.conn(), self.sess, 1)?.is_empty();
         let prompt = if has_history {
-            let ctx = self.assemble_context(120_000)?;
+            let ctx = self.assemble_context_for(120_000, Some(user_text))?;
             format!(
                 "{ctx}\n\n---\nThat is the session so far, reconstructed from the shared \
                  ledger. Continue from here.\n\nNew instruction:\n{user_text}"

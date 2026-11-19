@@ -145,8 +145,8 @@ pub fn embed(text: &str) -> Vec<f32> {
 }
 
 /// Facts for `scope` ranked by relevance to `query`: pinned facts always
-/// come first, then the best matches above a similarity floor, then — if
-/// there is still room — the usual most-used order. An empty query is the
+/// come first, then the best matches above a similarity floor. Facts below
+/// the floor are left out even when there is room (R2). An empty query is the
 /// same as [`top`].
 pub fn relevant(c: &Connection, scope: i64, query: &str, k: usize) -> Result<Vec<Fact>> {
     relevant_with(c, scope, query, k, None)
@@ -211,7 +211,7 @@ pub fn relevant_with(
         None => {
             let q = embed(query);
             (
-                0.18,
+                lexical_floor(),
                 all.into_iter()
                     .map(|f| (crate::VectorOps::cosine_similarity(&q, &embed(&f.text)), f))
                     .collect(),
@@ -229,9 +229,15 @@ pub fn relevant_with(
     for (_, f) in hits {
         picked.push(f.clone());
     }
-    for (_, f) in scored.drain(..) {
-        if !picked.iter().any(|p| p.id == f.id) {
-            picked.push(f);
+    // With something to match against, a fact below the relevance floor is
+    // not worth its tokens however much budget is left (R2). The old behaviour
+    // — floor 0.18 and topping up with the most-used facts — stays one switch
+    // away for comparison: `CHORUS_R2_MIN_RELEVANCE=off`.
+    if !r2_on() {
+        for (_, f) in scored.drain(..) {
+            if !picked.iter().any(|p| p.id == f.id) {
+                picked.push(f);
+            }
         }
     }
     picked.truncate(k);
@@ -241,6 +247,30 @@ pub fn relevant_with(
         f.hits += 1;
     }
     Ok(picked)
+}
+
+/// Lowest hashed-n-gram cosine that counts as "about the query".
+///
+/// Measured on a six-fact store with the query "how do we deploy a release with
+/// actions?": the fact about GitHub Actions scores 0.42, unrelated facts score
+/// 0.18–0.30 (shared "th"/"ith"/"ac" bigrams are noise). The old floor of 0.18
+/// let all of them in; 0.30 separates them there. Character n-grams are a weak
+/// signal on short queries, so `CHORUS_MEMORY_MIN_RELEVANCE` overrides it.
+const LEXICAL_FLOOR: f32 = 0.30;
+
+fn lexical_floor() -> f32 {
+    if !r2_on() {
+        return 0.18;
+    }
+    std::env::var("CHORUS_MEMORY_MIN_RELEVANCE")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| (0.0..=1.0).contains(v))
+        .unwrap_or(LEXICAL_FLOOR)
+}
+
+fn r2_on() -> bool {
+    !std::env::var("CHORUS_R2_MIN_RELEVANCE").is_ok_and(|v| v == "off")
 }
 
 /// Stored vectors for `scope` from `model`, by fact id.
