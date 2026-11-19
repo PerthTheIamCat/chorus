@@ -375,6 +375,21 @@ pub fn cancel_active() -> bool {
     }
 }
 
+/// Stop only the agent answering this process's own (untagged) turn: the
+/// orchestrator's, or the single agent of a plain turn. Unlike
+/// [`cancel_active`] it leaves orchestra children running and does not set the
+/// process-wide cancelled flag, which every child thread would also read as
+/// "stopped". For a stop Chorus decides on itself (the loop guard); the Stop
+/// button wants [`cancel_active`].
+pub fn cancel_own_turn() -> bool {
+    let pid = ACTIVE_PID.load(std::sync::atomic::Ordering::SeqCst);
+    if pid == 0 {
+        return false;
+    }
+    kill_group(pid, 15);
+    true
+}
+
 extern "C" {
     fn killpg(pgrp: i32, sig: i32) -> i32;
 }
