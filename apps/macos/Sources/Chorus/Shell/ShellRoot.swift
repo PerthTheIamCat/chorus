@@ -42,6 +42,12 @@ struct ShellRoot: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             engine.loadAgents()
         }
+        .onReceive(Timer.publish(every: 4, on: .main, in: .common).autoconnect()) { _ in
+            // Agents a lead started change state on their own.
+            if !shell.workspace.isEmpty && (engine.busy || engine.sessionID >= 0) {
+                engine.loadSubagents(db: shell.currentDB)
+            }
+        }
         .onReceive(AppCommandCenter.shared.fire) { handle($0) }
         .sheet(isPresented: $shell.showPalette) {
             ShellPalette(items: shell.paletteItems { tool = $0 }) { shell.showPalette = false }
@@ -96,7 +102,7 @@ struct ShellRoot: View {
         }
         ToolbarItem(placement: .primaryAction) {
             Menu {
-                ForEach([ShellTool.files, .terminal, .ship, .checkpoints, .search, .orchestra, .monitor]) { t in
+                ForEach([ShellTool.files, .terminal, .preview, .ship, .checkpoints, .search, .orchestra, .monitor]) { t in
                     Button { tool = t } label: { Label(t.title, systemImage: t.symbol) }
                 }
             } label: { Label("เครื่องมือ", systemImage: "wrench.and.screwdriver") }
@@ -135,6 +141,7 @@ struct ShellRoot: View {
             shell.showInspector = true
         case .toggleExplorer: tool = .files
         case .toggleTerminal: tool = .terminal
+        case .toggleLivePreview: tool = .preview
         case .toggleOrchestrator: tool = .orchestra
         case .searchSessions: tool = .search
         case .systemMonitor: tool = .monitor

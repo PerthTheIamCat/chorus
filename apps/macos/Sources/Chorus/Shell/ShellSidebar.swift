@@ -13,6 +13,9 @@ struct ShellSidebar: View {
     var openSettings: () -> Void
 
     @State private var showAgents = false
+    @State private var messaging: Engine.SubagentInfo?
+    @State private var editing: ChorusProject?
+    @State private var steer = ""
 
     var body: some View {
         List(selection: Binding(
@@ -39,10 +42,24 @@ struct ShellSidebar: View {
                                    status: status(of: r.session, folder: r.folder),
                                    showsFolder: p.folders.count > 1 ? (r.folder as NSString).lastPathComponent : nil)
                             .tag(SessionKey(folder: r.folder, id: r.session.id))
+                        ForEach(subagents(of: r.session, folder: r.folder)) { sub in
+                            SubagentRow(sub: sub, title: subagentTitle(sub, folder: r.folder))
+                                .tag(sub.child_sess.map { SessionKey(folder: r.folder, id: $0) })
+                                .padding(.leading, 14)
+                                .contextMenu {
+                                    if sub.status == "running" || sub.status == "waiting" {
+                                        Button("ส่งข้อความถึง agent ย่อย…") { steer = ""; messaging = sub }
+                                        Button("หยุด", role: .destructive) {
+                                            engine.cancelSubagent(db: shell.dbPath(for: r.folder), id: sub.id)
+                                        }
+                                    }
+                                }
+                        }
                     }
                 } header: {
                     HStack {
                         Text(p.name)
+                            .contextMenu { Button("แก้ไขโปรเจกต์…") { editing = p } }
                         Spacer()
                         Button { shell.newSession(in: p.folders.first) } label: {
                             Image(systemName: "square.and.pencil")
@@ -57,6 +74,49 @@ struct ShellSidebar: View {
         .listStyle(.sidebar)
         .searchable(text: $shell.query, placement: .sidebar, prompt: "ค้นหา session")
         .safeAreaInset(edge: .bottom, spacing: 0) { footer }
+        .sheet(item: $editing) { p in
+            ShellProjectEditor(project: p, onSave: { saved in
+                projects.upsert(saved)
+                // The open session sees a folder added or removed from its next turn.
+                if engine.sessionID >= 0, saved.folders.contains(shell.workspace) {
+                    engine.setProjectFolders(saved.folders)
+                }
+            }, onDelete: { projects.remove(p) })
+        }
+        .alert("ส่งข้อความถึง agent ย่อย", isPresented: Binding(get: { messaging != nil }, set: { if !$0 { messaging = nil } }),
+               presenting: messaging) { sub in
+            TextField("ข้อความ", text: $steer)
+            Button("ส่ง") {
+                let t = steer.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !t.isEmpty { engine.messageSubagent(db: shell.currentDB, id: sub.id, message: t) }
+                messaging = nil
+            }
+            Button("ยกเลิก", role: .cancel) { messaging = nil }
+        } message: { sub in
+            Text(sub.task)
+        }
+    }
+
+    // MARK: subagents
+
+    private func allSubagents(folder: String) -> [Engine.SubagentInfo] {
+        var seen = Set<Int64>()
+        var out: [Engine.SubagentInfo] = []
+        for sub in engine.subagentsByParent.values.flatMap({ $0 })
+            + (engine.subagentsByDB[shell.dbPath(for: folder)] ?? []) where seen.insert(sub.id).inserted {
+            out.append(sub)
+        }
+        return out
+    }
+
+    private func subagents(of s: Engine.SessionSummary, folder: String) -> [Engine.SubagentInfo] {
+        allSubagents(folder: folder).filter { $0.parent_sess == s.id && $0.child_sess != nil }
+            .sorted { $0.created_ms < $1.created_ms }
+    }
+
+    private func subagentTitle(_ sub: Engine.SubagentInfo, folder: String) -> String {
+        let task = sub.task.isEmpty ? sub.role : sub.task
+        return sub.kind == "provider" ? task : "\(sub.role) · \(task)"
     }
 
     // MARK: rows
@@ -74,7 +134,9 @@ struct ShellSidebar: View {
         for f in p.folders {
             let all = shell.sessions(in: f)
             let ids = Set(all.map(\.id))
+            let children = Set(allSubagents(folder: f).compactMap(\.child_sess))
             for s in all {
+                if children.contains(s.id) { continue }
                 if let parent = s.forked_from, ids.contains(parent) { continue }
                 if matches(s) { out.append(Row(folder: f, session: s)) }
             }
@@ -257,5 +319,34 @@ private struct AgentsPopover: View {
         }
         .padding(14)
         .frame(width: 280)
+    }
+}
+
+
+/// One agent a lead started, under its session: state, what it was asked, and
+/// how it ended. Click opens its own conversation.
+private struct SubagentRow: View {
+    let sub: Engine.SubagentInfo
+    let title: String
+
+    var body: some View {
+        Label {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).lineLimit(1).font(.callout)
+                if !sub.files_touched.isEmpty || sub.diff_stat != nil {
+                    Text(sub.diff_stat ?? "\(sub.files_touched.count) ไฟล์")
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+        } icon: {
+            switch sub.status {
+            case "running": ProgressView().controlSize(.mini)
+            case "waiting": Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
+            case "failed": Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+            case "cancelled": Image(systemName: "xmark.circle").foregroundStyle(.secondary)
+            default: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            }
+        }
+        .help(sub.summary ?? title)
     }
 }

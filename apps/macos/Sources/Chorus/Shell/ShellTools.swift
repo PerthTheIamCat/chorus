@@ -7,7 +7,7 @@ import SwiftUI
 // reach them is new.
 
 enum ShellTool: String, Identifiable {
-    case ship, terminal, files, search, checkpoints, orchestra, monitor
+    case ship, terminal, files, search, checkpoints, orchestra, monitor, preview
     var id: String { rawValue }
 
     var title: String {
@@ -19,6 +19,7 @@ enum ShellTool: String, Identifiable {
         case .checkpoints: "Checkpoint"
         case .orchestra: "Orchestra"
         case .monitor: "System Monitor"
+        case .preview: "ตัวอย่างสด"
         }
     }
 
@@ -31,6 +32,7 @@ enum ShellTool: String, Identifiable {
         case .checkpoints: "clock.arrow.circlepath"
         case .orchestra: "point.3.connected.trianglepath.dotted"
         case .monitor: "gauge.with.dots.needle.50percent"
+        case .preview: "safari"
         }
     }
 }
@@ -86,6 +88,8 @@ struct ToolSheet: View {
             OrchestratorView(engine: engine, workspace: ws)
         case .monitor:
             SystemMonitorView()
+        case .preview:
+            ShellPreview()
         }
     }
 }

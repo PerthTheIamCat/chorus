@@ -242,12 +242,32 @@ private struct LiveTurnView: View {
                 }
                 if !stream.turn.message.isEmpty {
                     MarkdownBody(text: stream.turn.message)
-                } else if !stream.turn.thoughts.isEmpty {
-                    Text(String(stream.turn.thoughts.suffix(240)))
-                        .font(.callout).foregroundStyle(.secondary).italic().lineLimit(3)
                 }
+                if !stream.turn.thoughts.isEmpty { ThinkingBox(text: stream.turn.thoughts, streaming: stream.turn.message.isEmpty) }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+/// What the agent is thinking. Closed to one line unless the setting asks for
+/// it open (Settings › ทั่วไป); the person can open it per turn.
+private struct ThinkingBox: View {
+    let text: String
+    let streaming: Bool
+    @AppStorage("chorus.thinkingOpen") private var openByDefault = false
+    @State private var open: Bool?
+
+    var body: some View {
+        DisclosureGroup(isExpanded: Binding(get: { open ?? openByDefault }, set: { open = $0 })) {
+            ScrollView {
+                Text(text).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 220)
+        } label: {
+            Label(streaming ? "กำลังคิด…" : "ความคิดของ agent", systemImage: "brain")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 }
