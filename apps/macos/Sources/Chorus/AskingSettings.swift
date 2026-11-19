@@ -1,3 +1,4 @@
+import CChorus
 import SwiftUI
 
 // Settings › การถามและอัตโนมัติ — how often the app may interrupt with a
