@@ -248,6 +248,17 @@ pub struct CompactReport {
     /// True when the pass stopped on the clock rather than finishing its
     /// batch — the signal that the summariser is slow, not that anything failed.
     pub hit_budget: bool,
+    /// What the off-path learning pass queued after compaction (`Session::learn`).
+    pub learned: LearnReport,
+}
+
+/// What one pass of [`Session::learn`] put in the approve queue.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LearnReport {
+    /// Lessons drafted from the ledger.
+    pub lessons: usize,
+    /// Facts suggested for retirement.
+    pub retirements: usize,
 }
 
 fn clip(text: &str, max_chars: usize) -> String {
@@ -281,10 +292,7 @@ fn str_list(v: &serde_json::Value, key: &str) -> Vec<String> {
 /// seen — reaches the next agent unchanged, because the cost of dropping a
 /// line that mattered is much higher than the tokens it saves.
 fn is_bare_success(body: &str) -> bool {
-    let Some((_, status)) = body.rsplit_once(" → ") else {
-        return false;
-    };
-    matches!(status.trim(), "completed" | "success" | "ok")
+    chorus_core::render::parse_tool_result(body).is_some_and(|v| v.is_bare_success())
 }
 
 /// `CHORUS_ACP_LOG=<path>` writes every JSON-RPC frame, both directions, to a
@@ -541,6 +549,59 @@ fn run_child_turn(
     Ok((rep.turn.message, stat, files))
 }
 
+fn parent_of(sub: &chorus_core::agent_control::Subagent) -> i64 {
+    sub.parent_sess.unwrap_or_default()
+}
+
+/// Whether `agent` may answer a one-shot opinion: `want` is a provider id, or
+/// `other_than:<asker>` for "anyone but the provider of this agent".
+fn opinion_provider_ok(want: &str, agent: &str) -> bool {
+    let provider = crate::orchestra::provider_for(agent);
+    match want.strip_prefix("other_than:") {
+        Some(asker) => provider != crate::orchestra::provider_for(asker),
+        None => provider == want,
+    }
+}
+
+/// What a finished writing child's work gets before the lead reads it:
+/// a label when it edited outside its `files_owned`, then the project's check
+/// and its `done_when`, sent back to the same child once on failure.
+fn finish_writer(
+    first: crate::child_verify::Work,
+    spec: &Option<chorus_core::agent_control::TaskSpec>,
+    st: &ChildRunnerState,
+    worktree: Option<&str>,
+    has_worktree: bool,
+    run: &dyn Fn(&str) -> Result<crate::child_verify::Work>,
+) -> crate::child_verify::Work {
+    let Some(wt) = worktree.filter(|_| has_worktree) else {
+        return first;
+    };
+    let done_when = spec.as_ref().map(|s| s.done_when.clone()).unwrap_or_default();
+    let (cwd, wt) = (st.cwd.clone(), PathBuf::from(wt));
+    let trust = chorus_core::trust::TrustStore::default_location();
+    let confine = |argv: &[String], dir: &Path| sandbox::wrap(argv, dir, sandbox::Profile::Workspace);
+    let mut verify = || crate::child_verify::verify_child(&trust, &confine, &cwd, &wt, &done_when);
+    let mut rerun = |text: &str| run(text).map_err(|e| format!("{e:#}"));
+    let mut out = crate::child_verify::gate(first, &mut verify, &mut rerun);
+    // Files Chorus itself projects into every checkout are not the child's.
+    let touched: Vec<String> = out
+        .2
+        .iter()
+        .filter(|f| !is_projected_file(f))
+        .cloned()
+        .collect();
+    let owned = spec.as_ref().map(|s| s.files_owned.as_slice()).unwrap_or(&[]);
+    let outside = chorus_core::orchestra_plan::outside_owned(&touched, owned);
+    if !outside.is_empty() {
+        out.0.push_str(&format!(
+            "\n\n{}",
+            chorus_core::orchestra_plan::scope_label(&outside)
+        ));
+    }
+    out
+}
+
 impl SessionChildRunner {
     fn tag_of(&self, subagent_id: i64) -> Option<i64> {
         self.state
@@ -576,6 +637,25 @@ impl chorus_core::agent_control::ChildRunner for SessionChildRunner {
             .candidates
             .clone()
             .unwrap_or_else(|| crate::orchestra::candidates_from(&crate::agents::list_agents()));
+        let spec = ac::TaskSpec::split(&subagent.task).1;
+        // A one-shot opinion goes to another provider, or it is not an opinion.
+        let candidates = match spec.as_ref().map(|s| s.prefer_provider.as_str()) {
+            Some(want) if !want.is_empty() => {
+                let kept: Vec<_> = candidates
+                    .into_iter()
+                    .filter(|c| opinion_provider_ok(want, &c.agent))
+                    .collect();
+                if kept.is_empty() {
+                    return Err(chorus_core::ChorusError::Invalid(
+                        "no ready agent from a different provider to ask (login to a second \
+                         account in Settings › Accounts)"
+                            .into(),
+                    ));
+                }
+                kept
+            }
+            _ => candidates,
+        };
         let role = chorus_core::roles::find_role(&st.cwd, &subagent.role);
         let route = crate::orchestra::route_child(
             &candidates,
@@ -586,10 +666,21 @@ impl chorus_core::agent_control::ChildRunner for SessionChildRunner {
         )
         .map_err(|e| chorus_core::ChorusError::Invalid(format!("{e:#}")))?;
         let chain = crate::orchestra::child_chain(&route, &candidates);
-        let prompt = child_prompt(role.as_ref(), &subagent.task);
+        let mut prompt = child_prompt(role.as_ref(), &subagent.task);
+        // What siblings have already posted, for a child that starts late.
+        if let Ok(store) = Store::open(&st.db_path) {
+            let notes = chorus_core::orchestra_plan::board(store.conn(), parent_of(subagent));
+            if !notes.is_empty() {
+                prompt.push_str(&format!(
+                    "\n\nBoard (changes siblings already made):\n{}",
+                    chorus_core::orchestra_plan::render_board(&notes, Some(subagent.id))
+                ));
+            }
+        }
         let has_worktree = subagent.worktree.is_some();
         let policy = child_policy(st.parent_policy, has_worktree);
         let subagent_id = subagent.id;
+        let worktree_path = subagent.worktree.clone();
         let parent = subagent.parent_sess.unwrap_or_default();
         let deadline = {
             let store = Store::open(&st.db_path)?;
@@ -620,18 +711,23 @@ impl chorus_core::agent_control::ChildRunner for SessionChildRunner {
                     }
                 });
             }
-            let res = run_child_turn(
-                &st.db_path,
-                child_sess_id,
-                tag,
-                st.forced_bridge.clone(),
-                st.route_preset,
-                &route,
-                &chain,
-                &prompt,
-                policy,
-                has_worktree,
-            );
+            let run = |text: &str| {
+                run_child_turn(
+                    &st.db_path,
+                    child_sess_id,
+                    tag,
+                    st.forced_bridge.clone(),
+                    st.route_preset,
+                    &route,
+                    &chain,
+                    text,
+                    policy,
+                    has_worktree,
+                )
+            };
+            let res = run(&prompt).map(|first| {
+                finish_writer(first, &spec, &st, worktree_path.as_deref(), has_worktree, &run)
+            });
             done.store(true, std::sync::atomic::Ordering::SeqCst);
             let Ok(store) = Store::open(&st.db_path) else {
                 return;
@@ -697,9 +793,15 @@ fn event_row(
     match ev {
         AgentEvent::Message(m) => (EventKind::Msg, m.clone()),
         AgentEvent::ToolCall { title, kind } => (EventKind::ToolCall, format!("{kind}: {title}")),
-        AgentEvent::ToolResult { title, status } => {
-            (EventKind::ToolResult, format!("{title} → {status}"))
-        }
+        AgentEvent::ToolResult {
+            title,
+            status,
+            exit,
+            output,
+        } => (
+            EventKind::ToolResult,
+            chorus_core::render::encode_tool_result(title, status, *exit, output),
+        ),
         AgentEvent::SubagentSpawned {
             session_id,
             parent_session_id,
@@ -829,6 +931,11 @@ pub struct Session {
     /// Let Claude use the user's own Chrome through the Claude in Chrome
     /// extension (Settings › off by default).
     claude_chrome: bool,
+    /// Let Claude Code keep its own auto memory (`~/.claude/projects/*/memory`).
+    /// Off by default: Chorus memory is single-sourced, so a second, private
+    /// memory that other agents never see is turned off for Claude's turns
+    /// (Settings › off by default). See `provider_memory_env`.
+    claude_auto_memory: bool,
     /// The agent sandbox denies reading `.env*` and key files; Chorus reads
     /// the project `.env` itself and passes its variables as environment
     /// (Settings › on by default).
@@ -837,6 +944,11 @@ pub struct Session {
     /// Agents are told about them every turn and the sandbox treats them
     /// like the working directory.
     project_folders: Vec<PathBuf>,
+    /// Ids of the memory facts the latest `assemble_context` put in the prompt.
+    /// `assemble_context` only notes them here; the turn's epilogue
+    /// (`account_memory`) is what writes the counters (7.2b: assembling makes
+    /// nothing).
+    injected_facts: std::sync::Mutex<Vec<i64>>,
 }
 
 /// What an agent is told about the rest of its project. Names and absolute
@@ -896,6 +1008,22 @@ pub fn provider_browser_env(agent_name: &str, claude_chrome: bool) -> Vec<(Strin
     }
 }
 
+/// `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` keeps Claude Code from loading or
+/// writing its auto memory (code.claude.com/docs/en/env-vars and /memory,
+/// checked 18 Nov 2026; the Agent SDK docs list auto memory among what an SDK
+/// process picks up from `~/.claude`, and name this variable as the way to turn
+/// it off). Without it a Claude turn under `claude-agent-acp` may read and write
+/// notes no other agent sees — a second memory beside Chorus's. `allow` leaves
+/// the user's own setting alone (it does not force it on). Other agents have no
+/// such memory, so they get nothing. Takes effect from the next turn's bridge.
+pub fn provider_memory_env(agent_name: &str, allow_claude_auto_memory: bool) -> Vec<(String, String)> {
+    if !allow_claude_auto_memory && agent_name.to_lowercase().contains("claude") {
+        vec![("CLAUDE_CODE_DISABLE_AUTO_MEMORY".to_string(), "1".to_string())]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Rides with the prompt of a plan turn, never stored (rule 2.1). The turn
 /// itself runs under `Policy::ReadOnly`, so this is the explanation, not the
 /// enforcement: Seatbelt blocks writes and `revert_if_touched` rolls back any
@@ -915,9 +1043,25 @@ const HONESTY_GUIDANCE: &str = "\n(Chorus: if the task is missing information yo
      of guessing. If the spec cannot be met, say so plainly. Do not edit, weaken, skip or delete \
      a test just to make it pass; if a test is wrong, say why and let the user decide.)\n";
 
+/// What a child agent is told about working next to others.
+const CHILD_AGENT_HINT: &str = "(Chorus: you are one of several agents on this task. Stay inside \
+the files you own. If you are blocked or an assumption would be costly to get wrong, ask the lead \
+with `chorus_ask_lead` (at most 3 questions; if no answer comes, go on with your best assumption \
+and say so). If you change an interface others rely on, post one line with `chorus_board_post`. \
+`chorus_board_read` shows what the others posted. For a second opinion from another provider use \
+`chorus_ask_provider`. The lead decides and merges.)\n";
+
 /// Added only when someone is registered to answer: an agent is never told to
 /// call a tool it was not given.
 const ASK_USER_HINT: &str = "(Chorus: you can ask with the `chorus_ask_user` tool.)\n";
+
+/// Same rule for the other two ways an agent can reach the person: it asks for
+/// a credential instead of having it pasted into chat, and lets taste decide
+/// between versions it made.
+const REQUEST_SECRET_HINT: &str = "(Chorus: if you need a key or token, ask with the \
+     `chorus_request_secret` tool; never ask the user to paste it into chat.)\n";
+const VARIANTS_HINT: &str = "(Chorus: when you made several versions of something visual and taste \
+     decides, show them with the `chorus_offer_variants` tool.)\n";
 
 /// Identical consecutive tool calls in one turn: warn at `warn`, stop at `stop`.
 /// Consecutive on purpose. Running `cargo test` five times in a fix loop is
@@ -1116,8 +1260,10 @@ impl Session {
             lane_confine: None,
             computer_use: false,
             claude_chrome: false,
+            claude_auto_memory: false,
             hide_secret_files: true,
             project_folders: Vec::new(),
+            injected_facts: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -1174,8 +1320,10 @@ impl Session {
             lane_confine: None,
             computer_use: false,
             claude_chrome: false,
+            claude_auto_memory: false,
             hide_secret_files: true,
             project_folders: Vec::new(),
+            injected_facts: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -1413,6 +1561,13 @@ impl Session {
         Ok((facts, pending))
     }
 
+    /// The approve queue with what each entry is (fact, lesson, retirement),
+    /// what it replaces and the evidence it came from — `memory_state`'s
+    /// `(id, scope, text)` tuples keep their shape for older callers.
+    pub fn memory_proposals(&self) -> Result<Vec<memory::Proposal>> {
+        Ok(memory::pending(self.mem_store().conn())?)
+    }
+
     /// Approve or reject a queued proposal.
     pub fn review_proposal(&self, id: i64, approve: bool) -> Result<()> {
         let c = self.mem_store().conn();
@@ -1431,7 +1586,18 @@ impl Session {
             .checkpoint
             .as_ref()
             .context("no shadow repo for this workspace")?;
-        Ok(ck.apply_reverse(patch)?)
+        ck.apply_reverse(patch)?;
+        // Leave a trace in the ledger: the next agent should know the user threw
+        // this away, and the lesson pass learns from it.
+        let files = chorus_core::lessons::patch_files(patch);
+        if !files.is_empty() {
+            let note = format!("{}{}", chorus_core::lessons::REJECTED_PREFIX, files.join(", "));
+            ledger::append(
+                self.store.conn(),
+                &NewEvent::new(self.sess, EventKind::Decision, self.user, mask_secrets(&note)),
+            )?;
+        }
+        Ok(())
     }
 
     /// Roll the workspace back to `sha` (or the session base when empty).
@@ -1496,7 +1662,7 @@ impl Session {
         // Assemble history from the ledger *before* adding this turn, so the
         // new instruction isn't also fed back as the last thing said.
         let prompt = if has_history {
-            let ctx = self.assemble_context(120_000)?;
+            let ctx = self.assemble_context_for(120_000, Some(user_text))?;
             format!(
                 "{ctx}\n\n---\nThat is the session so far, reconstructed from the shared \
                  ledger. Continue from here.\n\nNew instruction:\n{user_text}"
@@ -2095,7 +2261,76 @@ impl Session {
 
     pub fn compact(&self, limit: usize) -> Result<CompactReport> {
         let summarizer = compaction::best();
-        self.compact_with(summarizer.as_ref(), limit, Self::compact_budget())
+        let mut report = self.compact_with(summarizer.as_ref(), limit, Self::compact_budget())?;
+        // Same off-path moment, same serial queue: draft lessons and retirement
+        // suggestions into the approve queue. Never fails the compaction.
+        match self.learn() {
+            Ok(l) => report.learned = l,
+            Err(e) => eprintln!("chorus: learning pass skipped: {e:#}"),
+        }
+        Ok(report)
+    }
+
+    /// Memory that learns, off the turn path (`compact` calls this; so does
+    /// `chorus memory learn`): read what happened since the last pass and queue
+    /// lessons (failed-then-fixed commands, rejected hunks, rewinds, user
+    /// corrections, unanswered handoffs) and retirement suggestions for facts
+    /// that are never used or point at files that are gone. Everything lands in
+    /// the approve queue; nothing becomes a fact here. A local model rewords a
+    /// lesson only when `CHORUS_SUMMARY_MODEL` is set, within the compaction
+    /// time budget.
+    pub fn learn(&self) -> Result<LearnReport> {
+        let started = std::time::Instant::now();
+        let scan = chorus_core::lessons::scan(self.store.conn(), self.sess)?;
+        let mut drafts = scan.drafts.clone();
+        drafts.sort_by_key(|d| std::cmp::Reverse(d.seq));
+        drafts.truncate(chorus_core::lessons::MAX_PER_PASS);
+        if let Some(model) = std::env::var("CHORUS_SUMMARY_MODEL").ok().filter(|m| !m.trim().is_empty()) {
+            let ollama = compaction::Ollama::new(model);
+            let budget = Self::compact_budget();
+            for d in drafts.iter_mut() {
+                if started.elapsed() >= budget {
+                    break;
+                }
+                d.text = chorus_core::lessons::polish(&ollama, &d.text);
+            }
+        }
+        let mem = self.mem_store().conn();
+        // The Learn screen's autonomy decides each lesson's fate (`learn::decide`).
+        // Tainted drafts and drafts without a passing test are always queued.
+        let mode = chorus_core::learn::settings_path()
+            .map(|p| chorus_core::learn::load_settings(&p).autonomy)
+            .unwrap_or_default();
+        let (mut keep, mut auto) = (Vec::new(), Vec::new());
+        for d in drafts {
+            let ev = chorus_core::learn::LessonEvidence {
+                tests_passed: d.signal == chorus_core::lessons::Signal::FixedAfterFailing
+                    && chorus_core::outcomes::is_test_command(&d.text),
+                tainted: d.suspicious,
+            };
+            match chorus_core::learn::decide(mode, &ev) {
+                chorus_core::learn::Decision::Drop => {}
+                chorus_core::learn::Decision::Queue => keep.push(d),
+                chorus_core::learn::Decision::AutoAccept => auto.push(d),
+            }
+        }
+        let mut queued = chorus_core::lessons::queue(mem, keep)?;
+        if !auto.is_empty() {
+            let before: std::collections::HashSet<i64> =
+                memory::pending(mem)?.iter().map(|p| p.id).collect();
+            let q = chorus_core::lessons::queue(mem, auto)?;
+            queued.queued += q.queued;
+            for p in memory::pending(mem)? {
+                if !before.contains(&p.id) && !p.suspicious {
+                    memory::approve(mem, p.id)?;
+                    queued.queued -= 1;
+                }
+            }
+        }
+        // Only now: if queueing failed, the next pass reads the same events again.
+        chorus_core::lessons::mark_scanned(self.store.conn(), self.sess, &scan)?;
+        let retirements = memory::suggest_retirements(mem, &self.cwd, 3)?.len();
+        Ok(LearnReport { lessons: queued.queued, retirements })
     }
 
     /// The testable half of [`compact`]: summariser and time budget injected.
@@ -2119,6 +2354,7 @@ impl Session {
                 model: "nothing to do".into(),
                 took_ms: 0,
                 hit_budget: false,
+                learned: LearnReport::default(),
             });
         }
         let model = summarizer.label();
@@ -2144,6 +2380,7 @@ impl Session {
             model,
             took_ms: started.elapsed().as_millis() as u64,
             hit_budget,
+            learned: LearnReport::default(),
         })
     }
 
@@ -2154,6 +2391,14 @@ impl Session {
     }
 
     pub fn assemble_context(&self, budget: i64) -> Result<String> {
+        self.assemble_context_for(budget, None)
+    }
+
+    /// [`Self::assemble_context`] for a turn about to run: `instruction` is the
+    /// user's new message, not yet in the ledger, and is what memory is ranked
+    /// against (R2). Without it the query would be the *previous* message, so a
+    /// fact about what the user is asking now would be left out.
+    pub fn assemble_context_for(&self, budget: i64, instruction: Option<&str>) -> Result<String> {
         let c = self.store.conn();
         let events = ledger::history(c, self.sess, 400)?;
         let bodies: Vec<(Event, String)> = events
@@ -2182,6 +2427,7 @@ impl Session {
             .collect();
 
         let n = bodies.len();
+        let tool_refs = !std::env::var("CHORUS_R1_TOOL_REFS").is_ok_and(|v| v == "off");
         let turns: Vec<TurnItem> = bodies
             .iter()
             .enumerate()
@@ -2200,6 +2446,24 @@ impl Session {
                     }
                 }
                 let who = actor::name(c, e.actor).unwrap_or_else(|_| "?".into());
+                // A tool result that printed something: recent ones keep an
+                // excerpt, older ones become one line with a blob reference.
+                // The compacted rungs are for prose; they would only cut the
+                // output mid-line.
+                if tool_refs && e.kind == EventKind::ToolResult {
+                    if let Some((l0, older)) = chorus_core::render::tool_result_rungs(
+                        body,
+                        e.blob.as_ref().map(|b| b.0.as_str()),
+                    ) {
+                        return TurnItem {
+                            text_l0: format!("{who}: {l0}"),
+                            text_l1: Some(format!("{who}: {older}")),
+                            text_l2: Some(format!("{who}: {older}")),
+                            age: n - 1 - i,
+                            key: None,
+                        };
+                    }
+                }
                 let r = match rungs.get(&e.seq) {
                     Some(r) => r.clone(),
                     None => compaction::rungs_for(&compaction::Extractive, body),
@@ -2236,6 +2500,19 @@ impl Session {
             );
         }
 
+        // Optional project notes written at idle by a local model (E6). A plain
+        // read of a stored row: off unless CHORUS_SUMMARY_MODEL is set, and
+        // never generated here (7.2b).
+        if let Some(notes) =
+            chorus_core::project_notes::for_context(c, &self.cwd.to_string_lossy())
+        {
+            code.push(ContextItem {
+                text: format!("project notes:\n{notes}"),
+                key: None,
+                label: "project-notes".into(),
+            });
+        }
+
         // Facts relevant to what the user last said come first; with no user
         // message yet this is the plain most-used order.
         let query = bodies
@@ -2244,6 +2521,7 @@ impl Session {
             .find(|(e, _)| e.kind == EventKind::Msg && e.actor == self.user)
             .map(|(_, b)| b.as_str())
             .unwrap_or("");
+        let query = instruction.filter(|t| !t.trim().is_empty()).unwrap_or(query);
         let embedder = chorus_core::embedding::from_env();
         let facts = memory::relevant_with(self.mem_store().conn(), 1, query, 12, embedder.as_deref())?;
         let memory_items: Vec<ContextItem> = memory::render(&facts)
@@ -2266,7 +2544,47 @@ impl Session {
             code,
         };
         let assembler = Assembler::new(Budget::new(budget), CachedCounter::new(HeuristicCounter));
-        Ok(assembler.assemble(&input).text)
+        let text = assembler.assemble(&input).text;
+        // Remember which facts actually made it into the prompt (a fact the
+        // budget dropped was not injected). Written after the turn, not here.
+        if let Ok(mut held) = self.injected_facts.lock() {
+            *held = facts.iter().filter(|f| text.contains(&f.text)).map(|f| f.id).collect();
+        }
+        Ok(text)
+    }
+
+    /// The turn's epilogue for memory: count the facts this turn's context
+    /// carried as injected, and those the agent's output then touched as
+    /// referenced (schema v9). Best effort — a counter that cannot be written
+    /// must not fail a turn that already happened.
+    fn account_memory(&self, outcome: &TurnOutcome) {
+        let ids = match self.injected_facts.lock() {
+            Ok(mut held) => std::mem::take(&mut *held),
+            Err(_) => return,
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let mut said = String::new();
+        for ev in &outcome.events {
+            match ev {
+                AgentEvent::Message(m) => said.push_str(m),
+                AgentEvent::ToolCall { title, .. } => said.push_str(title),
+                AgentEvent::Diff { path, .. } => said.push_str(path),
+                _ => continue,
+            }
+            said.push('\n');
+        }
+        let c = self.mem_store().conn();
+        let counted = (|| -> Result<()> {
+            memory::record_injected(c, &ids)?;
+            let facts = memory::fact_texts(c, &ids)?;
+            memory::record_referenced(c, &memory::referenced_ids(&said, &facts))?;
+            Ok(())
+        })();
+        if let Err(e) = counted {
+            eprintln!("chorus: memory counters not updated: {e:#}");
+        }
     }
 
     /// The workspace's symbols, ranked towards the files this session has
@@ -2580,11 +2898,16 @@ impl Session {
 
         let mut env = crate::accounts::env_for(agent_name);
         env.extend(provider_browser_env(agent_name, self.claude_chrome));
+        env.extend(provider_memory_env(agent_name, self.claude_auto_memory));
         // Secrets the prompt names reach the agent's shell as variables; the
         // model only ever sees `$CHORUS_SECRET_…`.
         let vault = secrets::user_vault();
         let named = secrets::referenced(text);
         env.extend(vault.resolve(&named));
+        // Secrets the agent asked for in an earlier turn (`chorus_request_secret`):
+        // a running bridge's environment cannot change, so they arrive now.
+        let requested = vault.requested(&secrets::project_scope(&self.cwd));
+        env.extend(requested.env.iter().cloned());
         // Only when the sandbox really hides `.env`: otherwise the agent can
         // read it anyway and being told it cannot would be a lie.
         let project_env = if self.hide_secret_files && sandboxed {
@@ -2650,16 +2973,32 @@ impl Session {
             prompt_text.push_str(
                 "\n\n(Chorus: if the user asks you to remember something, or states a durable \
                  project fact, call the `memory_propose` tool with it. Do not just say you \
-                 remembered it.)\n\
-                 (Chorus: Multi-agent orchestration is enabled, but split only when it pays off: \
-                 spawn with `chorus_spawn_agent` only if there are at least two parts that do not \
-                 depend on each other and do not touch the same files. Sequential coding, or work \
-                 where each step needs the last one's result, stays with you alone. Investigators \
-                 and reviewers only read, so they may run in parallel; give each writer its own \
-                 `files_owned` and never let two writers share a file. Prefer a reviewer from a \
-                 different provider than the builder. Coordinate with `chorus_wait_agent` and \
-                 `chorus_collect_results`, and track progress with `chorus_update_checklist`.)\n",
+                 remembered it.)\n",
             );
+            if chorus_core::orchestra_plan::child_of(self.store.conn(), self.sess).is_some() {
+                prompt_text.push_str(CHILD_AGENT_HINT);
+            } else {
+                prompt_text.push_str(
+                    "(Chorus: Multi-agent orchestration is enabled, but split only when it pays off: \
+                     spawn with `chorus_spawn_agent` only if there are at least two parts that do not \
+                     depend on each other and do not touch the same files. Sequential coding, or work \
+                     where each step needs the last one's result, stays with you alone. Investigators \
+                     and reviewers only read, so they may run in parallel; give each writer its own \
+                     `files_owned` and never let two writers share a file. Before a writer runs next \
+                     to another agent, write the split with `chorus_plan_orchestra` (subtasks, what \
+                     depends on what, files each owns, agreed signatures, a `done_when` each) and \
+                     spawn each writer with its `plan_task`. Prefer a reviewer from a \
+                     different provider than the builder; for a second opinion on a plan use \
+                     `chorus_ask_provider`. Coordinate with `chorus_wait_agent` and \
+                     `chorus_collect_results`, and track progress with `chorus_update_checklist`. \
+                     Questions from your agents arrive as messages; answer with \
+                     `chorus_send_message`.)\n",
+                );
+                prompt_text.push_str(&chorus_core::orchestra_plan::lead_digest(
+                    self.store.conn(),
+                    self.sess,
+                ));
+            }
         }
         if self.plan_turn {
             prompt_text.push_str(PLAN_MODE_GUIDANCE);
@@ -2668,10 +3007,17 @@ impl Session {
         if chorus_core::ask_user::available(self.store.conn(), self.sess) {
             prompt_text.push_str(ASK_USER_HINT);
         }
+        if chorus_core::request_secret::available(self.store.conn(), self.sess) {
+            prompt_text.push_str(REQUEST_SECRET_HINT);
+        }
+        if chorus_core::variants::available(self.store.conn(), self.sess) {
+            prompt_text.push_str(VARIANTS_HINT);
+        }
         if !named.is_empty() {
             prompt_text.push_str(secrets::AGENT_GUIDANCE);
         }
         prompt_text.push_str(&secrets::project_env_guidance(&project_env.names));
+        prompt_text.push_str(&secrets::requested_guidance(&requested.names));
         // Without the sandbox nothing stops writes there anyway, so "edit" is
         // true whenever the mode lets the agent write at all.
         prompt_text.push_str(&project_folders_guidance(
@@ -2841,8 +3187,11 @@ impl Session {
                         Some(t) => {
                             chorus_acp::cancel_tag(t);
                         }
+                        // The lead's own loop ends the lead's turn only: its
+                        // children are other agents doing other work, and their
+                        // results wait for the lead's next turn.
                         None => {
-                            chorus_acp::cancel_active();
+                            chorus_acp::cancel_own_turn();
                         }
                     }
                 }
@@ -2908,7 +3257,7 @@ impl Session {
         let agent_actor = actor::intern(self.store.conn(), agent_name, provider)?;
         let has_history = !ledger::history(self.store.conn(), self.sess, 1)?.is_empty();
         let prompt = if has_history {
-            let ctx = self.assemble_context(120_000)?;
+            let ctx = self.assemble_context_for(120_000, Some(user_text))?;
             format!(
                 "{ctx}\n\n---\nThat is the session so far, reconstructed from the shared \
                  ledger. Continue from here.\n\nNew instruction:\n{user_text}"
@@ -3109,6 +3458,7 @@ impl Session {
             outcome.cost_usd,
         )?;
         seqs.extend(self.flush_loop_notes());
+        self.account_memory(outcome);
         // The agent's own plan is the task list the shell shows (the ACP
         // `plan` frame replaces the whole list each time, so the last one
         // wins). It goes through the same checklist as `chorus_update_checklist`.
@@ -3161,7 +3511,7 @@ impl Session {
         };
         let mut open = open;
         for ev in &outcome.events {
-            let AgentEvent::ToolResult { title, status } = ev else {
+            let AgentEvent::ToolResult { title, status, .. } = ev else {
                 continue;
             };
             let Some(i) = open.iter().position(|(t, _)| t == title) else {
@@ -3294,6 +3644,12 @@ impl Session {
         self.claude_chrome = on;
     }
 
+    /// Allow Claude Code's own auto memory instead of switching it off
+    /// (Settings › off by default; see `provider_memory_env`).
+    pub fn set_claude_auto_memory(&mut self, on: bool) {
+        self.claude_auto_memory = on;
+    }
+
     /// Hide `.env*` and key files from the agent (Settings › on by default).
     pub fn set_hide_secret_files(&mut self, on: bool) {
         self.hide_secret_files = on;
@@ -3311,6 +3667,15 @@ impl Session {
             }
         }
         self.project_folders = keep;
+        chorus_core::variants::set_roots(self.store.conn(), self.sess, self.image_roots());
+    }
+
+    /// Where an agent may point `chorus_offer_variants` at an image: the
+    /// working directory first, then the project's other folders.
+    fn image_roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![self.cwd.canonicalize().unwrap_or_else(|_| self.cwd.clone())];
+        roots.extend(self.project_folders.iter().cloned());
+        roots
     }
 
     pub fn project_folders(&self) -> &[PathBuf] {
@@ -3322,6 +3687,22 @@ impl Session {
     /// in "allow everything" turns too.
     pub fn set_question_asker(&self, asker: Option<chorus_core::ask_user::Asker>) {
         chorus_core::ask_user::set_asker(self.store.conn(), self.sess, asker);
+    }
+
+    /// Who types in a credential when an agent calls `chorus_request_secret`.
+    /// The value goes straight to the vault; the agent only learns a name.
+    pub fn set_secret_asker(&self, asker: Option<chorus_core::request_secret::Asker>) {
+        chorus_core::request_secret::set_asker(
+            self.store.conn(),
+            self.sess,
+            &secrets::project_scope(&self.cwd),
+            asker,
+        );
+    }
+
+    /// Who picks when an agent calls `chorus_offer_variants`.
+    pub fn set_variants_asker(&self, asker: Option<chorus_core::variants::Asker>) {
+        chorus_core::variants::set_asker(self.store.conn(), self.sess, self.image_roots(), asker);
     }
 
     /// Who answers "may the agent click here?" during an interactive turn.

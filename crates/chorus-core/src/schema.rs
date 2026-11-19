@@ -14,7 +14,7 @@
 use crate::Result;
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// Create (or upgrade) the schema. Safe to call on every open.
 pub fn migrate(conn: &Connection) -> Result<()> {
@@ -268,6 +268,42 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if !has_column(conn, "session", "review_base")? {
         conn.execute_batch("ALTER TABLE session ADD COLUMN review_base TEXT")?;
     }
+
+    // v9: memory that learns. Per-fact counters (how often a fact was put in
+    // front of a model, how often the agent's output then touched it), and the
+    // approve queue learns what kind of entry it holds. All additive: an old
+    // row reads as an ordinary fact proposal that nobody has injected yet.
+    for (table, column, ddl) in [
+        ("fact", "injected", "ALTER TABLE fact ADD COLUMN injected INTEGER NOT NULL DEFAULT 0"),
+        ("fact", "referenced", "ALTER TABLE fact ADD COLUMN referenced INTEGER NOT NULL DEFAULT 0"),
+        ("fact", "last_injected_ms", "ALTER TABLE fact ADD COLUMN last_injected_ms INTEGER"),
+        // 'fact' | 'lesson' | 'retire'. `replaces` is the fact a proposal
+        // would overwrite (or, for 'retire', delete).
+        ("fact_proposal", "kind", "ALTER TABLE fact_proposal ADD COLUMN kind TEXT NOT NULL DEFAULT 'fact'"),
+        ("fact_proposal", "replaces", "ALTER TABLE fact_proposal ADD COLUMN replaces INTEGER"),
+        ("fact_proposal", "evidence", "ALTER TABLE fact_proposal ADD COLUMN evidence TEXT"),
+        // Came from an imported session or web content: never auto-accepted.
+        ("fact_proposal", "suspicious", "ALTER TABLE fact_proposal ADD COLUMN suspicious INTEGER NOT NULL DEFAULT 0"),
+        // Where the lesson pass stopped reading this session, so a rejected
+        // lesson is not drafted again on the next pass.
+        ("session", "lessons_seq", "ALTER TABLE session ADD COLUMN lessons_seq INTEGER NOT NULL DEFAULT 0"),
+        ("session", "lessons_ms", "ALTER TABLE session ADD COLUMN lessons_ms INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !has_column(conn, table, column)? {
+            conn.execute_batch(ddl)?;
+        }
+    }
+    // Opt-in project notes written at idle (project_notes.rs). Derived data in
+    // the warm tier, not the ledger: safe to drop, rebuilt from the ledger.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS project_notes (
+            cwd        TEXT PRIMARY KEY,
+            notes      TEXT NOT NULL,
+            basis      TEXT NOT NULL,
+            model      TEXT NOT NULL,
+            created_ms INTEGER NOT NULL
+        );",
+    )?;
 
     // v7: `subagent.kind` and a `waiting` status. SQLite cannot alter a CHECK
     // constraint, so the table is rebuilt. Foreign keys go off for the swap:

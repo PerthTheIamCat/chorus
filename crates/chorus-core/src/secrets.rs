@@ -517,6 +517,30 @@ pub struct Entry {
     pub kind: String,
     /// BLAKE3 of the value: the same value keeps its name across sessions.
     pub fingerprint: String,
+    /// Set for a secret the agent asked for (`chorus_request_secret`): the
+    /// variable name it is injected under. Absent for masked values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+    /// With `env`: [`SCOPE_ALL`] or [`project_scope`] — whose turns get it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+}
+
+/// A requested secret the user chose to keep for every project.
+pub const SCOPE_ALL: &str = "all";
+
+/// The scope string for "this project only": its canonical folder.
+pub fn project_scope(cwd: &std::path::Path) -> String {
+    let p = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    format!("project:{}", p.display())
+}
+
+/// Secrets the agent asked for, ready for one turn's environment.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Requested {
+    pub env: Vec<(String, String)>,
+    /// Variable names (never values) for the prompt guidance.
+    pub names: Vec<String>,
 }
 
 /// The result of masking a text.
@@ -541,6 +565,9 @@ pub struct Vault {
     /// Values the backend refused (locked Keychain): still usable for the
     /// rest of this run, just not remembered across runs.
     fallback: Memory,
+    /// Requested secrets given "for now": `(variable name, placeholder)`.
+    /// Process memory only — the values never reach the Keychain.
+    run_env: Mutex<Vec<(String, String)>>,
 }
 
 impl Vault {
@@ -556,6 +583,7 @@ impl Vault {
             index: Mutex::new(index),
             known: Mutex::new(Vec::new()),
             fallback: Memory::default(),
+            run_env: Mutex::new(Vec::new()),
         }
     }
 
@@ -627,11 +655,92 @@ impl Vault {
             name: name.clone(),
             kind: kind.to_string(),
             fingerprint: fp,
+            env: None,
+            scope: None,
         });
         self.save_index(&index);
         drop(index);
         self.remember(&name, value);
         (name, stored)
+    }
+
+    /// Keep a value the user typed in answer to `chorus_request_secret`,
+    /// under `CHORUS_SECRET_<ENV>`. `scope` = [`SCOPE_ALL`] or a
+    /// [`project_scope`] persists it (Keychain + index) so later turns get
+    /// it; `None` keeps it in memory for this run only and never writes it
+    /// to the Keychain. Returns the placeholder name, and `false` when a
+    /// persistent scope could not reach the Keychain (still usable this run).
+    pub fn put_requested(&self, env: &str, value: &str, scope: Option<&str>) -> (String, bool) {
+        let name = format!("{PREFIX}{env}");
+        self.remember(&name, value);
+        let mut run = self.run_env.lock().unwrap_or_else(|p| p.into_inner());
+        run.retain(|(e, _)| e != env);
+        let Some(scope) = scope else {
+            // An older kept value of the same name must not win over this one.
+            let _ = self.backend.delete(&name);
+            let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
+            if index.iter().any(|e| e.name == name) {
+                index.retain(|e| e.name != name);
+                self.save_index(&index);
+            }
+            drop(index);
+            let _ = self.fallback.put(&name, value);
+            run.push((env.to_string(), name.clone()));
+            return (name, true);
+        };
+        drop(run);
+        let stored = self.store(&name, value);
+        let fp = blake3::hash(value.as_bytes()).to_hex().to_string();
+        let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
+        index.retain(|e| e.name != name);
+        index.push(Entry {
+            name: name.clone(),
+            kind: "REQUESTED".into(),
+            fingerprint: fp,
+            env: Some(env.to_string()),
+            scope: Some(scope.to_string()),
+        });
+        self.save_index(&index);
+        (name, stored)
+    }
+
+    /// The requested secrets that belong in a turn run in `project`: the
+    /// ones kept for all projects or this one, and the ones given for this
+    /// run. Each is set under its placeholder and, unless the name is one
+    /// the bridge needs for itself, under the name the agent asked for.
+    pub fn requested(&self, project: &str) -> Requested {
+        let mut wanted: Vec<(String, String)> = self
+            .index
+            .lock()
+            .map(|i| {
+                i.iter()
+                    .filter_map(|e| {
+                        let scope = e.scope.as_deref()?;
+                        (scope == SCOPE_ALL || scope == project)
+                            .then(|| Some((e.env.clone()?, e.name.clone())))
+                            .flatten()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for pair in self.run_env.lock().map(|r| r.clone()).unwrap_or_default() {
+            if !wanted.iter().any(|(e, _)| *e == pair.0) {
+                wanted.push(pair);
+            }
+        }
+        let mut out = Requested::default();
+        for (env, placeholder) in wanted {
+            let resolved = self.resolve(std::slice::from_ref(&placeholder));
+            let Some((_, value)) = resolved.into_iter().next() else {
+                continue;
+            };
+            out.env.push((placeholder, value.clone()));
+            if !reserved_env(&env) {
+                out.env.push((env.clone(), value));
+            }
+            out.names.push(env);
+        }
+        out
     }
 
     /// Replace every secret in `text` with `$NAME`.
@@ -730,7 +839,7 @@ pub fn user_vault() -> &'static Vault {
 /// auth and runtime. A project's `ANTHROPIC_API_KEY` would silently switch
 /// the Claude bridge from the user's login to API billing. These still
 /// reach the agent under their `CHORUS_SECRET_…` name.
-fn reserved_env(name: &str) -> bool {
+pub(crate) fn reserved_env(name: &str) -> bool {
     const EXACT: &[&str] = &[
         "PATH",
         "HOME",
@@ -814,6 +923,18 @@ pub fn project_env_guidance(names: &[String]) -> String {
         "\n\n(Chorus: the project's .env is not readable from your sandbox. Its variables are already \
          set in your environment: {}. Use them as environment variables; do not try to read .env \
          or print their values.)\n",
+        names.join(", ")
+    )
+}
+
+/// What the agent is told about the secrets it asked for earlier. Names only.
+pub fn requested_guidance(names: &[String]) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\n(Chorus: the user already gave you these secrets, set in your environment: {}. \
+         Use them as environment variables; never print, echo or log their values.)\n",
         names.join(", ")
     )
 }

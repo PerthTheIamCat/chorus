@@ -212,3 +212,32 @@ fn requests_without_the_session_secret_are_rejected() {
     let _ = s.read_to_string(&mut buf);
     assert!(buf.starts_with("HTTP/1.1 401"), "{buf:?}");
 }
+
+#[test]
+fn memory_propose_turns_a_contradiction_into_a_replacement_and_ignores_repeats() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("store.db");
+    {
+        let s = Store::open(&db).unwrap();
+        memory::add(s.conn(), 1, "ใช้ pnpm ไม่ใช่ npm").unwrap();
+    }
+    let server = McpServer::start(db.to_str().unwrap()).unwrap();
+    let call = |text: &str| {
+        let r = rpc(
+            &server,
+            serde_json::json!({"jsonrpc":"2.0","id":9,"method":"tools/call",
+                "params":{"name":"memory_propose","arguments":{"text":text}}}),
+        );
+        r["result"]["content"][0]["text"].as_str().unwrap().to_string()
+    };
+    let said = call("ใช้ yarn ไม่ใช่ npm");
+    assert!(said.contains("replace remembered fact #1"), "{said}");
+    assert!(call("ใช้ yarn ไม่ใช่ npm").contains("Already waiting"));
+    assert!(call("ใช้ pnpm ไม่ใช่ npm").contains("Already remembered"));
+
+    let s = Store::open(&db).unwrap();
+    let q = memory::pending(s.conn()).unwrap();
+    assert_eq!(q.len(), 1);
+    assert_eq!(q[0].replaces, Some(1));
+    assert_eq!(memory::pending_count(s.conn()).unwrap(), 1);
+}

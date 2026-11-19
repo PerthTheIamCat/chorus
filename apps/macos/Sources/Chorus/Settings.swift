@@ -14,7 +14,7 @@ struct SettingsSheet: View {
     enum Section: String, CaseIterable, Identifiable {
         case general, accounts, routing, orchestration
         case agents, safety, integrations, skills
-        case review, cost, storage, languages
+        case review, cost, storage, languages, learn
         case companion, about, changelog
         var id: String { rawValue }
 
@@ -32,6 +32,7 @@ struct SettingsSheet: View {
             case .cost: "การใช้งานและค่าใช้จ่าย"
             case .storage: "พื้นที่และประสิทธิภาพ"
             case .languages: "ภาษา (Syntax)"
+            case .learn: "เรียนรู้"
             case .companion: "Mobile Companion"
             case .about: "เกี่ยวกับ"
             case .changelog: "มีอะไรใหม่"
@@ -52,6 +53,7 @@ struct SettingsSheet: View {
             case .cost: "token โควตา และเงิน"
             case .storage: "โมเดลในเครื่อง หน่วยความจำ และข้อมูล"
             case .languages: "สีตามไวยากรณ์ของแต่ละภาษาในตัวดูโค้ด"
+            case .learn: "สิ่งที่ Chorus เรียนรู้จากงานที่ผ่านมา"
             case .companion: "สั่งงานจาก iPhone"
             case .about: "เวอร์ชันและสัญญาอนุญาต"
             case .changelog: "สิ่งที่เปลี่ยนในแต่ละเวอร์ชัน"
@@ -72,6 +74,7 @@ struct SettingsSheet: View {
             case .cost: "bahtsign.circle"
             case .storage: "internaldrive"
             case .languages: "chevron.left.forwardslash.chevron.right"
+            case .learn: "graduationcap"
             case .companion: "iphone"
             case .about: "info.circle"
             case .changelog: "clock.arrow.circlepath"
@@ -92,6 +95,7 @@ struct SettingsSheet: View {
             case .cost: .mint
             case .storage: .brown
             case .languages: .pink
+            case .learn: .green
             case .companion: .cyan
             }
         }
@@ -99,7 +103,7 @@ struct SettingsSheet: View {
         static let groups: [(title: String, items: [Section])] = [
             ("ใช้งาน", [.general, .accounts, .routing, .orchestration]),
             ("Agent", [.agents, .safety, .integrations, .skills]),
-            ("ข้อมูล", [.review, .cost, .storage, .languages]),
+            ("ข้อมูล", [.review, .cost, .storage, .languages, .learn]),
             ("ระบบ", [.companion, .about, .changelog]),
         ]
     }
@@ -185,6 +189,7 @@ struct SettingsSheet: View {
         case .cost: CostSettings()
         case .storage: StorageSettings()
         case .languages: LanguagesSettings()
+        case .learn: LearnSettings(workspace: workspace)
         case .companion: RemotePairingView()
         case .about: AboutSettings(showChangelog: { section = .changelog })
         case .changelog: ChangelogSettings()
@@ -599,6 +604,27 @@ struct ProviderBrowserSettings: View {
     }
 }
 
+/// Claude Code keeps notes of its own (auto memory) that no other agent sees.
+/// Chorus turns it off for Claude's turns so memory has one source; this is the
+/// way back. The environment variable is set in chorus-cli (`provider_memory_env`).
+struct ClaudeMemorySettings: View {
+    @EnvironmentObject var engine: Engine
+    @AppStorage(Engine.claudeAutoMemoryKey) private var allowAutoMemory = false
+
+    var body: some View {
+        SettingsGroup(title: "ความจำของ Claude",
+                      footer: "ปิดอยู่ = Claude ไม่อ่าน/ไม่เขียนความจำส่วนตัวใน ~/.claude/projects/…/memory ทุกอย่างที่ควรจำจะผ่านความจำร่วมของ Chorus ที่ทุก agent เห็นเหมือนกัน · มีผลตั้งแต่เทิร์นถัดไป") {
+            SettingsRow(title: "ให้ Claude จำเองด้วย auto memory",
+                        info: "เปิดแล้ว Claude อาจเก็บบันทึกที่ agent ตัวอื่นไม่เห็น ทำให้ความจำแยกกัน ตั้ง CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 เมื่อปิด") {
+                Toggle("ให้ Claude จำเองด้วย auto memory", isOn: Binding(
+                    get: { allowAutoMemory },
+                    set: { allowAutoMemory = $0; engine.setClaudeAutoMemory($0) }))
+                    .labelsHidden().toggleStyle(.switch)
+            }
+        }
+    }
+}
+
 /// Computer use: the switch, what it means, and the two macOS permissions it
 /// needs. The rules themselves (read-only turns only look, "ถามก่อน" asks for
 /// every action, a cap per turn) live in chorus-core/src/computer.rs.
@@ -704,6 +730,7 @@ struct SafetySettings: View {
         }
         ComputerUseSettings()
         ProviderBrowserSettings()
+        ClaudeMemorySettings()
         SecretsSettings()
         SettingsGroup(title: "โปรเจกต์ที่เชื่อถือ",
                       footer: "repo ใหม่จะไม่รันอะไรจนกว่าคุณเปิดเอง") {

@@ -271,6 +271,8 @@ fn a_stored_brief_is_one_line_in_context() {
         files: vec!["a.rs".into()],
         diff: "-old\n+new\n".repeat(500),
         handoff: HandoffMeta { from: "claude".into(), to: "codex".into(), reason: HandoffReason::QuotaExhausted, at: 7 },
+        evidence: vec![],
+        unverified: vec![],
     };
     assert_eq!(context_line(&brief.to_json()).as_deref(), Some("handoff: claude → codex (quota exhausted)"));
 
@@ -335,4 +337,40 @@ fn files_chorus_writes_or_prose_do_not_count_as_the_code_half() {
         tests_with_code_note(&paths(&["tests/a.rs", "CLAUDE.md", "AGENTS.md", "Cargo.lock", "README.md", ".claude/skills/x/SKILL.md"])),
         None
     );
+}
+
+#[test]
+fn evidence_lists_commands_with_exit_codes_and_what_is_unverified() {
+    use chorus_core::handoff::evidence;
+    use chorus_core::render::encode_tool_result;
+    use chorus_core::types::{Event, EventKind};
+    let ev = |seq: i64, kind: EventKind, body: &str| {
+        (
+            Event { seq, t: seq, sess: 1, parent: None, kind, actor: 1, body: Some(body.into()), blob: None, tok_in: None, tok_out: None, cost_usd: None, model_id: None },
+            body.to_string(),
+        )
+    };
+    let events = vec![
+        ev(1, EventKind::ToolCall, "execute: cargo test"),
+        ev(2, EventKind::ToolResult, &encode_tool_result("cargo test", "failed", Some(101), "boom")),
+        ev(3, EventKind::ToolCall, "edit: src/a.rs"),
+        ev(4, EventKind::ToolResult, "src/a.rs → completed"),
+        ev(5, EventKind::Diff, "--- a\n+++ b"),
+        ev(6, EventKind::ToolCall, "execute: git push"),
+    ];
+    let (evid, un) = evidence(&events);
+    assert_eq!(evid, vec!["`cargo test` → exit 101", "`git push` → no result recorded"]);
+    assert!(un.iter().any(|u| u.contains("no check/test/build command succeeded")), "{un:?}");
+    assert!(un.iter().any(|u| u.contains("`cargo test` last ended with exit 101")), "{un:?}");
+    assert!(un.iter().any(|u| u.contains("`git push` was started")), "{un:?}");
+
+    // A passing run after the edit clears the first two.
+    let mut ok = events.clone();
+    ok.push(ev(7, EventKind::ToolCall, "execute: cargo test"));
+    ok.push(ev(8, EventKind::ToolResult, &encode_tool_result("cargo test", "completed", Some(0), "")));
+    let (_, un) = evidence(&ok);
+    assert!(!un.iter().any(|u| u.contains("no check/test/build") || u.contains("last ended")), "{un:?}");
+
+    // No tool events, no sections: the brief renders exactly as before.
+    assert_eq!(evidence(&[]), (vec![], vec![]));
 }

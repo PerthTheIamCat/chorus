@@ -1503,6 +1503,62 @@ fn a_tool_call_repeated_six_times_stops_the_turn_and_says_why() {
 }
 
 #[test]
+fn a_lead_loop_stop_ends_only_the_lead_turn_and_leaves_a_running_child_alone() {
+    // ACTIVE_PID is process-wide, so this too runs in a process of its own.
+    const CHILD: &str = "CHORUS_TEST_LEAD_LOOP_CHILD";
+    let me = "a_lead_loop_stop_ends_only_the_lead_turn_and_leaves_a_running_child_alone";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", me, "--nocapture"])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let tmp = std::env::temp_dir().join(format!("chorus-lead-loop-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    // The child: a mock holding its turn open for 2 s, filed under a cancel
+    // tag exactly like an orchestra child.
+    let child_dir = tmp.join("child");
+    std::fs::create_dir_all(&child_dir).unwrap();
+    let mut slow = mock_bridge();
+    slow.extend(["--sleep-ms".into(), "2000".into()]);
+    const TAG: i64 = 424_242;
+    let child = std::thread::spawn(move || {
+        let _scope = chorus_acp::scope::cancel_scope(TAG);
+        let mut c = Session::create(&child_dir.join("store.db"), &child_dir, "child")
+            .unwrap()
+            .with_bridge(slow);
+        c.run_turn("codex", "openai", "long child work", Policy::AllowAll)
+    });
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while chorus_acp::scope::pids(TAG).is_empty() && std::time::Instant::now() < end {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(!chorus_acp::scope::pids(TAG).is_empty(), "the child is running");
+
+    // The lead repeats one call until Chorus stops it.
+    let mut lead = Session::create(&tmp.join("store.db"), &tmp, "lead")
+        .unwrap()
+        .with_bridge(looping_bridge(40));
+    let chain = [AgentSpec::new("codex", "openai")];
+    let err = lead
+        .run_relay(&chain, "run the tests", Policy::AllowAll)
+        .err()
+        .expect("the loop is cut off");
+    assert!(format!("{err:#}").contains("หยุดเทิร์น"), "{err:#}");
+
+    let report = child
+        .join()
+        .unwrap()
+        .expect("the child finishes its own turn: the lead's stop was not its stop");
+    assert_eq!(report.stop_reason, "end_turn");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
 fn a_different_call_between_repeats_resets_the_count() {
     use chorus_cli::session::{LoopVerdict, RepeatGuard};
     let mut g = RepeatGuard::new(3, 6);
@@ -1590,4 +1646,82 @@ fn every_prompt_carries_the_honesty_guidance_but_the_ledger_does_not() {
     let saw = std::fs::read_to_string(tmp.join("mock-saw.txt")).unwrap();
     assert!(saw.contains("chorus_ask_user"), "{saw}");
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn old_tool_output_becomes_one_line_with_a_blob_reference() {
+    use chorus_core::{actor, ledger, types::{EventKind, NewEvent}, Store};
+    let dir = ShortDir::new("toolout");
+    let db = dir.path().join("s.db");
+    let cwd = dir.path().join("w");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let s = Session::create(&db, &cwd, "tool output").unwrap();
+    let sid = s.session_id();
+    {
+        let store = Store::open(&db).unwrap();
+        let c = store.conn();
+        let user = actor::intern(c, "user", "user").unwrap();
+        let agent = actor::intern(c, "codex", "openai").unwrap();
+        ledger::append(c, &NewEvent::new(sid, EventKind::Msg, user, "read the file")).unwrap();
+        let big: String = (0..212).map(|i| format!("line {i} of src/x.ts\n")).collect();
+        for body in [
+            chorus_core::render::encode_tool_result("read src/x.ts", "completed", None, &big),
+            chorus_core::render::encode_tool_result("cargo test", "failed", Some(101), &big),
+        ] {
+            ledger::append(c, &NewEvent::new(sid, EventKind::ToolResult, agent, body)).unwrap();
+        }
+        // Twelve newer turns push both results past the 10-turn raw window.
+        for i in 0..12 {
+            ledger::append(c, &NewEvent::new(sid, EventKind::Msg, agent, format!("note {i}"))).unwrap();
+        }
+    }
+    let s = Session::open(&db, sid).unwrap();
+    let ctx = s.assemble_context(200_000).unwrap();
+    assert!(ctx.contains("read src/x.ts → completed, 212 lines (blob:"), "{ctx}");
+    assert!(ctx.contains("cargo test → failed (exit 101), 212 lines"), "{ctx}");
+    assert!(!ctx.contains("line 100 of src/x.ts"), "old output leaked into context");
+}
+
+#[test]
+fn a_secret_the_agent_asked_for_reaches_the_next_turn_and_never_the_ledger() {
+    std::env::set_var("CHORUS_SECRETS_BACKEND", "memory");
+    let tmp = std::env::temp_dir().join(format!("chorus-reqsecret-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let mut s = Session::create(&tmp.join("store.db"), &tmp, "reqsecret")
+        .unwrap()
+        .with_bridge(mock_bridge());
+    s.run_turn("codex", "openai", "MOCK_ECHO_SECRETS first", Policy::AllowAll).unwrap();
+    let saw = std::fs::read_to_string(tmp.join("mock-saw.txt")).unwrap();
+    assert!(!saw.contains("chorus_request_secret"), "no answerer, no tool named: {saw}");
+
+    // The sheet answered (what `request_secret::call` does with the user's input).
+    let value = "pw-for-the-staging-db-4471";
+    let scope = chorus_core::secrets::project_scope(&tmp);
+    chorus_core::secrets::user_vault().put_requested("REQ_STAGING_DB_PW", value, Some(&scope));
+    s.set_secret_asker(Some(std::sync::Arc::new(|_| None)));
+    s.set_variants_asker(Some(std::sync::Arc::new(|_| None)));
+
+    s.run_turn("codex", "openai", "MOCK_ECHO_SECRETS second", Policy::AllowAll).unwrap();
+    let saw = std::fs::read_to_string(tmp.join("mock-saw.txt")).unwrap();
+    assert!(saw.contains(&format!("CHORUS_SECRET_REQ_STAGING_DB_PW={value}")), "in the shell env: {saw}");
+    let prompt = saw.split("---env---").next().unwrap();
+    assert!(!prompt.contains(value), "the prompt names the variable, not the value: {prompt}");
+    assert!(prompt.contains("REQ_STAGING_DB_PW") && prompt.contains("chorus_request_secret") && prompt.contains("chorus_offer_variants"), "{prompt}");
+    for (_, body) in s.transcript().unwrap() {
+        assert!(!body.contains(value), "the value reached the ledger: {body}");
+    }
+
+    // Another project does not get it.
+    let other = std::env::temp_dir().join(format!("chorus-reqsecret-other-{}", std::process::id()));
+    std::fs::create_dir_all(&other).unwrap();
+    let mut o = Session::create(&other.join("store.db"), &other, "other")
+        .unwrap()
+        .with_bridge(mock_bridge());
+    o.run_turn("codex", "openai", "MOCK_ECHO_SECRETS elsewhere", Policy::AllowAll).unwrap();
+    let saw = std::fs::read_to_string(other.join("mock-saw.txt")).unwrap();
+    assert!(!saw.contains(value), "project scope leaked: {saw}");
+
+    let _ = chorus_core::secrets::user_vault().forget("CHORUS_SECRET_REQ_STAGING_DB_PW");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_dir_all(&other);
 }

@@ -69,3 +69,33 @@ fn pairing_view_has_no_hardcoded_port_and_no_optimistic_revoke() {
     let check = revoke.find("resp?.ok == true").unwrap();
     assert!(check < remove, "row removal must be conditional on ok");
 }
+
+/// U5: the credential an agent asked for is typed into a masked field and goes
+/// to Rust and the Keychain only. It must not be echoed, logged, stored in the
+/// engine or shown back in the transcript.
+#[test]
+fn requested_secret_is_typed_masked_and_never_kept_by_the_shell() {
+    let views = app("Sources/Chorus/AgentPromptViews.swift");
+    let sheet = &views[views.find("struct SecretRequestSheet").expect("sheet")
+        ..views.find("// MARK: variants").expect("variants section")];
+    assert!(sheet.contains("SecureField("), "the value must be typed into a SecureField");
+    for leak in ["print(", "NSLog(", "Logger", "os_log", "UserDefaults", "@AppStorage", "Text(value", "Text(\"\\(value"] {
+        assert!(!sheet.contains(leak), "SecretRequestSheet must not use {leak}");
+    }
+    let prompts = app("Sources/Chorus/AgentPrompts.swift");
+    for leak in ["print(", "NSLog(", "UserDefaults"] {
+        assert!(!prompts.contains(leak), "AgentPrompts.swift must not use {leak}");
+    }
+    // The pending request carries the name and the reason, never a value.
+    let req = &prompts[prompts.find("struct SecretRequest").unwrap()..prompts.find("struct VariantOffer").unwrap()];
+    assert!(!req.contains("value"), "SecretRequest must not have a value field");
+}
+
+/// U2: a question is a card in the chat, not a sheet that hides where the work stopped.
+#[test]
+fn agent_questions_are_inline_cards_not_sheets() {
+    let content = app("Sources/Chorus/ContentView.swift");
+    assert!(content.contains("AgentPromptCards(engine: engine"), "cards must be in the chat");
+    assert!(!content.contains("$engine.pendingQuestion"), "no sheet for questions");
+    assert!(content.contains("AgentPromptNotice.badge(engine.waitingForYou)"), "sidebar badge");
+}

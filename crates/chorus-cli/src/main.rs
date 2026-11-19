@@ -111,21 +111,25 @@ fn secrets_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `chorus memory <pending|approve ID|reject ID|add TEXT> --db PATH [--scope N]`
+/// `chorus memory <pending|approve ID|reject ID|add TEXT|embed|learn> --db PATH [--scope N] [--session N]`
 ///
 /// The human side of the approve queue (design §4). Agents propose via the
-/// `memory.propose` tool; a person clears the queue here.
+/// `memory.propose` tool; `learn --session N` drafts lessons and retirement
+/// suggestions from that session's ledger into the same queue (what
+/// `chorus compact` also does); a person clears the queue here.
 fn memory_cmd(args: &[String]) -> Result<()> {
     use chorus_core::memory;
 
     let mut db: Option<PathBuf> = None;
     let mut scope: i64 = 1;
+    let mut session: Option<i64> = None;
     let mut rest: Vec<&String> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--db" => db = it.next().map(PathBuf::from),
             "--scope" => scope = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
+            "--session" => session = it.next().and_then(|v| v.parse().ok()),
             _ => rest.push(a),
         }
     }
@@ -141,8 +145,24 @@ fn memory_cmd(args: &[String]) -> Result<()> {
                 println!("queue empty");
             }
             for p in q {
-                println!("  [{}] scope {} · {}", p.id, p.scope, p.text);
+                let kind = match p.kind {
+                    memory::ProposalKind::Fact => String::new(),
+                    memory::ProposalKind::Lesson => " · บทเรียน".to_string(),
+                    memory::ProposalKind::Retire => " · เลิกจำ".to_string(),
+                };
+                let replaces = p.replaces.map(|f| format!(" · แทนข้อ {f}")).unwrap_or_default();
+                let warn = if p.suspicious { " · ⚠ อาจถูกวางยา" } else { "" };
+                println!("  [{}] scope {}{kind}{replaces}{warn} · {}", p.id, p.scope, p.text);
+                if let Some(e) = &p.evidence {
+                    println!("        หลักฐาน: {e}");
+                }
             }
+        }
+        "learn" => {
+            let session = session.context("learn --session N")?;
+            let s = Session::open(&db, session)?;
+            let r = s.learn()?;
+            println!("บทเรียนใหม่ {} · เสนอเลิกจำ {}", r.lessons, r.retirements);
         }
         "approve" => {
             let id: i64 = rest
@@ -401,6 +421,7 @@ fn run(args: &[String]) -> Result<()> {
     let mut model: Option<String> = None;
     let mut computer_use = false;
     let mut claude_chrome = false;
+    let mut claude_auto_memory = false;
     let mut show_secret_files = false;
     let mut review_by: Option<String> = None;
     let mut criteria: Vec<String> = Vec::new();
@@ -426,6 +447,7 @@ fn run(args: &[String]) -> Result<()> {
             "--model" => model = it.next().cloned(),
             "--computer" => computer_use = true,
             "--claude-chrome" => claude_chrome = true,
+            "--claude-auto-memory" => claude_auto_memory = true,
             "--show-secret-files" => show_secret_files = true,
             "--review-by" => review_by = it.next().cloned(),
             "--criteria" => {
@@ -476,6 +498,7 @@ fn run(args: &[String]) -> Result<()> {
         s.set_computer_use(true);
     }
     s.set_claude_chrome(claude_chrome);
+    s.set_claude_auto_memory(claude_auto_memory);
     s.set_hide_secret_files(!show_secret_files);
     if let Some(r) = &review_by {
         // A second pair of eyes from another provider, against criteria agreed now.
@@ -746,6 +769,120 @@ fn bench() -> Result<()> {
 
     bench_real_path(&dir)?;
     bench_handoff_in_context(&dir)?;
+    bench_tool_output_and_memory(&dir)?;
+    Ok(())
+}
+
+/// R1 + R2, measured through the real `assemble_context` / `memory::relevant`
+/// with each part switched off by its `CHORUS_R*` flag, so "before" is the
+/// product's own old behaviour and not a number typed in.
+///
+/// R1: 40 tool calls whose results printed 212-line file reads and 300-line
+/// failing test runs, then 2 chatty turns: the last few results are inside the
+/// 10-turn raw window, the rest are past it. R2: twelve facts, one about the question.
+fn bench_tool_output_and_memory(dir: &Path) -> Result<()> {
+    let db_path = dir.join("toolout.db");
+    let _ = std::fs::remove_file(&db_path);
+    let cwd = dir.join("toolout-ws");
+    std::fs::create_dir_all(&cwd)?;
+    let s = Session::create(&db_path, &cwd, "bench tool output")?;
+    let sess = s.session_id();
+    {
+        let store = Store::open(&db_path)?;
+        let c = store.conn();
+        let user = actor::intern(c, "user", "human")?;
+        let agent = actor::intern(c, "codex", "openai")?;
+        ledger::append(c, &NewEvent::new(sess, EventKind::Msg, user, "แก้ N+1 ใน order list"))?;
+        for i in 0..40 {
+            let (title, status, exit, out) = if i % 4 == 3 {
+                let out: String = (0..300).map(|n| format!("test order::case_{n} ... FAILED\n")).collect();
+                ("cargo test".to_string(), "failed", Some(101), out)
+            } else {
+                let out: String = (0..212)
+                    .map(|n| format!("  const row{n} = await db.query('select * from orders where id = $1', [id]);\n"))
+                    .collect();
+                (format!("read src/order/file{i}.ts"), "completed", None, out)
+            };
+            ledger::append(c, &NewEvent::new(sess, EventKind::ToolCall, agent, format!("execute: {title}")))?;
+            ledger::append(
+                c,
+                &NewEvent::new(sess, EventKind::ToolResult, agent, chorus_core::render::encode_tool_result(&title, status, exit, &out)),
+            )?;
+        }
+        for i in 0..2 {
+            ledger::append(c, &NewEvent::new(sess, EventKind::Msg, agent, format!("ต่อไป {i}")))?;
+        }
+    }
+    // The cost of keeping output: the same session stored with titles only
+    // (what the ledger held before) next to the one above.
+    let bare_path = dir.join("toolout-bare.db");
+    let _ = std::fs::remove_file(&bare_path);
+    {
+        let bare = Session::create(&bare_path, &cwd, "bench tool output (titles only)")?;
+        let bsess = bare.session_id();
+        let store = Store::open(&bare_path)?;
+        let c = store.conn();
+        let user = actor::intern(c, "user", "human")?;
+        let agent = actor::intern(c, "codex", "openai")?;
+        ledger::append(c, &NewEvent::new(bsess, EventKind::Msg, user, "แก้ N+1 ใน order list"))?;
+        for i in 0..40 {
+            let (title, status) = if i % 4 == 3 { ("cargo test".to_string(), "failed") } else { (format!("read src/order/file{i}.ts"), "completed") };
+            ledger::append(c, &NewEvent::new(bsess, EventKind::ToolCall, agent, format!("execute: {title}")))?;
+            ledger::append(c, &NewEvent::new(bsess, EventKind::ToolResult, agent, chorus_core::render::encode_tool_result(&title, status, None, "")))?;
+        }
+        for i in 0..2 {
+            ledger::append(c, &NewEvent::new(bsess, EventKind::Msg, agent, format!("ต่อไป {i}")))?;
+        }
+    }
+    let kb = |p: &Path| {
+        // WAL mode: fold the log into the main file before measuring it.
+        if let Ok(st) = Store::open(p) {
+            let _ = st.conn().execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+        }
+        std::fs::metadata(p).map(|m| m.len() as f64 / 1024.0).unwrap_or(0.0)
+    };
+    println!("\n── tool output on disk ────────────────────────────────");
+    println!("  store.db, 81 events: titles only {:.1} KB → with output {:.1} KB (blob dedup + zstd)", kb(&bare_path), kb(&db_path));
+    let s = Session::open(&db_path, sess)?;
+    let counter = HeuristicCounter;
+    std::env::set_var("CHORUS_R1_TOOL_REFS", "off");
+    let before = counter.count(&s.assemble_context(200_000)?);
+    let before_small = counter.count(&s.assemble_context(24_000)?);
+    std::env::remove_var("CHORUS_R1_TOOL_REFS");
+    let after_text = s.assemble_context(200_000)?;
+    let after = counter.count(&after_text);
+    let after_small = counter.count(&s.assemble_context(24_000)?);
+    println!("\n── R1 tool output in context ──────────────────────────");
+    println!("  @200k   tool refs off {before} token → on {after} token");
+    println!("  @24k    tool refs off {before_small} token → on {after_small} token");
+    assert!(after_text.contains("lines (blob:"), "old tool results did not become blob references");
+    assert!(after < before, "R1 made a tool-heavy session bigger ({before} → {after})");
+
+    let st = Store::open_in_memory()?;
+    for t in [
+        "database is PostgreSQL 16 with pgbouncer",
+        "ผู้ใช้ชอบให้ตอบเป็นภาษาไทย",
+        "tests live under tests/ and use pytest",
+        "never commit .env files",
+        "frontend uses SvelteKit with Tailwind",
+        "order list must stay under 200ms",
+        "prefer small typed changes over rewrites",
+        "migrations are numbered 0001_ upward",
+        "logs go to stderr, never stdout",
+        "Thai text counts one token per character",
+        "the shadow repo lives in .chorus/ckpt",
+    ] {
+        memory::add(st.conn(), 1, t)?;
+    }
+    memory::add(st.conn(), 1, "deploys go through GitHub Actions on tag push")?;
+    let q = "how do we deploy a release with actions?";
+    std::env::set_var("CHORUS_R2_MIN_RELEVANCE", "off");
+    let old = memory::relevant(st.conn(), 1, q, 12)?.len();
+    std::env::remove_var("CHORUS_R2_MIN_RELEVANCE");
+    let new = memory::relevant(st.conn(), 1, q, 12)?.len();
+    println!("\n── R2 memory relevance floor ──────────────────────────");
+    println!("  facts injected for one question: {old} → {new}  (store has 12, one relevant)");
+    assert!(new < old && new >= 1, "R2 floor did not cut unrelated facts ({old} → {new})");
     Ok(())
 }
 
@@ -791,6 +928,8 @@ fn bench_handoff_in_context(dir: &Path) -> Result<()> {
                     files: vec!["src/order/repo.ts".into()],
                     diff,
                     handoff: HandoffMeta { from: "claude".into(), to: "codex".into(), reason: HandoffReason::QuotaExhausted, at: 0 },
+                    evidence: vec![],
+                    unverified: vec![],
                 };
                 // Stored exactly as `Session::handoff` stores it.
                 ledger::append(c, &NewEvent::new(sess, EventKind::Handoff, codex, brief.to_json()))?;
@@ -1178,6 +1317,12 @@ fn compact_cmd(args: &[String]) -> Result<()> {
     println!("summariser   {}", r.model);
     println!("compacted    {} of {before} pending", r.compacted);
     println!("remaining    {}", r.remaining);
+    if r.learned.lessons + r.learned.retirements > 0 {
+        println!(
+            "learned      {} lesson(s), {} retirement(s) — รออนุมัติใน `chorus memory pending`",
+            r.learned.lessons, r.learned.retirements
+        );
+    }
     println!("took         {:.1}s", t0.elapsed().as_secs_f64());
     if r.remaining > 0 {
         println!("\nยังเหลืออยู่ — รัน compact ซ้ำได้เลย (ทำทีละ {limit})");
