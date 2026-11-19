@@ -80,7 +80,10 @@ final class ShellModel: ObservableObject {
     // The composer.
     @Published var text = ""
     @Published var hint: String?
-    @Published private(set) var queued: [String] = []
+    @Published private(set) var attachments: [DraftAttachment] = []
+    @Published private(set) var importing = 0
+    struct Queued { let text: String; let attachments: [Int64] }
+    @Published private(set) var queued: [Queued] = []
     @Published var model = ""
     /// The ABI's permission numbers (`ChorusPermission` in chorus.h).
     private enum Level { static let ask: Int32 = -1; static let allow: Int32 = 2 }
@@ -268,29 +271,68 @@ final class ShellModel: ObservableObject {
 
     func send() {
         let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !raw.isEmpty else { return }
+        guard !raw.isEmpty || !attachments.isEmpty else { return }
+        guard importing == 0 else { hint = "รอแนบไฟล์ให้เสร็จก่อนส่ง"; return }
+        guard attachments.allSatisfy(\.agentReadable) else {
+            hint = "มีไฟล์ที่ agent ยังอ่านไม่ได้ ลบไฟล์นั้นก่อนส่ง"
+            return
+        }
+        let ids = attachments.map(\.id)
+        let prompt = raw.isEmpty ? "ช่วยดูไฟล์ที่แนบมา" : raw
         guard engine.sessionID >= 0 || engine.draft != nil else {
             hint = "เปิดโปรเจกต์ก่อนส่งข้อความ"
             return
         }
         hint = nil
         text = ""
+        attachments = []
         if engine.sessionID < 0 && engine.draft != nil {
             // First message: the draft becomes a session now; pin the model
             // (picked while there was no engine to tell) before sending.
             engine.commitDraft { [weak self] in
                 self?.applyModel()
-                self?.dispatch(raw)
+                self?.dispatch(prompt, attachments: ids)
             }
             return
         }
-        if engine.busy { queued.append(raw); return }
-        dispatch(raw)
+        if engine.busy { queued.append(Queued(text: prompt, attachments: ids)); return }
+        dispatch(prompt, attachments: ids)
+    }
+
+    // MARK: attachments
+
+    /// A file or image needs a live session to be stored in; a draft has none.
+    func attach(urls: [URL]) {
+        guard engine.sessionID >= 0 else { hint = "ส่งข้อความแรกก่อน แล้วค่อยแนบไฟล์"; return }
+        for url in urls {
+            importing += 1
+            engine.importFile(url) { [weak self] item, error in
+                guard let self else { return }
+                self.importing -= 1
+                if let item { self.attachments.append(item) } else { self.hint = "\(url.lastPathComponent): \(error ?? "แนบไม่สำเร็จ")" }
+            }
+        }
+    }
+
+    func attach(image data: Data, mime: String) {
+        guard engine.sessionID >= 0 else { hint = "ส่งข้อความแรกก่อน แล้วค่อยแนบรูป"; return }
+        importing += 1
+        engine.importImage(data, mime: mime) { [weak self] item, error in
+            guard let self else { return }
+            self.importing -= 1
+            if let item { self.attachments.append(item) } else { self.hint = error ?? "แนบรูปไม่สำเร็จ" }
+        }
+    }
+
+    func removeAttachment(_ id: Int64) {
+        attachments.removeAll { $0.id == id }
+        engine.deleteAttachment(id)
     }
 
     private func flushQueue() {
         guard !engine.busy, !queued.isEmpty else { return }
-        dispatch(queued.removeFirst())
+        let next = queued.removeFirst()
+        dispatch(next.text, attachments: next.attachments)
     }
 
     func stop() {
@@ -325,7 +367,7 @@ final class ShellModel: ObservableObject {
         return out
     }
 
-    private func dispatch(_ prompt: String) {
+    private func dispatch(_ prompt: String, attachments: [Int64] = []) {
         let agentID = agent(for: model)?.id ?? model
         engine.liveAgent = agentID
         engine.consumeHandoffPrep(for: agentID)
@@ -343,11 +385,11 @@ final class ShellModel: ObservableObject {
         defer { if let notice { engine.lastError = notice } }
         switch mode {
         case .plan:
-            engine.sendPlan(prompt, agents: names.joined(separator: ","))
+            engine.sendPlan(prompt, agents: names.joined(separator: ","), attachments: attachments)
         case .ask:
-            engine.sendInteractive(prompt, agent: names.first ?? agentID)
+            engine.sendInteractive(prompt, agent: names.first ?? agentID, attachments: attachments)
         case .allow:
-            engine.sendRelay(prompt, agents: names.joined(separator: ","), level: Level.allow)
+            engine.sendRelay(prompt, agents: names.joined(separator: ","), level: Level.allow, attachments: attachments)
         }
     }
 

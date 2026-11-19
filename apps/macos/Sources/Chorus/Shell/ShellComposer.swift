@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 // The composer of the v0.4 window: a text field and two choices, nothing
 // else. Permission (ask / plan / allow) and model. Choosing another
@@ -11,6 +12,7 @@ struct ShellComposer: View {
     @AppStorage(DisplayKey.currency) private var currency = "auto"
     @AppStorage(SettingsKey.thbRate) private var thbRate = ""
     @FocusState private var focused: Bool
+    @State private var picking = false
 
     var body: some View {
         VStack(spacing: 8) {
@@ -26,16 +28,58 @@ struct ShellComposer: View {
         .frame(maxWidth: .infinity)
         .onChange(of: engine.sessionID) { _, _ in focused = true }
         .onAppear { focused = true }
+        .fileImporter(isPresented: $picking, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+            if case .success(let urls) = result { shell.attach(urls: urls) }
+        }
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            for p in providers {
+                _ = p.loadObject(ofClass: URL.self) { url, _ in
+                    guard let url else { return }
+                    Task { @MainActor in shell.attach(urls: [url]) }
+                }
+            }
+            return true
+        }
     }
 
     private var field: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if !shell.attachments.isEmpty || shell.importing > 0 {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(shell.attachments) { a in
+                            HStack(spacing: 4) {
+                                Image(systemName: a.mediaType.hasPrefix("image/") ? "photo" : "doc")
+                                Text(a.name).lineLimit(1)
+                                Button { shell.removeAttachment(a.id) } label: { Image(systemName: "xmark.circle.fill") }
+                                    .buttonStyle(.borderless)
+                            }
+                            .font(.caption)
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(Color.primary.opacity(a.agentReadable ? 0.06 : 0.0), in: Capsule())
+                            .overlay(Capsule().strokeBorder(a.agentReadable ? Color.clear : Color.red.opacity(0.6)))
+                        }
+                        if shell.importing > 0 { ProgressView().controlSize(.small) }
+                    }
+                }
+            }
             TextField("ขอให้ทำอะไร…", text: $shell.text, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...10)
                 .focused($focused)
                 .onSubmit { shell.send() }
+                .onPasteCommand(of: [.image]) { providers in
+                    for p in providers {
+                        _ = p.loadDataRepresentation(for: .image) { data, _ in
+                            guard let data else { return }
+                            Task { @MainActor in shell.attach(image: data, mime: "image/png") }
+                        }
+                    }
+                }
             HStack(spacing: 8) {
+                Button { picking = true } label: { Image(systemName: "paperclip") }
+                    .buttonStyle(.borderless)
+                    .help("แนบไฟล์หรือรูป")
                 ModeMenu()
                 ModelMenu()
                 Spacer()
@@ -50,7 +94,7 @@ struct ShellComposer: View {
 
     @ViewBuilder
     private var sendButton: some View {
-        let empty = shell.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let empty = shell.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && shell.attachments.isEmpty
         if engine.busy && empty {
             Button { shell.stop() } label: {
                 Image(systemName: "stop.circle.fill").font(.title2)
@@ -73,7 +117,7 @@ struct ShellComposer: View {
             ForEach(Array(shell.queued.enumerated()), id: \.offset) { i, q in
                 HStack(spacing: 8) {
                     Image(systemName: "clock").foregroundStyle(.secondary)
-                    Text(q).lineLimit(1).font(.callout)
+                    Text(q.text).lineLimit(1).font(.callout)
                     Spacer()
                     Button { shell.dismissQueued(at: i) } label: { Image(systemName: "xmark.circle.fill") }
                         .buttonStyle(.borderless).foregroundStyle(.secondary)
