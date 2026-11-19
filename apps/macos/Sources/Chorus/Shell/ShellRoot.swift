@@ -104,16 +104,16 @@ struct ShellRoot: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
-            Button { shell.newSession() } label: { Label("session ใหม่", systemImage: "square.and.pencil") }
-                .help("session ใหม่ (⌘N)")
-                .disabled(engine.busy)
+            Button { tool = .search } label: { Label("ค้นหา", systemImage: "magnifyingglass") }
+                .help("ค้นแชท (⌘F)")
+                .disabled(shell.workspace.isEmpty)
         }
         ToolbarItem(placement: .primaryAction) {
             Menu {
-                ForEach([ShellTool.files, .terminal, .preview, .ship, .checkpoints, .search, .orchestra, .monitor]) { t in
+                ForEach([ShellTool.files, .terminal, .preview, .ship, .checkpoints, .orchestra, .monitor]) { t in
                     Button { tool = t } label: { Label(t.title, systemImage: t.symbol) }
                 }
-            } label: { Label("เครื่องมือ", systemImage: "wrench.and.screwdriver") }
+            } label: { Label("เพิ่มเติม", systemImage: "ellipsis") }
             .disabled(shell.workspace.isEmpty)
             .help("ไฟล์ เทอร์มินัล commit/PR checkpoint ค้นแชท Orchestra")
         }

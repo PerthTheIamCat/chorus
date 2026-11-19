@@ -148,8 +148,10 @@ private struct UserMessage: View {
             Spacer(minLength: 80)
             Text(text)
                 .textSelection(.enabled)
-                .padding(.horizontal, 12).padding(.vertical, 8)
-                .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14).padding(.vertical, 10)
+                .background(Color.accentColor, in: UnevenRoundedRectangle(topLeadingRadius: 14, bottomLeadingRadius: 14,
+                                                                          bottomTrailingRadius: 4, topTrailingRadius: 14))
         }
         .accessibilityLabel("คุณ")
     }
@@ -162,17 +164,39 @@ private struct AgentMessage: View {
     var body: some View {
         let provider = ProviderTint.provider(of: event.actor)
         let label = engine.agents.first { $0.id == provider }?.label ?? provider
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Circle().fill(ProviderTint.color(provider)).frame(width: 8, height: 8)
-                Text(label).font(.callout.weight(.semibold))
-                if let m = event.model_id {
-                    Text(ModelID(m).base).font(.caption).foregroundStyle(.secondary)
+        HStack(alignment: .top, spacing: 12) {
+            ProviderAvatar(provider: provider, label: label)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Text(label).font(.caption).foregroundStyle(.secondary)
+                    if let m = event.model_id {
+                        Text(ModelID(m).base).font(.caption2).foregroundStyle(.tertiary)
+                    }
                 }
+                MarkdownBody(text: event.body)
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .background(Color(nsColor: .controlBackgroundColor),
+                                in: UnevenRoundedRectangle(topLeadingRadius: 4, bottomLeadingRadius: 14,
+                                                           bottomTrailingRadius: 14, topTrailingRadius: 14))
+                    .overlay(UnevenRoundedRectangle(topLeadingRadius: 4, bottomLeadingRadius: 14,
+                                                    bottomTrailingRadius: 14, topTrailingRadius: 14)
+                        .strokeBorder(Color.primary.opacity(0.1)))
             }
-            MarkdownBody(text: event.body)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// The circle with the provider's initial and colour (board 1).
+struct ProviderAvatar: View {
+    let provider: String
+    let label: String
+    var body: some View {
+        Text(String(label.prefix(1)).uppercased())
+            .font(.system(size: 12, weight: .bold)).foregroundStyle(.white)
+            .frame(width: 28, height: 28)
+            .background(Circle().fill(ProviderTint.color(provider)))
+            .padding(.top, 2)
     }
 }
 

@@ -67,7 +67,7 @@ struct ShellComposer: View {
                     }
                 }
             }
-            TextField(engine.nextHint ?? "ขอให้ทำอะไร…  (@ เลือก agent หรือไฟล์ · / คำสั่ง)", text: $shell.text, axis: .vertical)
+            TextField(engine.nextHint ?? "พิมพ์ข้อความ… หรือ @codex เพื่อถามอีกตัวในเทิร์นเดียว", text: $shell.text, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...10)
                 .focused($focused)
@@ -90,18 +90,13 @@ struct ShellComposer: View {
                     .buttonStyle(.borderless)
                     .help("แนบไฟล์หรือรูป")
                 ModeMenu()
-                RouteMenu()
                 ModelMenu()
-                Button { shell.runCompare() } label: { Image(systemName: "square.split.2x1") }
-                    .buttonStyle(.borderless)
-                    .disabled(engine.agents.filter(\.ready).count < 2 || !shell.canCompare || shell.comparing)
-                    .help("เทียบ agent: ถามทุกตัวด้วยคำถามเดียวกัน (⇧⌘K)")
                 Spacer()
                 sendButton
             }
         }
         .padding(12)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
             .strokeBorder(focused ? Color.accentColor.opacity(0.6) : Color.primary.opacity(0.12), lineWidth: 1))
     }
@@ -111,16 +106,24 @@ struct ShellComposer: View {
         let empty = shell.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && shell.attachments.isEmpty
         if engine.busy && empty {
             Button { shell.stop() } label: {
-                Image(systemName: "stop.circle.fill").font(.title2)
+                Image(systemName: "stop.fill")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 30, height: 30)
+                    .background(Circle().fill(Color.accentColor))
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .keyboardShortcut(".", modifiers: .command)
             .help("หยุด (⌘.)")
         } else {
             Button { shell.send() } label: {
-                Image(systemName: "arrow.up.circle.fill").font(.title2)
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 30, height: 30)
+                    .background(Circle().fill(empty ? Color.primary.opacity(0.25) : Color.accentColor))
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .disabled(empty)
             .help(engine.busy ? "ต่อคิว ส่งเมื่อ agent ทำเสร็จ" : "ส่ง (↩)")
         }
@@ -208,6 +211,23 @@ struct ShellComposer: View {
     }
 }
 
+/// The neutral chip of board 1: thin border, surface fill, a small chevron.
+/// Not the bordered-blue native menu button.
+private struct ComposerChip<Content: View>: View {
+    @ViewBuilder var content: () -> Content
+    var body: some View {
+        HStack(spacing: 6) {
+            content().font(.system(size: 12.5)).lineLimit(1)
+            Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+        }
+        .foregroundStyle(.primary)
+        .padding(.horizontal, 10).padding(.vertical, 5)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.14)))
+        .contentShape(Rectangle())
+    }
+}
+
 // MARK: the two choices
 
 private struct ModeMenu: View {
@@ -227,12 +247,10 @@ private struct ModeMenu: View {
                 }
             }
         } label: {
-            Label(shell.mode.label, systemImage: shell.mode.symbol).font(.callout)
+            ComposerChip { Label(shell.mode.label, systemImage: shell.mode.symbol) }
         }
-        .menuStyle(.button)
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .menuIndicator(.visible)
+        .menuStyle(.button).buttonStyle(.plain)
+        .menuIndicator(.hidden)
         .fixedSize()
         .help("agent ทำอะไรได้เอง แค่ไหน")
     }
@@ -288,15 +306,15 @@ private struct ModelMenu: View {
                 }
             }
         } label: {
-            HStack(spacing: 6) {
-                Circle().fill(ProviderTint.color(current?.id ?? "")).frame(width: 8, height: 8)
-                Text(label).font(.callout)
+            ComposerChip {
+                HStack(spacing: 7) {
+                    Circle().fill(ProviderTint.color(current?.id ?? "")).frame(width: 8, height: 8)
+                    Text(label)
+                }
             }
         }
-        .menuStyle(.button)
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .menuIndicator(.visible)
+        .menuStyle(.button).buttonStyle(.plain)
+        .menuIndicator(.hidden)
         .fixedSize()
         .help("เลือกโมเดล เลือกของเจ้าอื่น = เตรียมส่งต่อให้ทันที")
     }
@@ -306,7 +324,7 @@ private struct ModelMenu: View {
         let m = ModelID(shell.model)
         let match = a.models.first { ModelID($0.id).base == m.base }
         let name = match.map(Self.shortLabel) ?? m.base
-        return "\(a.label) · \(name)" + (m.effort.map { " · \($0)" } ?? "")
+        return name == "Default (recommended)" || name == "default" ? a.label : "\(a.label) \(name)"
     }
 
     /// "gpt-5.5 · high" → "gpt-5.5": the level is shown on its own.
