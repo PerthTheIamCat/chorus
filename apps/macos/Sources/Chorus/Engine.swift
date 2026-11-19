@@ -349,6 +349,8 @@ final class Engine: ObservableObject {
                     return 1
                 }
                 chorus_set_question_callback(h, qcb, askCtx.raw)
+                chorus_set_secret_callback(h, AgentPromptCallbacks.secret, askCtx.raw)
+                chorus_set_variants_callback(h, AgentPromptCallbacks.variants, askCtx.raw)
                 chorus_set_computer_use(h, UserDefaults.standard.bool(forKey: Self.computerUseKey) ? 1 : 0)
                 chorus_set_claude_chrome(h, UserDefaults.standard.bool(forKey: Self.claudeChromeKey) ? 1 : 0)
                 chorus_set_hide_secret_files(h, Self.hideSecretFiles ? 1 : 0)
@@ -571,10 +573,25 @@ final class Engine: ObservableObject {
         let id = UUID()
         let agent: String
         let question: String
+        /// Why the agent stopped to ask; empty when it did not say.
+        let reason: String
         let options: [String]
+        /// Index into `options` the agent suggests.
+        let recommended: Int?
         let allowOther: Bool
     }
     @Published var pendingQuestion: AgentQuestion?
+    /// Credential the agent asked for (`chorus_request_secret`) — a sheet,
+    /// because the value must never sit in the transcript.
+    @Published var pendingSecret: SecretRequest?
+    /// Versions the agent offers (`chorus_offer_variants`) — a card in the chat.
+    @Published var pendingVariants: VariantOffer?
+    nonisolated let secretGate = PromptGate<SecretAnswer>()
+    nonisolated let variantsGate = PromptGate<VariantChoice>()
+    /// How many things in the open session wait for the person (sidebar badge).
+    var waitingForYou: Int {
+        (pendingQuestion == nil ? 0 : 1) + (pendingSecret == nil ? 0 : 1) + (pendingVariants == nil ? 0 : 1)
+    }
     /// Composer hint after a turn (`chorus_suggest_reply`); nil = none.
     @Published var nextHint: String?
     // Settings › ภาษา — stored here because extensions cannot hold state.
@@ -603,17 +620,22 @@ final class Engine: ObservableObject {
     /// Called on an MCP server thread. Publishes the question and blocks
     /// until `answerQuestion`; `nil` = closed without an answer.
     nonisolated fileprivate func askQuestionBlocking(_ json: String) -> String? {
-        struct Raw: Codable { let agent: String?; let question: String?; let options: [String]?; let allow_other: Bool? }
+        struct Raw: Codable {
+            let agent: String?; let question: String?; let reason: String?
+            let options: [String]?; let recommended: Int?; let allow_other: Bool?
+        }
         guard let raw = try? JSONDecoder().decode(Raw.self, from: Data(json.utf8)) else { return nil }
         questionLock.lock()
         defer { questionLock.unlock() }
         let agent = raw.agent, question = raw.question ?? ""
         let options = raw.options ?? [], allowOther = raw.allow_other ?? true
+        let reason = raw.reason ?? "", recommended = raw.recommended
         Task { @MainActor in
+            let who = agent ?? self.liveAgent ?? "agent"
             self.pendingQuestion = AgentQuestion(
-                agent: agent ?? self.liveAgent ?? "agent",
-                question: question, options: options, allowOther: allowOther)
-            NSApp.requestUserAttention(.informationalRequest)
+                agent: who, question: question, reason: reason, options: options,
+                recommended: recommended, allowOther: allowOther)
+            self.announceWaiting(AgentPromptNotice.question(agent: who, question: question))
         }
         questionGate.wait()
         return questionAnswer
@@ -848,6 +870,7 @@ final class Engine: ObservableObject {
     /// error, which `stopped` turns into a plain note instead of a red banner.
     func cancel() {
         _ = Self.string(from: chorus_cancel())
+        dismissAgentPrompts()
     }
 
     /// Matches `MAX_FILE_BYTES` in chorus-ffi's `chorus_import_attachment`.

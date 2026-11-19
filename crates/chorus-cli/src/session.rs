@@ -901,6 +901,14 @@ const HONESTY_GUIDANCE: &str = "\n(Chorus: if the task is missing information yo
 /// call a tool it was not given.
 const ASK_USER_HINT: &str = "(Chorus: you can ask with the `chorus_ask_user` tool.)\n";
 
+/// Same rule for the other two ways an agent can reach the person: it asks for
+/// a credential instead of having it pasted into chat, and lets taste decide
+/// between versions it made.
+const REQUEST_SECRET_HINT: &str = "(Chorus: if you need a key or token, ask with the \
+     `chorus_request_secret` tool; never ask the user to paste it into chat.)\n";
+const VARIANTS_HINT: &str = "(Chorus: when you made several versions of something visual and taste \
+     decides, show them with the `chorus_offer_variants` tool.)\n";
+
 /// Identical consecutive tool calls in one turn: warn at `warn`, stop at `stop`.
 /// Consecutive on purpose. Running `cargo test` five times in a fix loop is
 /// work (an edit sits between the runs); the same call back to back with
@@ -2584,6 +2592,10 @@ impl Session {
         let vault = secrets::user_vault();
         let named = secrets::referenced(text);
         env.extend(vault.resolve(&named));
+        // Secrets the agent asked for in an earlier turn (`chorus_request_secret`):
+        // a running bridge's environment cannot change, so they arrive now.
+        let requested = vault.requested(&secrets::project_scope(&self.cwd));
+        env.extend(requested.env.iter().cloned());
         // Only when the sandbox really hides `.env`: otherwise the agent can
         // read it anyway and being told it cannot would be a lie.
         let project_env = if self.hide_secret_files && sandboxed {
@@ -2667,10 +2679,17 @@ impl Session {
         if chorus_core::ask_user::available(self.store.conn(), self.sess) {
             prompt_text.push_str(ASK_USER_HINT);
         }
+        if chorus_core::request_secret::available(self.store.conn(), self.sess) {
+            prompt_text.push_str(REQUEST_SECRET_HINT);
+        }
+        if chorus_core::variants::available(self.store.conn(), self.sess) {
+            prompt_text.push_str(VARIANTS_HINT);
+        }
         if !named.is_empty() {
             prompt_text.push_str(secrets::AGENT_GUIDANCE);
         }
         prompt_text.push_str(&secrets::project_env_guidance(&project_env.names));
+        prompt_text.push_str(&secrets::requested_guidance(&requested.names));
         // Without the sandbox nothing stops writes there anyway, so "edit" is
         // true whenever the mode lets the agent write at all.
         prompt_text.push_str(&project_folders_guidance(
@@ -3230,6 +3249,15 @@ impl Session {
             }
         }
         self.project_folders = keep;
+        chorus_core::variants::set_roots(self.store.conn(), self.sess, self.image_roots());
+    }
+
+    /// Where an agent may point `chorus_offer_variants` at an image: the
+    /// working directory first, then the project's other folders.
+    fn image_roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![self.cwd.canonicalize().unwrap_or_else(|_| self.cwd.clone())];
+        roots.extend(self.project_folders.iter().cloned());
+        roots
     }
 
     pub fn project_folders(&self) -> &[PathBuf] {
@@ -3241,6 +3269,22 @@ impl Session {
     /// in "allow everything" turns too.
     pub fn set_question_asker(&self, asker: Option<chorus_core::ask_user::Asker>) {
         chorus_core::ask_user::set_asker(self.store.conn(), self.sess, asker);
+    }
+
+    /// Who types in a credential when an agent calls `chorus_request_secret`.
+    /// The value goes straight to the vault; the agent only learns a name.
+    pub fn set_secret_asker(&self, asker: Option<chorus_core::request_secret::Asker>) {
+        chorus_core::request_secret::set_asker(
+            self.store.conn(),
+            self.sess,
+            &secrets::project_scope(&self.cwd),
+            asker,
+        );
+    }
+
+    /// Who picks when an agent calls `chorus_offer_variants`.
+    pub fn set_variants_asker(&self, asker: Option<chorus_core::variants::Asker>) {
+        chorus_core::variants::set_asker(self.store.conn(), self.sess, self.image_roots(), asker);
     }
 
     /// Who answers "may the agent click here?" during an interactive turn.
