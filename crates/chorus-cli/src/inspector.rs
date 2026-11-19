@@ -65,15 +65,22 @@ fn instruction_file(family: &str) -> Option<&'static str> {
 }
 
 /// Inspect `session` at `budget`. `target` (an agent name; `""` = none) adds
-/// the "if sent to <agent> now" preview.
-pub fn inspect(session: &Session, budget: i64, target: &str) -> Result<Inspection> {
-    let (text, report) = session.assemble_report(budget)?;
+/// the "if sent to <agent> now" preview. `instruction` is the message about to
+/// be sent (memory is ranked against it, as in a real turn); `None` = the
+/// previous message in the ledger.
+pub fn inspect(
+    session: &Session,
+    budget: i64,
+    target: &str,
+    instruction: Option<&str>,
+) -> Result<Inspection> {
+    let (text, report) = session.assemble_report(budget, instruction)?;
     let counter = CachedCounter::new(HeuristicCounter);
     let tokens = counter.count(&text);
     let target = if target.trim().is_empty() {
         None
     } else {
-        Some(preview_for(session, &counter, budget, target.trim())?)
+        Some(preview_for(session, &counter, budget, target.trim(), instruction)?)
     };
     Ok(Inspection {
         budget,
@@ -89,11 +96,12 @@ fn preview_for(
     counter: &impl TokenCounter,
     budget: i64,
     agent: &str,
+    instruction: Option<&str>,
 ) -> Result<TargetPreview> {
     let fam = family(agent);
     let window = window_override(fam);
     let budget_for = window.unwrap_or(budget);
-    let (ctx, r) = session.assemble_report(budget_for)?;
+    let (ctx, r) = session.assemble_report(budget_for, instruction)?;
     let (_from, brief) = session.handoff_preview(agent)?;
     Ok(TargetPreview {
         agent: agent.to_string(),

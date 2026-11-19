@@ -2033,7 +2033,7 @@ mod decision_tests {
     }
 }
 
-fn candidate_supports_task(candidate: &Candidate, task: &TaskSummary) -> bool {
+pub(crate) fn candidate_supports_task(candidate: &Candidate, task: &TaskSummary) -> bool {
     task.attachments
         .iter()
         .all(|attachment| supports_media(&candidate.media_types, &attachment.media_type))

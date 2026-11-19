@@ -256,6 +256,13 @@ pub struct Brief {
     pub files: Vec<String>,
     pub diff: String,
     pub handoff: HandoffMeta,
+    /// Commands the outgoing agent ran, with how each ended (R5). Derived
+    /// from the ledger's tool events; full here, never in the context line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
+    /// What the ledger shows was changed or started but not confirmed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unverified: Vec<String>,
 }
 
 /// The agent "answered", but the answer is its provider refusing the turn's
@@ -364,6 +371,11 @@ impl Brief {
             }
         }
 
+        let (evidence, unverified) = if std::env::var("CHORUS_BRIEF_EVIDENCE").is_ok_and(|v| v == "off") {
+            (Vec::new(), Vec::new())
+        } else {
+            evidence(input.events)
+        };
         Brief {
             goal: input.goal.trim().to_string(),
             done,
@@ -372,6 +384,8 @@ impl Brief {
             files: files_touched(input.events),
             diff: input.diff,
             handoff: input.handoff,
+            evidence,
+            unverified,
         }
     }
 
@@ -401,6 +415,15 @@ impl Brief {
 
         s.push_str("\n## files\n");
         push_bullets(&mut s, &self.files, "(none touched yet)");
+
+        if !self.evidence.is_empty() {
+            s.push_str("\n## evidence (commands the previous agent ran)\n");
+            push_bullets(&mut s, &self.evidence, "");
+        }
+        if !self.unverified.is_empty() {
+            s.push_str("\n## unverified (do not assume these hold)\n");
+            push_bullets(&mut s, &self.unverified, "");
+        }
 
         s.push_str("\n## diff since checkpoint\n");
         if self.diff.trim().is_empty() {
@@ -445,6 +468,117 @@ fn push_bullets(s: &mut String, items: &[String], empty: &str) {
 /// order. A token counts as a path if it contains `/` and either carries a
 /// `.ext` or a trailing `:line` locator — enough to catch `src/order/repo.ts`
 /// and `migrations/0042_idx.sql:12` without pulling in prose.
+/// At most this many commands are listed as evidence (the latest ones).
+const EVIDENCE_MAX: usize = 12;
+
+fn is_check_command(cmd: &str) -> bool {
+    let c = cmd.to_lowercase();
+    ["test", "check", "clippy", "lint", "build", "tsc", "pytest", "verify", "compile", "mypy", "ruff"]
+        .iter()
+        .any(|k| c.contains(k))
+}
+
+/// Commands run + how they ended, and what the ledger leaves unconfirmed,
+/// derived only from tool events (no model call). A command is a tool call of
+/// kind `execute`; its outcome is the matching tool result — the exit code
+/// when the bridge reported one, otherwise the status.
+///
+/// `unverified` lists, rule-based: edits after which no check command ran
+/// successfully; commands whose last run failed; tool calls that never got a
+/// result (the turn was cut off, so they may be half-done).
+pub fn evidence(events: &[(Event, String)]) -> (Vec<String>, Vec<String>) {
+    use crate::render::parse_tool_result;
+    struct Run {
+        cmd: String,
+        ok: Option<bool>,
+        outcome: String,
+        check: bool,
+    }
+    let clip = |s: &str| -> String {
+        let one: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        if one.chars().count() > 100 {
+            one.chars().take(100).collect::<String>() + "…"
+        } else {
+            one
+        }
+    };
+    let mut runs: Vec<Run> = Vec::new();
+    // Index in `runs` of an execute call still waiting for its result, by title.
+    let mut open: Vec<(String, usize)> = Vec::new();
+    // Count of `runs` entries at the time of the latest edit.
+    let mut last_edit_at: Option<usize> = None;
+    let mut other_open: Vec<String> = Vec::new();
+
+    for (e, body) in events {
+        match e.kind {
+            EventKind::Diff => last_edit_at = Some(runs.len()),
+            EventKind::ToolCall => {
+                if body.starts_with('{') {
+                    continue;
+                }
+                let (kind, title) = body.split_once(": ").unwrap_or(("", body));
+                let title = title.trim();
+                if kind == "execute" {
+                    runs.push(Run { cmd: clip(title), ok: None, outcome: "no result recorded".into(), check: is_check_command(title) });
+                    open.push((title.to_string(), runs.len() - 1));
+                } else if kind == "edit" || kind == "delete" || kind == "move" {
+                    last_edit_at = Some(runs.len());
+                    other_open.push(title.to_string());
+                } else {
+                    other_open.push(title.to_string());
+                }
+            }
+            EventKind::ToolResult => {
+                let Some(v) = parse_tool_result(body) else { continue };
+                if let Some(pos) = open.iter().position(|(t, _)| t == v.title) {
+                    let (_, idx) = open.remove(pos);
+                    let r = &mut runs[idx];
+                    r.ok = Some(!v.failed() && matches!(v.status, "completed" | "success" | "ok"));
+                    r.outcome = match v.exit {
+                        Some(c) => format!("exit {c}"),
+                        None if v.status == "completed" => "ok (exit code not reported)".into(),
+                        None => v.status.to_string(),
+                    };
+                } else if let Some(pos) = other_open.iter().position(|t| t == v.title) {
+                    other_open.remove(pos);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut ev: Vec<String> = Vec::new();
+    for r in runs.iter().rev().take(EVIDENCE_MAX).collect::<Vec<_>>().into_iter().rev() {
+        let line = format!("`{}` → {}", r.cmd, r.outcome);
+        if ev.last() != Some(&line) {
+            ev.push(line);
+        }
+    }
+
+    let mut un: Vec<String> = Vec::new();
+    if let Some(at) = last_edit_at {
+        if !runs[at..].iter().any(|r| r.check && r.ok == Some(true)) {
+            un.push("files were edited and no check/test/build command succeeded afterwards".into());
+        }
+    }
+    for (i, r) in runs.iter().enumerate() {
+        if r.ok == Some(false) && !runs[i + 1..].iter().any(|n| n.cmd == r.cmd && n.ok == Some(true)) {
+            let line = format!("`{}` last ended with {} and was not re-run successfully", r.cmd, r.outcome);
+            if !un.contains(&line) {
+                un.push(line);
+            }
+        }
+    }
+    for (_, idx) in &open {
+        un.push(format!("`{}` was started but no result was recorded — it may be half-done", runs[*idx].cmd));
+    }
+    for t in &other_open {
+        un.push(format!("tool call \"{}\" has no recorded result", clip(t)));
+    }
+    un.truncate(8);
+    (ev, un)
+}
+
 pub fn files_touched(events: &[(Event, String)]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let split = |c: char| {

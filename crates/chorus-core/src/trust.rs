@@ -96,6 +96,45 @@ impl TrustStore {
         }
         Ok(Consent { workspace: workspace.to_path_buf(), confine })
     }
+
+    /// Consent to run project code in `worktree`, a checkout of `workspace`
+    /// the orchestrator made for a child: trusting the project covers its own
+    /// worktrees, and nothing else.
+    pub fn consent_for_worktree<'a>(
+        &self,
+        workspace: &Path,
+        worktree: &Path,
+        confine: &'a Confine<'a>,
+    ) -> Result<Consent<'a>> {
+        self.consent(workspace, confine)?;
+        // Only a checkout git itself lists for this project: an arbitrary
+        // directory (`$HOME`, a sibling, the workspace) never inherits trust.
+        let wt = std::fs::canonicalize(worktree).map_err(|e| {
+            ChorusError::Invalid(format!("cannot resolve worktree {}: {e}", worktree.display()))
+        })?;
+        let listed = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(workspace)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        let main = std::fs::canonicalize(workspace).ok();
+        let is_listed = listed
+            .lines()
+            .filter_map(|l| l.strip_prefix("worktree "))
+            .filter_map(|p| std::fs::canonicalize(p).ok())
+            .any(|p| p == wt && Some(&p) != main.as_ref());
+        if !is_listed {
+            return Err(ChorusError::Invalid(format!(
+                "{} is not a worktree of {}; trust does not extend to it",
+                worktree.display(),
+                workspace.display()
+            )));
+        }
+        Ok(Consent { workspace: wt, confine })
+    }
 }
 
 /// Proof that the user trusted this workspace, plus the sandbox to run in.
@@ -166,5 +205,43 @@ mod tests {
         let no_sandbox = |_: &[String], _: &Path| Err("no sandbox-exec".to_string());
         let consent = store.consent(ws.path(), &no_sandbox).unwrap();
         assert!(consent.command(&["true".into()]).is_err());
+    }
+
+    #[test]
+    fn trust_extends_only_to_git_worktrees_of_the_project() {
+        let git = |dir: &Path, args: &[&str]| {
+            let ok = Command::new("git").args(args).current_dir(dir).output().unwrap().status.success();
+            assert!(ok, "git {args:?}");
+        };
+        let home = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        git(ws.path(), &["init"]);
+        git(ws.path(), &["config", "user.email", "t@test.local"]);
+        git(ws.path(), &["config", "user.name", "T"]);
+        std::fs::write(ws.path().join("a"), "x").unwrap();
+        git(ws.path(), &["add", "."]);
+        git(ws.path(), &["commit", "-m", "i"]);
+        let wt = elsewhere.path().join("wt");
+        git(ws.path(), &["worktree", "add", "-b", "b1", wt.to_str().unwrap()]);
+
+        let store = TrustStore::at(home.path().join("t.json"));
+        store.set_trusted(ws.path(), true).unwrap();
+        assert!(store.consent_for_worktree(ws.path(), &wt, &identity).is_ok());
+
+        // Not a worktree: a sibling directory, the home directory, the
+        // workspace itself, a path that does not exist.
+        let sibling = elsewhere.path().join("sibling");
+        std::fs::create_dir_all(&sibling).unwrap();
+        for bad in [sibling.as_path(), home.path(), ws.path(), &elsewhere.path().join("nope")] {
+            assert!(
+                store.consent_for_worktree(ws.path(), bad, &identity).is_err(),
+                "{} must not inherit trust",
+                bad.display()
+            );
+        }
+        // And an untrusted project grants nothing even for its worktree.
+        store.set_trusted(ws.path(), false).unwrap();
+        assert!(store.consent_for_worktree(ws.path(), &wt, &identity).is_err());
     }
 }
