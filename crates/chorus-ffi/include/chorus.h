@@ -265,7 +265,8 @@ char *chorus_run_plan_with_attachments(ChorusEngine *e, const char *agents,
                                        const char *attachment_ids_json);
 
 /* Answers an agent's `chorus_ask_user`. `question_json` is
- * {"agent":"...","question":"...","options":["..."],"allow_other":bool}.
+ * {"agent":"...","question":"...","reason":"...","options":["..."],
+ *  "recommended":1|null,"allow_other":bool}.
  * Write the answer as NUL-terminated UTF-8 into `answer` (at most `cap` bytes)
  * and return non-zero, or return 0 if the person closed the question.
  * Called on an MCP server thread — block while asking. */
@@ -277,6 +278,27 @@ typedef int (*ChorusQuestionCallback)(void *ctx, const char *question_json,
 void chorus_set_question_callback(ChorusEngine *e,
                                   ChorusQuestionCallback callback, void *ctx);
 
+/* Takes in a credential for an agent's `chorus_request_secret`.
+ * `request_json` is {"agent":"...","name":"STRIPE_API_KEY","reason":"..."}.
+ * Write the value as NUL-terminated UTF-8 into `value` (at most `cap` bytes)
+ * and return how long to keep it: 1 this run only, 2 this project, 3 every
+ * project — or return 0 if the person cancelled. The value goes to the
+ * Keychain only; the agent never sees it. Called on an MCP server thread. */
+typedef int (*ChorusSecretCallback)(void *ctx, const char *request_json,
+                                    char *value, size_t cap);
+void chorus_set_secret_callback(ChorusEngine *e,
+                                ChorusSecretCallback callback, void *ctx);
+
+/* Answers an agent's `chorus_offer_variants`. `offer_json` is
+ * {"agent","title","variants":[{"label","kind":"image"|"url","target","note"}],
+ *  "recommended":0|null}. Write the choice as JSON into `answer`:
+ * {"chosen":1|null,"comments":[{"variant":0,"x":0.4,"y":0.2,"text":"..."}],
+ *  "note":"..."} and return non-zero, or return 0 if the card was closed. */
+typedef int (*ChorusVariantsCallback)(void *ctx, const char *offer_json,
+                                      char *answer, size_t cap);
+void chorus_set_variants_callback(ChorusEngine *e,
+                                  ChorusVariantsCallback callback, void *ctx);
+
 /* Computer use (the `computer` MCP tool) on/off for the open session.
  * Off by default. Read-only turns may only take screenshots; interactive
  * turns ask through the permission callback for every action. */
@@ -285,6 +307,11 @@ void chorus_set_computer_use(ChorusEngine *e, int on);
 /* Claude uses the user's own Chrome via the Claude in Chrome extension
  * (sets CLAUDE_CODE_ENABLE_CFC=1 on the Claude bridge). Off by default. */
 void chorus_set_claude_chrome(ChorusEngine *e, int on);
+
+/* Allow Claude Code's own auto memory (~/.claude/projects/<p>/memory) instead
+ * of setting CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 on the Claude bridge. Off by
+ * default so Chorus memory stays the single source. */
+void chorus_set_claude_auto_memory(ChorusEngine *e, int on);
 
 /* Every folder of the session's project as a JSON array of paths; agents see
  * and (outside read-only turns) may edit the others too.

@@ -31,7 +31,8 @@
 
 use crate::types::{EventKind, NewEvent};
 use crate::{
-    actor, agent_control, attachments, computer, ledger, memory, notify, roles, Result, Store,
+    actor, agent_control, attachments, computer, ledger, memory, notify, orchestra_plan, roles, Result,
+    Store,
 };
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -411,7 +412,16 @@ fn dispatch(req: &Value, conn: &rusqlite::Connection, caller: &Caller) -> Value 
                     jump_to_file_schema(),
                     request_review_schema(),
                     search_history_schema(),
+                    orchestra_plan::ask_provider_schema(),
+                    orchestra_plan::board_read_schema(),
                 ]);
+                // Who sees which side of the lead/child conversation: a child
+                // can ask and post, only a lead writes the plan.
+                if orchestra_plan::child_of(conn, session_scope.unwrap_or(-1)).is_some() {
+                    tools.extend([orchestra_plan::ask_lead_schema(), orchestra_plan::board_post_schema()]);
+                } else {
+                    tools.push(orchestra_plan::plan_orchestra_schema());
+                }
                 // Listed only for a session whose user turned it on: an agent
                 // that never sees the tool never tries it.
                 if session_scope.is_some_and(|s| computer::enabled(conn, s)) {
@@ -419,6 +429,12 @@ fn dispatch(req: &Value, conn: &rusqlite::Connection, caller: &Caller) -> Value 
                 }
                 if session_scope.is_some_and(|s| crate::ask_user::available(conn, s)) {
                     tools.push(crate::ask_user::tool_schema());
+                }
+                if session_scope.is_some_and(|s| crate::request_secret::available(conn, s)) {
+                    tools.push(crate::request_secret::tool_schema());
+                }
+                if session_scope.is_some_and(|s| crate::variants::available(conn, s)) {
+                    tools.push(crate::variants::tool_schema());
                 }
             }
             tools.extend([synthesize_role_schema(), notify_user_schema()]);
@@ -434,10 +450,14 @@ fn dispatch(req: &Value, conn: &rusqlite::Connection, caller: &Caller) -> Value 
     }
 }
 
-const MEMORY_INSTRUCTIONS: &str = "When the user asks you to remember, note or keep something \
-for later, or states a durable fact about the project (a convention, a decision, a preference), \
-call `memory_propose` with that fact in one short sentence. Do this instead of your own memory \
-notes: Chorus shares this memory with every agent in the session. A person approves it afterwards.";
+const MEMORY_INSTRUCTIONS: &str = "Chorus keeps one memory for every agent in this session. Call \
+`memory_propose` with one short sentence whenever you learn something a later turn, or another \
+agent, would otherwise have to rediscover: when the user asks you to remember something; a \
+decision that was made and why; a convention you found in the code; the build, test or run \
+command that actually worked; a pitfall you hit. You do not need to be asked. Do this instead \
+of your own memory notes. Do not propose what is already in the project files or obvious from \
+the code, and never a secret. A person approves each proposal afterwards; if it contradicts \
+something already remembered it is offered as a replacement for it.";
 
 fn search_history_schema() -> Value {
     json!({
@@ -460,10 +480,13 @@ fn search_history_schema() -> Value {
 fn propose_tool_schema() -> Value {
     json!({
         "name": "memory_propose",
-        "description": "Call this whenever the user asks you to remember something or states a \
-                        durable project fact. Proposes it for the human to review, shared with every \
-                        agent in this session. Keep it under 140 characters. It is NOT remembered \
-                        until a person approves it.",
+        "description": "Propose one durable fact for the project's shared memory. Call it when the \
+                        user asks you to remember something, and also on your own when you learn \
+                        something a later turn would have to rediscover: a decision and its reason, \
+                        a convention you found, the build/test/run command that worked, a pitfall. \
+                        One sentence under 140 characters; no secrets. It is NOT remembered until \
+                        a person approves it, and if it contradicts an existing fact it is queued \
+                        as a replacement for that fact.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -580,6 +603,14 @@ fn call_tool(
         let sess = session_scope.ok_or("asking the user is only available in a session")?;
         return crate::ask_user::call(conn, sess, &caller.actor, &args);
     }
+    if name == "chorus_request_secret" {
+        let sess = session_scope.ok_or("requesting a secret is only available in a session")?;
+        return crate::request_secret::call(conn, sess, &caller.actor, &args);
+    }
+    if name == "chorus_offer_variants" {
+        let sess = session_scope.ok_or("offering variants is only available in a session")?;
+        return crate::variants::call(conn, sess, &caller.actor, &args);
+    }
     if name == "computer" {
         let sess = session_scope.ok_or("computer use is only available in a session")?;
         return computer::call(conn, sess, &args, computer::system());
@@ -610,13 +641,23 @@ fn call_tool(
         let masked = crate::secrets::user_vault().mask(text).text;
         let text = masked.as_str();
 
-        return match memory::propose(conn, scope, text, None) {
-            Ok(id) => Ok(json!({
-                "content": [{
-                    "type": "text",
-                    "text": format!("Queued proposal #{id} for review: {text:?}")
-                }]
-            })),
+        // Right after the agent read a web page or an imported conversation,
+        // what it proposes may be someone else's words: flag it for the reviewer.
+        let suspicious = caller
+            .session
+            .map(|s| crate::lessons::session_tainted(conn, s).unwrap_or(false))
+            .unwrap_or(false);
+        let embedder = crate::embedding::from_env();
+        let proposal = memory::NewProposal { suspicious, ..memory::NewProposal::fact(scope, text) };
+        let say = |t: String| Ok(json!({ "content": [{ "type": "text", "text": t }] }));
+        return match memory::propose_with(conn, &proposal, embedder.as_deref()) {
+            Ok(memory::Proposed::Queued(id)) => say(format!("Queued proposal #{id} for review: {text:?}")),
+            Ok(memory::Proposed::Replaces { proposal, fact }) => say(format!(
+                "Queued proposal #{proposal} for review: it would replace remembered fact #{fact}, \
+                 which it conflicts with: {text:?}"
+            )),
+            Ok(memory::Proposed::Known(fact)) => say(format!("Already remembered (fact #{fact}); nothing to add.")),
+            Ok(memory::Proposed::AlreadyQueued(id)) => say(format!("Already waiting for review (proposal #{id}).")),
             Err(e) => Err(e.to_string()),
         };
     }
@@ -661,9 +702,10 @@ fn call_tool(
             out_of_scope: list("out_of_scope"),
             output: text("output"),
             done_when: text("done_when"),
+            plan_task: text("plan_task"),
+            ..Default::default()
         };
-        let encoded = spec.encode();
-        let task = encoded.as_str();
+        let mut spec = spec;
         let weight = args.get("weight").and_then(Value::as_str);
         let default_worktree = role == "builder";
         let worktree = args
@@ -672,6 +714,10 @@ fn call_tool(
             .unwrap_or(default_worktree);
 
         let sess = require_session(caller)?;
+        // Held to the lead's written plan before anything starts (F4).
+        orchestra_plan::check_spawn(conn, sess, &mut spec, worktree)?;
+        let encoded = spec.encode();
+        let task = encoded.as_str();
         let cwd: String = conn
             .query_row("SELECT cwd FROM session WHERE id = ?1", [sess], |r| {
                 r.get(0)
@@ -725,6 +771,10 @@ fn call_tool(
         return Ok(json!({ "content": [{ "type": "text", "text": text }] }));
     }
 
+    if let Some(r) = orchestra_plan::call(name, &args, conn, session_scope, &caller.actor) {
+        return r;
+    }
+
     if name == "chorus_send_message" {
         let agent_id = args
             .get("agent_id")
@@ -764,13 +814,30 @@ fn call_tool(
             require_owned(conn, caller, id)?;
         }
 
-        let rep = agent_control::wait_agent(conn, Some(sess), agent_id, timeout_secs)
-            .map_err(|e| e.to_string())?;
+        // Wait in short slices so a child's question reaches the lead now,
+        // not when the whole wait runs out.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        let (rep, asked) = loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let slice = left.as_secs().min(1);
+            let rep = agent_control::wait_agent(conn, Some(sess), agent_id, slice)
+                .map_err(|e| e.to_string())?;
+            let open = orchestra_plan::open_questions(conn, sess);
+            if rep.all_done || !open.is_empty() || left.is_zero() {
+                break (rep, open);
+            }
+        };
 
-        let text = format!(
+        let mut text = format!(
             "Wait status:\nAll done: {}\nCompleted: {:?}\nRunning: {:?}\nCancelled: {:?}",
             rep.all_done, rep.completed, rep.running, rep.cancelled
         );
+        for q in &asked {
+            text.push_str(&format!(
+                "\nAgent #{} ({}) is asking you: {}\n(answer with chorus_send_message to agent {})",
+                q.subagent_id, q.role, q.text, q.subagent_id
+            ));
+        }
         return Ok(json!({
             "content": [{ "type": "text", "text": text }],
             "all_done": rep.all_done,
@@ -812,8 +879,21 @@ fn call_tool(
         let res = agent_control::collect_results(conn, Some(sess), ids_opt, join_mode)
             .map_err(|e| e.to_string())?;
 
+        let mut rendered = res.rendered_markdown;
+        let open = orchestra_plan::open_questions(conn, sess);
+        if !open.is_empty() {
+            rendered.push_str("\n#### Waiting for your answer\n");
+            for q in &open {
+                rendered.push_str(&format!("- agent #{} ({}): {}\n", q.subagent_id, q.role, q.text));
+            }
+        }
+        let notes = orchestra_plan::board(conn, sess);
+        if !notes.is_empty() {
+            rendered.push_str("\n#### Board\n");
+            rendered.push_str(&orchestra_plan::render_board(&notes, None));
+        }
         return Ok(json!({
-            "content": [{ "type": "text", "text": res.rendered_markdown }],
+            "content": [{ "type": "text", "text": rendered }],
             "briefs": res.briefs
         }));
     }
@@ -998,6 +1078,10 @@ fn spawn_agent_schema() -> Value {
                 "done_when": {
                     "type": "string",
                     "description": "A command whose success means the work is done (e.g. 'cargo test -p foo')"
+                },
+                "plan_task": {
+                    "type": "string",
+                    "description": "The id of the subtask in your `chorus_plan_orchestra` plan that this child carries out. Required for a writer once more than one agent runs; files_owned, done_when and the agreed signatures are then taken from the plan."
                 },
                 "task": {
                     "type": "string",

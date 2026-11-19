@@ -1314,8 +1314,8 @@ struct ContentView: View {
             .frame(width: 480)
             .interactiveDismissDisabled()
         }
-        .sheet(item: $engine.pendingQuestion) { q in
-            AgentQuestionSheet(question: q, agentLabel: askingAgentLabel(q.agent)) { engine.answerQuestion($0) }
+        .sheet(item: $engine.pendingSecret) { req in
+            SecretRequestSheet(request: req, agentLabel: askingAgentLabel(req.agent)) { engine.answerSecret($0) }
         }
         .sheet(isPresented: $showSearchSheet) {
             ChatSearchView(
@@ -1896,6 +1896,9 @@ struct ContentView: View {
                                         .transition(.opacity.combined(with: .offset(y: 8)))
                                 }
                                 orchestraStatusSection
+                                AgentPromptCards(engine: engine, agentLabel: askingAgentLabel) {
+                                    if chatPinned { proxy.scrollTo("chatBottom", anchor: .bottom) }
+                                }
                                 Color.clear.frame(height: 1).id("chatBottom")
                             }
                             .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.88),
@@ -3005,6 +3008,19 @@ struct ContentView: View {
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
+    /// The small label above a queued entry. What the entry *is* was decided in
+    /// Rust (`kind`, `replaces`, `suspicious`); this only words it.
+    private static func proposalTag(_ p: Engine.Proposal) -> String? {
+        var parts: [String] = []
+        if p.suspicious == true { parts.append("⚠ อาจถูกวางยา — มาจากเว็บหรือ session ที่นำเข้า") }
+        switch p.kind {
+        case "lesson": parts.append("บทเรียนจากที่ผ่านมา")
+        case "retire": parts.append("เสนอให้เลิกจำข้อนี้")
+        default: if p.replaces != nil { parts.append("แทนที่ข้อที่จำไว้เดิม") }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     private var memoryPane: some View {
         VStack(spacing: 0) {
             PaneHeader(title: engine.memoryScope.map { "ความจำร่วม · \($0)" } ?? "ความจำของโฟลเดอร์นี้",
@@ -3016,10 +3032,20 @@ struct ContentView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         if !engine.pending.isEmpty {
-                            SectionLabel("รออนุมัติ", count: engine.pending.count, tint: .orange)
+                            SectionLabel("รอคุณดู \(engine.pending.count) ข้อ", count: nil, tint: .orange)
                             ForEach(engine.pending) { p in
                                 HStack(alignment: .top, spacing: 8) {
-                                    Text(p.text).font(.callout).frame(maxWidth: .infinity, alignment: .leading)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        if let tag = Self.proposalTag(p) {
+                                            Text(tag).font(.caption2.weight(.semibold))
+                                                .foregroundStyle(p.suspicious == true ? Color.red : Color.orange)
+                                        }
+                                        Text(p.text).font(.callout)
+                                        if let why = p.evidence {
+                                            Text(why).font(.caption2).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                                     Button { engine.review(p.id, approve: false) } label: { Image(systemName: "xmark") }
                                         .buttonStyle(InteractiveStyle(cornerRadius: 6, padding: .init(top: 4, leading: 6, bottom: 4, trailing: 6)))
                                         .foregroundStyle(.red).help("ปฏิเสธ")
@@ -3364,6 +3390,16 @@ struct ContentView: View {
                                 .font(.system(size: 9))
                                 .foregroundStyle(.orange)
                                 .help("มีงานย่อยรอคำยืนยัน")
+                        }
+                        // The open session is the only one that can be waiting:
+                        // its agent is blocked on a question, a key or a choice.
+                        if selected, let waiting = AgentPromptNotice.badge(engine.waitingForYou) {
+                            Text(waiting)
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.orange, in: Capsule())
                         }
 
                         Spacer(minLength: 4)

@@ -111,21 +111,25 @@ fn secrets_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `chorus memory <pending|approve ID|reject ID|add TEXT> --db PATH [--scope N]`
+/// `chorus memory <pending|approve ID|reject ID|add TEXT|embed|learn> --db PATH [--scope N] [--session N]`
 ///
 /// The human side of the approve queue (design §4). Agents propose via the
-/// `memory.propose` tool; a person clears the queue here.
+/// `memory.propose` tool; `learn --session N` drafts lessons and retirement
+/// suggestions from that session's ledger into the same queue (what
+/// `chorus compact` also does); a person clears the queue here.
 fn memory_cmd(args: &[String]) -> Result<()> {
     use chorus_core::memory;
 
     let mut db: Option<PathBuf> = None;
     let mut scope: i64 = 1;
+    let mut session: Option<i64> = None;
     let mut rest: Vec<&String> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--db" => db = it.next().map(PathBuf::from),
             "--scope" => scope = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
+            "--session" => session = it.next().and_then(|v| v.parse().ok()),
             _ => rest.push(a),
         }
     }
@@ -141,8 +145,24 @@ fn memory_cmd(args: &[String]) -> Result<()> {
                 println!("queue empty");
             }
             for p in q {
-                println!("  [{}] scope {} · {}", p.id, p.scope, p.text);
+                let kind = match p.kind {
+                    memory::ProposalKind::Fact => String::new(),
+                    memory::ProposalKind::Lesson => " · บทเรียน".to_string(),
+                    memory::ProposalKind::Retire => " · เลิกจำ".to_string(),
+                };
+                let replaces = p.replaces.map(|f| format!(" · แทนข้อ {f}")).unwrap_or_default();
+                let warn = if p.suspicious { " · ⚠ อาจถูกวางยา" } else { "" };
+                println!("  [{}] scope {}{kind}{replaces}{warn} · {}", p.id, p.scope, p.text);
+                if let Some(e) = &p.evidence {
+                    println!("        หลักฐาน: {e}");
+                }
             }
+        }
+        "learn" => {
+            let session = session.context("learn --session N")?;
+            let s = Session::open(&db, session)?;
+            let r = s.learn()?;
+            println!("บทเรียนใหม่ {} · เสนอเลิกจำ {}", r.lessons, r.retirements);
         }
         "approve" => {
             let id: i64 = rest
@@ -360,6 +380,7 @@ fn run(args: &[String]) -> Result<()> {
     let mut model: Option<String> = None;
     let mut computer_use = false;
     let mut claude_chrome = false;
+    let mut claude_auto_memory = false;
     let mut show_secret_files = false;
 
     let mut it = args.iter();
@@ -383,6 +404,7 @@ fn run(args: &[String]) -> Result<()> {
             "--model" => model = it.next().cloned(),
             "--computer" => computer_use = true,
             "--claude-chrome" => claude_chrome = true,
+            "--claude-auto-memory" => claude_auto_memory = true,
             "--show-secret-files" => show_secret_files = true,
             "--session" => continue_session = it.next().and_then(|v| v.parse().ok()),
             "--yes" => policy = Policy::AllowAll,
@@ -426,6 +448,7 @@ fn run(args: &[String]) -> Result<()> {
         s.set_computer_use(true);
     }
     s.set_claude_chrome(claude_chrome);
+    s.set_claude_auto_memory(claude_auto_memory);
     s.set_hide_secret_files(!show_secret_files);
     if let Some(m) = &model {
         // Pinned for whoever answers, including anyone the relay hands to:
@@ -1237,6 +1260,12 @@ fn compact_cmd(args: &[String]) -> Result<()> {
     println!("summariser   {}", r.model);
     println!("compacted    {} of {before} pending", r.compacted);
     println!("remaining    {}", r.remaining);
+    if r.learned.lessons + r.learned.retirements > 0 {
+        println!(
+            "learned      {} lesson(s), {} retirement(s) — รออนุมัติใน `chorus memory pending`",
+            r.learned.lessons, r.learned.retirements
+        );
+    }
     println!("took         {:.1}s", t0.elapsed().as_secs_f64());
     if r.remaining > 0 {
         println!("\nยังเหลืออยู่ — รัน compact ซ้ำได้เลย (ทำทีละ {limit})");
