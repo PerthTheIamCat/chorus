@@ -17,6 +17,7 @@ struct SidebarView: View {
     @State private var steer = ""
     @State private var external: [String: Int] = [:]
     @State private var showAgents = false
+    @State private var cleanup: (project: ChorusProject, count: Int)?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -41,7 +42,7 @@ struct SidebarView: View {
                             Button { shell.showSearch = true } label: {
                                 HStack(spacing: 10) {
                                     ProviderIcon(provider: Self.providerKey(provider), size: 14)
-                                    Text(provider)
+                                    Text(Self.importLabel(provider))
                                     Spacer()
                                     Text("\(external[provider] ?? 0)").font(Typo.tiny).foregroundStyle(Palette.text3)
                                 }
@@ -64,6 +65,20 @@ struct SidebarView: View {
                     engine.setProjectFolders(saved.folders)
                 }
             }, onDelete: { projects.remove(p) })
+        }
+        .alert(cleanup.map { $0.count == 0 ? "ไม่มี session ที่ว่าง" : "ลบ session ที่ว่าง \($0.count) รายการ?" } ?? "",
+               isPresented: Binding(get: { cleanup != nil }, set: { if !$0 { cleanup = nil } })) {
+            if let c = cleanup, c.count > 0 {
+                Button("ลบ \(c.count) รายการ", role: .destructive) {
+                    engine.deleteEmptySessions(dbs: c.project.folders.map(shell.dbPath(for:))) { _ in }
+                    cleanup = nil
+                }
+                Button("ยกเลิก", role: .cancel) { cleanup = nil }
+            } else {
+                Button("ตกลง", role: .cancel) { cleanup = nil }
+            }
+        } message: {
+            Text("เฉพาะ session ใน \(cleanup?.project.name ?? "") ที่ไม่มีข้อความ ไฟล์แนบ หรือ session ย่อย · session ที่เปิดอยู่ไม่ถูกลบ · ลบแล้วกู้คืนไม่ได้")
         }
         .alert("ส่งข้อความถึง agent ย่อย", isPresented: Binding(get: { messaging != nil }, set: { if !$0 { messaging = nil } }),
                presenting: messaging) { sub in
@@ -129,6 +144,8 @@ struct SidebarView: View {
             .contextMenu {
                 Button("แก้ไขโปรเจกต์…") { editing = p }
                 Button("session ใหม่") { shell.newSession(in: p.folders.first) }
+                Divider()
+                Button("ลบ session ที่ว่าง…") { cleanup = (p, emptyCount(p)) }
             }
             Button { shell.newSession(in: p.folders.first) } label: { Image(systemName: "square.and.pencil") }
                 .buttonStyle(IconButtonStyle())
@@ -157,7 +174,7 @@ struct SidebarView: View {
                     subagentRow(sub, folder: r.folder)
                 }
             }
-            if rows.isEmpty && engine.draft == nil {
+            if rows.isEmpty && engine.draft.map({ p.folders.contains(draftFolder($0)) }) != true {
                 Text(shell.query.isEmpty ? "ยังไม่มี session" : "ไม่เจอที่ค้น")
                     .font(Typo.caption).foregroundStyle(Palette.text3)
                     .padding(.leading, 38).padding(.vertical, 4)
@@ -309,6 +326,14 @@ struct SidebarView: View {
         return out.sorted { ($0.session.started_ms + $0.session.last_ms) > ($1.session.started_ms + $1.session.last_ms) }
     }
 
+    /// Sessions nothing was said in (the count Rust's cleanup will remove,
+    /// give or take one with only an attachment).
+    private func emptyCount(_ p: ChorusProject) -> Int {
+        p.folders.reduce(0) { n, f in
+            n + shell.sessions(in: f).filter { $0.events == 0 && !($0.id == engine.sessionID && f == shell.workspace) }.count
+        }
+    }
+
     private func draftFolder(_ d: Engine.DraftInfo) -> String {
         ((d.db as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
     }
@@ -335,6 +360,16 @@ struct SidebarView: View {
             var counts: [String: Int] = [:]
             for s in sessions { counts[s.provider, default: 0] += 1 }
             external = counts
+        }
+    }
+
+    /// Import rows name the app the transcripts came from, not the agent id.
+    static func importLabel(_ provider: String) -> String {
+        switch providerKey(provider) {
+        case "claude": "Claude Code"
+        case "codex": "Codex"
+        case "gemini": "Gemini CLI"
+        default: provider
         }
     }
 

@@ -18,13 +18,16 @@ struct CommandPalette: View {
     @FocusState private var focused: Bool
 
     private struct Row: Identifiable {
-        let id = UUID()
+        // Stable across renders: a fresh UUID per pass made the lazy list
+        // reuse the old row views and show the unfiltered titles.
+        var id: String { "\(section)|\(title)|\(meta)|\(tag)" }
         let section: String
         let title: String
         var icon: String?
         var provider: String?
         var meta = ""
         var key: String?
+        var tag = ""
         let run: () -> Void
     }
 
@@ -34,6 +37,10 @@ struct CommandPalette: View {
         for item in a {
             out.append(Row(section: "คำสั่ง", title: item.title, icon: item.icon, run: item.run))
         }
+        // paletteItems already lists "use <agent>" rows; drop them there and keep
+        // these, which carry the provider icon and quota.
+        let agentTitles = Set(engine.agents.map { "สลับไปใช้ \($0.label)" })
+        out.removeAll { agentTitles.contains($0.title) }
         for agent in engine.agents where agent.ready {
             out.append(Row(section: "สลับไปใช้", title: "เทิร์นถัดไปให้ \(agent.label)", provider: agent.id,
                            meta: quota(agent.id)) { shell.choose(agent.defaultModel) })
@@ -41,7 +48,7 @@ struct CommandPalette: View {
         for f in shell.projects.projects.flatMap(\.folders) {
             for s in shell.sessions(in: f).prefix(30) {
                 out.append(Row(section: "Session", title: shell.title(of: s), provider: s.agents.first,
-                               meta: (f as NSString).lastPathComponent) { shell.open(SessionKey(folder: f, id: s.id)) })
+                               meta: (f as NSString).lastPathComponent, tag: "\(f)#\(s.id)") { shell.open(SessionKey(folder: f, id: s.id)) })
             }
         }
         if !query.isEmpty {
@@ -91,12 +98,11 @@ struct CommandPalette: View {
                                     }
                                 }
                                 .buttonStyle(RowStyle(selected: i == index, height: 40))
-                                .id(i)
                             }
                         }
                         .padding(8)
                     }
-                    .onChange(of: index) { _, i in proxy.scrollTo(i) }
+                    .onChange(of: index) { _, i in if list.indices.contains(i) { proxy.scrollTo(list[i].id) } }
                 }
                 .frame(maxHeight: 460)
                 Hairline()
@@ -115,7 +121,11 @@ struct CommandPalette: View {
             .shadow(color: .black.opacity(0.4), radius: 40, y: 20)
             .padding(.top, 90)
         }
-        .onAppear { focused = true }
+        // The overlay is inserted in the same update that opened it; focusing in
+        // onAppear loses to the composer, which still holds first responder.
+        .task { try? await Task.sleep(for: .milliseconds(30)); focused = true }
+        .onExitCommand(perform: dismiss)
+        .background { Button("", action: dismiss).keyboardShortcut(.cancelAction).hidden() }
         .onChange(of: query) { _, _ in index = 0 }
     }
 
@@ -235,8 +245,22 @@ struct HandoffSheet: View {
     @EnvironmentObject private var shell: ShellModel
     @Environment(\.dismiss) private var dismiss
     @State private var target: String?
+    // Picking a target switches the composer's model (so the prepared brief
+    // goes with the next turn); freeze who it is *from* when the sheet opens,
+    // and what to switch back to if the user cancels.
+    @State private var frozenFrom: String?
+    @State private var startModel = ""
 
-    private var from: String { shell.agent(for: shell.model)?.id ?? "" }
+    /// Who last answered in the ledger, not what the composer is set to (after
+    /// a relaunch the composer falls back to the default agent). Live until a
+    /// target is picked, since the session's events may still be loading.
+    private var from: String {
+        if let frozenFrom { return frozenFrom }
+        let last = engine.events.last { $0.kind == "msg" && $0.actor != "user" && $0.actor != "chorus" }?.actor
+        let lastID = last.map { ProviderTint.provider(of: $0) }
+        return lastID.flatMap { id in engine.agents.first { $0.id == id }?.id }
+            ?? shell.agent(for: shell.model)?.id ?? ""
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -251,6 +275,7 @@ struct HandoffSheet: View {
                 HStack(spacing: 8) {
                     ForEach(engine.agents.filter { $0.ready && $0.id != from }) { a in
                         Button {
+                            if frozenFrom == nil { frozenFrom = from }
                             target = a.id
                             shell.choose(a.defaultModel)
                         } label: {
@@ -301,7 +326,12 @@ struct HandoffSheet: View {
             HStack {
                 Text("agent ใหม่จะทวนความเข้าใจก่อนลงมือ").font(Typo.caption).foregroundStyle(Palette.text3)
                 Spacer()
-                Button("ยกเลิก") { engine.cancelHandoffPrep(); dismiss() }.buttonStyle(SecondaryButtonStyle())
+                Button("ยกเลิก") {
+                    engine.cancelHandoffPrep()
+                    if target != nil, !startModel.isEmpty { shell.choose(startModel) }
+                    dismiss()
+                }
+                .buttonStyle(SecondaryButtonStyle())
                 Button("ส่งให้ \(target.map(shell.agentLabel) ?? "…")") {
                     if let t = target { engine.handoffAuto(to: t, level: shell.mode == .allow ? ShellModel.Level.allow : 0) }
                     dismiss()
@@ -314,6 +344,7 @@ struct HandoffSheet: View {
         }
         .frame(width: 720)
         .background(Palette.elevated)
+        .onAppear { startModel = shell.model }
     }
 
     @ViewBuilder
@@ -378,6 +409,7 @@ struct SearchSheet: View {
             } else if scope == .project {
                 if hits.isEmpty {
                     ContentUnavailableView(query.isEmpty ? "ค้นเนื้อหาทุกแชทในโปรเจกต์นี้" : "ไม่เจอ", systemImage: "magnifyingglass")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     List(hits) { h in
                         Button { shell.open(SessionKey(folder: shell.workspace, id: h.session_id)); dismiss() } label: {
@@ -437,7 +469,7 @@ struct SearchSheet: View {
                 }
             }
         }
-        .frame(width: 980, height: 640)
+        .frame(width: 980, height: 640, alignment: .top)
         .background(Palette.elevated)
         .onAppear { focused = true }
         .onChange(of: scope) { _, s in if s == .others && external.isEmpty { search() } }
