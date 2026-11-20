@@ -502,11 +502,14 @@ struct ContextRawSheet: View {
                 Hairline(vertical: true)
                 ScrollView {
                     Text(inspection?.text ?? "").font(Typo.mono).foregroundStyle(Palette.text).lineSpacing(3)
+                        .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(20)
                 }
             }
         }
-        .frame(minWidth: 900, minHeight: 600)
+        // A sheet takes its content's ideal size; long unbroken lines (paths)
+        // would make it wider than the window without an upper bound.
+        .frame(minWidth: 900, idealWidth: 960, maxWidth: 1100, minHeight: 600, idealHeight: 680)
         .background(Palette.window)
     }
 }

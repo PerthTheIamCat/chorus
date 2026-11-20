@@ -40,6 +40,8 @@ struct WorkbenchView: View {
                 }
             }
         }
+        // Empty states are shorter than the stage; pin the tab bar to the top.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Palette.window)
     }
 }
@@ -64,6 +66,7 @@ private struct DiffReview: View {
             } description: {
                 Text("เมื่อ agent แก้ไฟล์ ก้อนที่แก้จะขึ้นที่นี่ให้เก็บหรือตีกลับทีละก้อน")
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             VStack(spacing: 0) {
                 HStack(spacing: 0) {
