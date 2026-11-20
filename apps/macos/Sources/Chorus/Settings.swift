@@ -635,11 +635,11 @@ struct AccountsSettings: View {
                               : agent.id == "antigravity"
                               ? "โควตาแยกตามกลุ่มโมเดล อ่านจากไฟล์ที่ AIUsageBar (หรือ statusline อื่น) บันทึกไว้ ถ้าเก่ากว่า 10 นาทีจะขึ้นว่าไม่ทราบ"
                               : "ตัวเลขมาจาก log ของ Codex เอง อัปเดตทุกครั้งที่บัญชีนั้นตอบ") {
-                ForEach(Array(rows.enumerated()), id: \.element.id) { i, acc in
-                    if i > 0 { Divider().padding(.leading, 12) }
+                // One view per row: a ForEach row that is sometimes one view and
+                // sometimes two crashes the grouped Form's section layout.
+                ForEach(rows) { acc in
                     AccountRow(account: acc, onEdit: { editor = .edit(acc) }, onRemove: { removing = acc })
                 }
-                Divider().padding(.leading, 12)
                 Button { editor = .create(agent: agent.id) } label: {
                     Label("เพิ่มบัญชี \(agent.label)", systemImage: "plus.circle")
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -869,8 +869,7 @@ struct SkillsSettings: View {
             let group = shown.filter { $0.source == src }
             if !group.isEmpty {
                 SettingsGroup(title: titles[src] ?? src) {
-                    ForEach(Array(group.enumerated()), id: \.element.id) { i, sk in
-                        if i > 0 { Divider().padding(.leading, 12) }
+                    ForEach(group) { sk in
                         SettingsRow(title: sk.name, detail: skillDetail(sk)) {
                             Button { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: sk.path)]) } label: {
                                 Image(systemName: "arrow.up.forward.square")

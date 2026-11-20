@@ -188,9 +188,18 @@ extension ShellModel {
         if engine.sessionID >= 0 {
             items.append(.init(title: "Snapshot ตอนนี้", icon: "camera") { self.engine.snapshot() })
         }
-        for t in [ShellTool.files, .terminal, .ship, .checkpoints, .search, .orchestra, .monitor] {
+        items.append(.init(title: "โต๊ะงาน · ที่แก้ไป", icon: "plus.forwardslash.minus") { self.stage = .workbench; self.workbenchTab = .changes })
+        items.append(.init(title: "โต๊ะงาน · ไฟล์", icon: "folder") { self.stage = .workbench; self.workbenchTab = .files })
+        items.append(.init(title: "โต๊ะงาน · พรีวิว", icon: "safari") { self.stage = .workbench; self.workbenchTab = .preview })
+        items.append(.init(title: "Orchestra", icon: "point.3.connected.trianglepath.dotted") { self.stage = .orchestra })
+        items.append(.init(title: "ส่งไม้…", icon: "arrow.left.arrow.right") { self.showHandoff = true })
+        items.append(.init(title: "ย้อนเวลา (checkpoint)", icon: "clock.arrow.circlepath") {
+            self.inspectorTab = .rewind; self.showInspector = true
+        })
+        for t in [ShellTool.ship, .monitor] {
             items.append(.init(title: t.title, icon: t.symbol) { openTool(t) })
         }
+        items.append(.init(title: "ค้นทุก session", icon: "magnifyingglass") { self.showSearch = true })
         items.append(.init(title: "ตั้งค่า", icon: "gearshape") { ShellRoot.openSettings() })
         return items
     }
