@@ -9,13 +9,17 @@ fn app(rel: &str) -> String {
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
 }
 
-/// The v0.4 window lives in `Sources/Chorus/Shell/`; the contracts below are
-/// about the window as a whole, so read those files together.
+/// The window's views live in `Sources/Chorus/UI/` and its state in
+/// `Sources/Chorus/Shell/`; the contracts below are about the window as a
+/// whole, so read those files together.
 fn shell() -> String {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/macos/Sources/Chorus/Shell");
-    let mut files: Vec<_> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
-        .filter_map(|e| e.ok().map(|e| e.path()))
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../apps/macos/Sources/Chorus");
+    let mut files: Vec<_> = ["Shell", "UI"]
+        .iter()
+        .flat_map(|d| {
+            let dir = root.join(d);
+            std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())).filter_map(|e| e.ok().map(|e| e.path()))
+        })
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("swift"))
         .collect();
     files.sort();
@@ -92,7 +96,7 @@ fn pairing_view_has_no_hardcoded_port_and_no_optimistic_revoke() {
 /// engine or shown back in the transcript.
 #[test]
 fn requested_secret_is_typed_masked_and_never_kept_by_the_shell() {
-    let views = app("Sources/Chorus/Shell/ShellPrompts.swift");
+    let views = app("Sources/Chorus/UI/PromptCards.swift");
     let sheet = &views[views.find("struct SecretSheet").expect("sheet")..];
     assert!(sheet.contains("SecureField("), "the value must be typed into a SecureField");
     for leak in ["print(", "NSLog(", "Logger", "os_log", "UserDefaults", "@AppStorage", "Text(value", "Text(\"\\(value"] {

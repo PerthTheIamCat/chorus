@@ -64,6 +64,19 @@ struct ProviderIcon: View {
         return image
     }
 
+    /// The mark as a plain `Image` already at `size` points. Menu and toolbar
+    /// labels are flattened to text + image by AppKit, which ignores a view's
+    /// `.frame` and draws the SVG at its own (large) size; this one keeps its size.
+    static func menuImage(_ provider: String, size: CGFloat = 14) -> Image {
+        let icon = ProviderIcon(provider: provider, size: size)
+        guard let source = icon.providerImage, let copy = source.copy() as? NSImage else {
+            return Image(systemName: icon.fallback)
+        }
+        copy.size = NSSize(width: size, height: size)
+        copy.isTemplate = true
+        return Image(nsImage: copy)
+    }
+
     var body: some View {
         Group {
             if let image = providerImage {

@@ -34,7 +34,7 @@ struct ChorusApp: App {
             // A bare `swift build` executable has no app bundle, so launching it
             // can leave the window on screen but never made key; ShellRoot
             // forces activation when it appears.
-            ShellRoot()
+            RootView()
                 .environmentObject(engine)
                 .environmentObject(shell)
                 .chorusAppearance()
@@ -43,6 +43,7 @@ struct ChorusApp: App {
         // shifts hit-testing away from what is drawn, so sidebar clicks landed
         // on the row next to the one under the pointer.
         .windowToolbarStyle(.unified)
+        .defaultSize(width: 1440, height: 900)
         .commands {
             AboutCommand()
             CheckForUpdatesCommand(updater: updater)

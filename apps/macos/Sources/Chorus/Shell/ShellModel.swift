@@ -43,22 +43,53 @@ struct SessionKey: Hashable {
 }
 
 enum InspectorTab: String, CaseIterable, Identifiable {
-    case context, changes, memory
+    case task, changes, memory, context, rewind
     var id: String { rawValue }
 
     var title: String {
         switch self {
+        case .task: "งาน"
         case .context: "คอนเท็กซ์"
         case .changes: "ที่แก้"
         case .memory: "ความจำ"
+        case .rewind: "ย้อน"
         }
     }
 
     var symbol: String {
         switch self {
+        case .task: "checklist"
         case .context: "gauge.with.dots.needle.33percent"
         case .changes: "plus.forwardslash.minus"
         case .memory: "brain"
+        case .rewind: "clock.arrow.circlepath"
+        }
+    }
+}
+
+/// What fills the window between the sidebar and the inspector, chosen from
+/// the toolbar's segmented control (design: สนทนา / โต๊ะงาน / Orchestra).
+enum Stage: String, CaseIterable, Identifiable {
+    case conversation, workbench, orchestra
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .conversation: "สนทนา"
+        case .workbench: "โต๊ะงาน"
+        case .orchestra: "Orchestra"
+        }
+    }
+}
+
+/// The workbench's own tabs.
+enum WorkbenchTab: String, CaseIterable, Identifiable {
+    case changes, files, preview
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .changes: "ที่แก้ไป"
+        case .files: "ไฟล์"
+        case .preview: "พรีวิว"
         }
     }
 }
@@ -72,7 +103,12 @@ final class ShellModel: ObservableObject {
     @Published var workspace = ""
     @Published var selection: SessionKey?
     @Published var showInspector = false
-    @Published var inspectorTab: InspectorTab = .context
+    @Published var inspectorTab: InspectorTab = .task
+    @Published var stage: Stage = .conversation
+    @Published var workbenchTab: WorkbenchTab = .changes
+    @Published var showTerminal = false
+    @Published var showHandoff = false
+    @Published var showSearch = false
     @Published var query = ""
     @Published var pendingDelete: Engine.SessionSummary?
     @Published var showSettings = false
