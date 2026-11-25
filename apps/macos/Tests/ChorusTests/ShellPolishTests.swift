@@ -55,4 +55,13 @@ final class ShellPolishTests: XCTestCase {
             XCTAssertTrue(a.contains("intro"))
         } else { XCTFail("first part should be prose") }
     }
+
+    /// A streaming reply re-parses only its last paragraph, so each paragraph
+    /// must be its own block (and a fence inside stays one block).
+    func testMarkdownSplitsParagraphs() {
+        let parts = MarkdownBody.blocks("one\n\ntwo\nstill two\n\n\n```\na\n\nb\n```\nthree")
+        XCTAssertEqual(parts.count, 4)
+        if case let .prose(a) = parts[1] { XCTAssertEqual(a, "two\nstill two") } else { XCTFail("second part should be prose") }
+        if case let .code(_, body) = parts[2] { XCTAssertEqual(body, "a\n\nb") } else { XCTFail("third part should be code") }
+    }
 }

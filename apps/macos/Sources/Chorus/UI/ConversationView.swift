@@ -87,6 +87,8 @@ struct ThreadView: View {
                 .frame(maxWidth: .infinity)
             }
             .defaultScrollAnchor(.bottom)
+            .opacity(engine.switching ? 0.55 : 1)
+            .animation(.easeOut(duration: 0.15), value: engine.switching)
             .onChange(of: engine.events.count) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
             .onChange(of: engine.sessionID) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
             .overlay { if items.isEmpty && !engine.busy { EmptySession() } }
@@ -432,9 +434,10 @@ struct MarkdownBody: View {
     var body: some View {
         let blocks = cached ? Self.blockCache.value(for: text) { Self.blocks(text) } : Self.blocks(text)
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, b in
+            ForEach(Array(blocks.enumerated()), id: \.offset) { i, b in
                 switch b {
-                case .prose(let s): Prose(text: s, cached: cached)
+                // A streaming reply re-parses only its last paragraph.
+                case .prose(let s): Prose(text: s, cached: cached || i < blocks.count - 1)
                 case .code(let lang, let s): CodeBlock(language: lang, code: s)
                 }
             }
@@ -450,21 +453,30 @@ struct MarkdownBody: View {
         var code: [Substring] = []
         var lang = ""
         var inCode = false
+        // One block per paragraph, not per run between fences: while a reply
+        // streams, every finished paragraph is parsed once and only the last
+        // one is parsed again per token (it was the whole reply, every token).
+        func flushProse() {
+            let joined = prose.joined(separator: "\n")
+            prose = []
+            for para in joined.components(separatedBy: "\n\n") {
+                let trimmed = para.trimmingCharacters(in: .newlines)
+                if !trimmed.trimmingCharacters(in: .whitespaces).isEmpty { out.append(.prose(trimmed)) }
+            }
+        }
         for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
             let t = line.trimmingCharacters(in: .whitespaces)
             if t.hasPrefix("```") {
                 if inCode {
                     out.append(.code(lang, code.joined(separator: "\n"))); code = []; inCode = false
                 } else {
-                    let p = prose.joined(separator: "\n")
-                    if !p.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { out.append(.prose(p)) }
-                    prose = []; lang = String(t.dropFirst(3)); inCode = true
+                    flushProse()
+                    lang = String(t.dropFirst(3)); inCode = true
                 }
             } else if inCode { code.append(line) } else { prose.append(line) }
         }
         if inCode { out.append(.code(lang, code.joined(separator: "\n"))) }
-        let p = prose.joined(separator: "\n")
-        if !p.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { out.append(.prose(p)) }
+        flushProse()
         return out
     }
 

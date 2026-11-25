@@ -216,6 +216,8 @@ struct RootView: View {
         case .compareAgents: shell.runCompare()
         case .stop: shell.stop()
         case .send: shell.send()
+        case .chooseModel: shell.showPalette = true
+        case .nextEffort: shell.cycleEffort()
         default: break
         }
     }

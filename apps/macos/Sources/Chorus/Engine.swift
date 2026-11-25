@@ -679,11 +679,27 @@ final class Engine: ObservableObject {
     private func echoUser(_ text: String) {
         compactWork?.cancel()
         pendingPlanAgents = nil
-        echoCounter += 1
         live = LiveTurn()
         lastThoughts = ""
+        // Already shown while the router was choosing (`echoPending`): replace it.
+        events.removeAll { $0.seq < 0 }
+        echoCounter += 1
         events.append(LedgerEvent(seq: Int64.min + echoCounter, kind: "msg", actor: "user", body: text, model_id: nil))
         turnStartedAt = Date()
+    }
+
+    /// Show what the person just sent before a turn exists to carry it (the
+    /// router is still choosing who answers). `echoUser` replaces it when the
+    /// turn starts; `clearEcho` drops it if the send is called off.
+    func echoPending(_ text: String) {
+        events.removeAll { $0.seq < 0 }
+        echoCounter += 1
+        events.append(LedgerEvent(seq: Int64.min + echoCounter, kind: "msg", actor: "user", body: text, model_id: nil))
+    }
+
+    func clearEcho() {
+        guard !busy, events.contains(where: { $0.seq < 0 }) else { return }
+        events.removeAll { $0.seq < 0 }
     }
 
     @Published var turnStartedAt: Date?
