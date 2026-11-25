@@ -256,6 +256,8 @@ final class ShellModel: ObservableObject {
             engine.loadSkills(cwd: key.folder)
         }
         if key.id != engine.sessionID {
+            // Highlight the row now; the transcript follows a beat later.
+            selection = key
             engine.reopen(db: dbPath(for: key.folder), sessionID: key.id)
         }
     }
@@ -352,6 +354,16 @@ final class ShellModel: ObservableObject {
         guard engine.sessionID >= 0, let last = engine.lastAnsweringAgent,
               let target = agent(for: modelID)?.id, !target.isEmpty else { return }
         if target == last { engine.cancelHandoffPrep() } else { engine.prepareHandoff(to: target) }
+    }
+
+    /// ⇧⌘E: the next thinking level of the current model, wrapping round.
+    func cycleEffort() {
+        let id = ModelID(model)
+        let levels = agent(for: model)?.efforts(for: id.base) ?? []
+        guard !levels.isEmpty else { return }
+        let current = id.effort ?? levels.first
+        let i = current.flatMap { levels.firstIndex(of: $0) } ?? 0
+        choose(ModelID.compose(id.base, levels[(i + 1) % levels.count]))
     }
 
     // MARK: sending

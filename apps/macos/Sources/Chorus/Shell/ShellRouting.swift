@@ -69,6 +69,7 @@ extension ShellModel {
         let conserve = PowerManager.shared.shouldConserveEnergyForInference
         let effective = conserve ? "in-process-heuristic" : routerModel
         routingInProgress = true
+        engine.echoPending(send.text)
         routeStatus = .thinking(routerModel: effective, candidates: candidates.count)
         let session = engine.sessionID
         engine.proposeRoute(taskJSON: taskJSON, candidatesJSON: candidatesJSON, routerModel: effective) { [weak self] json in
@@ -113,6 +114,7 @@ extension ShellModel {
     func cancelReviewedRoute() {
         guard let p = pendingRoute else { return }
         routeStatus = nil
+        engine.clearEcho()
         text = p.send.text + (text.isEmpty ? "" : "\n" + text)
         pendingRoute = nil
         flushQueue()
